@@ -1,0 +1,9 @@
+<Solution>
+  <Configurations>
+    <Platform Name="x64" />
+    <Platform Name="x86" />
+  </Configurations>
+  <Project Path="LANCommander.Interposer/LANCommander.Interposer.Injector.vcxproj" Id="8f2a1b3c-4d5e-6f7a-8b9c-0d1e2f3a4b5c" />
+  <Project Path="LANCommander.Interposer/LANCommander.Interposer.vcxproj" Id="61d926cb-eaec-4c45-af2d-571b2c61120a" />
+  <Project Path="LANCommander.Interposer/LANCommander.Interposer.Tests.vcxproj" Id="3c4d5e6f-7a8b-9c0d-e1f2-a3b4c5d6e7f8" />
+</Solution>

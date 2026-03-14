@@ -1,0 +1,6 @@
+Windows Registry Editor Version 5.00
+
+[HKEY_LOCAL_MACHINE\SOFTWARE\EA GAMES\BATTLEFIELD 1942\1.0]
+"PlayerName"="Soldier"
+"Resolution X"=dword:00000320
+"Resolution Y"=dword:00000258
