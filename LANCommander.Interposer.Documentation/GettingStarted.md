@@ -1,3 +1,7 @@
+---
+sidebar_position: 2
+---
+
 # Getting Started
 
 The Interposer works by injecting a DLL into a game process. Once loaded, it installs hooks on common Windows APIs and reads its configuration from files placed next to the DLL. No changes to the game itself are required.

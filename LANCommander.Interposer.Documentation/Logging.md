@@ -1,3 +1,7 @@
+---
+sidebar_position: 3
+---
+
 # Logging
 
 The Interposer can write a detailed access log showing every file and registry operation it intercepts. This log is useful for diagnosing redirect problems, discovering what paths a game uses, and verifying that virtual registry entries are being served correctly.

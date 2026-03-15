@@ -1,3 +1,8 @@
+---
+sidebar_label: Overview
+sidebar_position: 4
+---
+
 # File Redirection
 
 File redirection intercepts calls to `CreateFileW/A`, `GetFileAttributesW/A`, `FindFirstFileW/A`, and the `LoadLibrary` family, replacing path arguments on the fly before the call reaches Windows. The game opens and reads the redirected file without any knowledge that its path was changed.

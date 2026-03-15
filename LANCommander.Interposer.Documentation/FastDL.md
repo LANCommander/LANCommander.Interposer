@@ -1,3 +1,7 @@
+---
+sidebar_position: 6
+---
+
 # FastDL
 
 FastDL (Fast Download) automatically downloads game content from an HTTP server when the game tries to open a file that is missing or out of date. The download is transparent to the game — by the time `CreateFileW` returns, the file is already present on disk.

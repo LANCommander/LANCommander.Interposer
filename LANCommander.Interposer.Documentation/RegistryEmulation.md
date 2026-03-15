@@ -1,3 +1,7 @@
+---
+sidebar_position: 5
+---
+
 # Registry Emulation
 
 Registry emulation intercepts Windows registry API calls and serves reads and writes from an in-memory store instead of the real Windows registry. The store is initialized from a `Registry.reg` file placed inside the `.interposer\` directory next to the DLL, and any writes made by the game are persisted back to that file automatically.

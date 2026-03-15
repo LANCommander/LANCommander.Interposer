@@ -1,3 +1,8 @@
+---
+sidebar_label: Overview
+sidebar_position: 1
+---
+
 # Introduction
 The LANCommander Interposer is a set of Windows API hooks designed to make games easier to run on modern platforms. The current version of the interposer adds the following functionality to almost any game:
 
