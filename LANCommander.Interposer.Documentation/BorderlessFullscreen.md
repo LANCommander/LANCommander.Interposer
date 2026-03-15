@@ -1,8 +1,8 @@
 # Borderless Fullscreen
 
-The Interposer automatically converts game windows to borderless fullscreen when they are created. The game runs at its intended resolution but without a title bar, borders, or resize handles, and the window is centered on the monitor it appears on.
+The Interposer can convert game windows to borderless fullscreen when they are created. The game runs at its intended resolution but without a title bar, borders, or resize handles, and the window is centered on the monitor it appears on.
 
-This feature is always active — no configuration is required.
+This feature is opt-in and must be enabled in `.interposer/Config.yml`.
 
 ## What It Does
 
@@ -41,8 +41,13 @@ Splash screens and other short-lived windows are typically dismissed before the 
 | `SetWindowPos` | Prevent the game from moving or resizing the window after creation. |
 | `SetWindowLongW` / `SetWindowLongA` | Prevent the game from re-applying border styles after creation. |
 
-## No Configuration Required
+## Enabling Borderless Fullscreen
 
-There are no `Config.yml` settings for this feature. It applies automatically to every game process the DLL is loaded into.
+Set `Borderless: true` in the `Window` section of `.interposer/Config.yml`:
 
-If you are using the Interposer in a context where borderless fullscreen is not wanted, the only way to suppress it is to build the DLL without the window hooks. There is no runtime toggle.
+```yaml
+Window:
+  Borderless: true
+```
+
+The default is `false` — if the `Window` section is absent the game window is left untouched.

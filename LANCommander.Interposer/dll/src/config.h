@@ -19,8 +19,9 @@ struct FastDLPath {
 };
 
 // Populated by LoadConfig(). Read-only after that.
-extern bool g_logFiles;     // true = log file I/O operations
-extern bool g_logRegistry;  // true = log registry operations
+extern bool g_logFiles;         // true = log file I/O operations
+extern bool g_logRegistry;      // true = log registry operations
+extern bool g_borderlessEnabled; // true = apply borderless fullscreen to game windows
 
 extern bool                      g_fastdlEnabled;
 extern bool                      g_logFastDL;

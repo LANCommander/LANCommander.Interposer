@@ -8,8 +8,9 @@
 // ---------------------------------------------------------------------------
 // Globals (definitions)
 // ---------------------------------------------------------------------------
-bool g_logFiles    = false;
-bool g_logRegistry = false;
+bool g_logFiles         = false;
+bool g_logRegistry      = false;
+bool g_borderlessEnabled = false;
 
 bool                      g_fastdlEnabled             = false;
 bool                      g_logFastDL                 = true;
@@ -361,6 +362,13 @@ void LoadConfig()
                 }
             }
         }
+    }
+
+    // ── window ────────────────────────────────────────────────────────────────
+    if (YAML::Node window = root["Window"])
+    {
+        if (window["Borderless"])
+            g_borderlessEnabled = window["Borderless"].as<bool>(false);
     }
 
     // ── Open log at .interposer\Logs\<timestamp>.log ──────────────────────────
