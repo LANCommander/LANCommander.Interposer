@@ -193,13 +193,13 @@ static void WriteInterposerYaml(const std::wstring& yamlPath,
     //
     // In this C++ string literal, \\\\ -> \\ in the file (two backslashes in YAML = one regex backslash).
     std::string content =
-        "settings:\n"
-        "  logFiles: true\n"
-        "  logRegistry: true\n"
+        "Logging:\n"
+        "  Files: true\n"
+        "  Registry: true\n"
         "\n"
-        "fileRedirects:\n"
-        "  - pattern: 'C:\\\\TestGame\\\\Saves\\\\(.+)'\n"
-        "    replacement: '" + WideToUtf8(redirectBaseDir) + "$1'\n";
+        "Redirects:\n"
+        "  - Pattern: 'C:\\\\TestGame\\\\Saves\\\\(.+)'\n"
+        "    Replacement: '" + WideToUtf8(redirectBaseDir) + "$1'\n";
     WriteTextFile(yamlPath, content);
 }
 
