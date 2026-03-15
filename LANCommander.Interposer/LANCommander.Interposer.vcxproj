@@ -88,7 +88,7 @@
       <SubSystem>Windows</SubSystem>
       <GenerateDebugInformation>true</GenerateDebugInformation>
       <AdditionalLibraryDirectories>$(SolutionDir)vcpkg_installed_x86\x86-windows-static-md\debug\lib;%(AdditionalLibraryDirectories)</AdditionalLibraryDirectories>
-      <AdditionalDependencies>minhook.x32d.lib;%(AdditionalDependencies)</AdditionalDependencies>
+      <AdditionalDependencies>minhook.x32d.lib;winhttp.lib;%(AdditionalDependencies)</AdditionalDependencies>
     </Link>
   </ItemDefinitionGroup>
 
@@ -107,7 +107,7 @@
       <SubSystem>Windows</SubSystem>
       <GenerateDebugInformation>true</GenerateDebugInformation>
       <AdditionalLibraryDirectories>$(SolutionDir)vcpkg_installed_x86\x86-windows-static-md\lib;%(AdditionalLibraryDirectories)</AdditionalLibraryDirectories>
-      <AdditionalDependencies>minhook.x32.lib;%(AdditionalDependencies)</AdditionalDependencies>
+      <AdditionalDependencies>minhook.x32.lib;winhttp.lib;%(AdditionalDependencies)</AdditionalDependencies>
     </Link>
   </ItemDefinitionGroup>
 
@@ -124,7 +124,7 @@
       <SubSystem>Windows</SubSystem>
       <GenerateDebugInformation>true</GenerateDebugInformation>
       <AdditionalLibraryDirectories>$(SolutionDir)vcpkg_installed\x64-windows-static-md\debug\lib;%(AdditionalLibraryDirectories)</AdditionalLibraryDirectories>
-      <AdditionalDependencies>minhook.x64d.lib;%(AdditionalDependencies)</AdditionalDependencies>
+      <AdditionalDependencies>minhook.x64d.lib;winhttp.lib;%(AdditionalDependencies)</AdditionalDependencies>
     </Link>
   </ItemDefinitionGroup>
 
@@ -143,13 +143,14 @@
       <SubSystem>Windows</SubSystem>
       <GenerateDebugInformation>true</GenerateDebugInformation>
       <AdditionalLibraryDirectories>$(SolutionDir)vcpkg_installed\x64-windows-static-md\lib;%(AdditionalLibraryDirectories)</AdditionalLibraryDirectories>
-      <AdditionalDependencies>minhook.x64.lib;%(AdditionalDependencies)</AdditionalDependencies>
+      <AdditionalDependencies>minhook.x64.lib;winhttp.lib;%(AdditionalDependencies)</AdditionalDependencies>
     </Link>
   </ItemDefinitionGroup>
 
   <ItemGroup>
     <ClCompile Include="dll\src\config.cpp" />
     <ClCompile Include="dll\src\dllmain.cpp" />
+    <ClCompile Include="dll\src\fastdl.cpp" />
     <ClCompile Include="dll\src\files.cpp" />
     <ClCompile Include="dll\src\hooks.cpp" />
     <ClCompile Include="dll\src\registry.cpp" />
@@ -158,6 +159,7 @@
 
   <ItemGroup>
     <ClInclude Include="dll\src\config.h" />
+    <ClInclude Include="dll\src\fastdl.h" />
     <ClInclude Include="dll\src\files.h" />
     <ClInclude Include="dll\src\hooks.h" />
     <ClInclude Include="dll\src\registry.h" />

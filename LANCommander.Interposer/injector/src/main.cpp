@@ -20,16 +20,22 @@ static void PrintUsage()
         L"LANCommander.Interposer.dll next to itself.\n"
         L"\n"
         L"Inject into a running process:\n"
-        L"  Injector.exe <process-name-or-PID> [dll-path]\n"
+        L"  Injector.exe [--fastdl-url <url>] <process-name-or-PID> [dll-path]\n"
         L"\n"
         L"Launch a game and inject before its first instruction runs:\n"
-        L"  Injector.exe --launch <exe-path> [dll-path]\n"
-        L"  Injector.exe --launch <exe-path> [game-args ...] -- [dll-path]\n"
+        L"  Injector.exe [--fastdl-url <url>] --launch <exe-path> [dll-path]\n"
+        L"  Injector.exe [--fastdl-url <url>] --launch <exe-path> [game-args ...] -- [dll-path]\n"
+        L"\n"
+        L"Options:\n"
+        L"  --fastdl-url <url>  Override the FastDL BaseUrl at runtime without editing\n"
+        L"                      interposer.ini. The URL is passed to the DLL via a\n"
+        L"                      named memory-mapped file (Local\\InterposerFastDL_<pid>).\n"
         L"\n"
         L"Examples:\n"
         L"  Injector.exe game.exe\n"
         L"  Injector.exe game.exe interposer.dll\n"
         L"  Injector.exe 1234\n"
+        L"  Injector.exe --fastdl-url http://fastdl.lan/ --launch \"C:\\Games\\game.exe\"\n"
         L"  Injector.exe --launch \"C:\\Games\\game.exe\"\n"
         L"  Injector.exe --launch \"C:\\Games\\game.exe\" interposer.dll\n"
         L"  Injector.exe --launch \"C:\\Games\\game.exe\" -fullscreen -- interposer.dll\n"
@@ -210,6 +216,45 @@ static DWORD FindProcessByName(const wchar_t* processName)
 }
 
 // ---------------------------------------------------------------------------
+// FastDL named MMF helpers
+// Creates a named MMF "Local\InterposerFastDL_<pid>" containing the UTF-8
+// encoded URL so that InitFastDL() inside the DLL can read it.
+// Returns a valid HANDLE on success, or NULL on failure.
+// The caller must CloseHandle() the returned handle after injection completes.
+// ---------------------------------------------------------------------------
+static HANDLE CreateFastDLMapping(DWORD pid, const std::wstring& url)
+{
+    wchar_t mmfName[64]{};
+    wsprintfW(mmfName, L"Local\\InterposerFastDL_%lu", pid);
+
+    HANDLE hMMF = CreateFileMappingW(
+        INVALID_HANDLE_VALUE, nullptr,
+        PAGE_READWRITE, 0, 2048, mmfName);
+
+    if (!hMMF)
+    {
+        wprintf(L"[!] Failed to create FastDL MMF (error %lu).\n", GetLastError());
+        return nullptr;
+    }
+
+    void* view = MapViewOfFile(hMMF, FILE_MAP_WRITE, 0, 0, 2048);
+    if (!view)
+    {
+        wprintf(L"[!] Failed to map FastDL MMF view (error %lu).\n", GetLastError());
+        CloseHandle(hMMF);
+        return nullptr;
+    }
+
+    // Write URL as UTF-8 with null terminator
+    int n = WideCharToMultiByte(CP_UTF8, 0, url.c_str(), -1, nullptr, 0, nullptr, nullptr);
+    if (n > 0 && n <= 2048)
+        WideCharToMultiByte(CP_UTF8, 0, url.c_str(), -1, static_cast<char*>(view), n, nullptr, nullptr);
+
+    UnmapViewOfFile(view);
+    return hMMF;
+}
+
+// ---------------------------------------------------------------------------
 // Core injection
 // Injects dllPath into hProcess via a remote LoadLibraryW thread.
 // Returns true on success.
@@ -298,12 +343,13 @@ static bool InjectDll(HANDLE hProcess, const wchar_t* dllPath)
 // ---------------------------------------------------------------------------
 // Inject mode: inject into an already-running process
 // ---------------------------------------------------------------------------
-static int ModeInject(const wchar_t* target, const wchar_t* dllPath)
+static int ModeInject(const wchar_t* target, const wchar_t* dllPath,
+                      const std::wstring& fastdlUrl)
 {
     DWORD pid = 0;
     wchar_t* end = nullptr;
     DWORD parsed = static_cast<DWORD>(wcstoul(target, &end, 10));
-    
+
     if (end != target && *end == L'\0')
     {
         pid = parsed;
@@ -312,15 +358,15 @@ static int ModeInject(const wchar_t* target, const wchar_t* dllPath)
     else
     {
         wprintf(L"[*] Searching for process: %ls\n", target);
-        
+
         pid = FindProcessByName(target);
-        
+
         if (!pid)
         {
             wprintf(L"[!] Process not found: %ls\n", target);
             return 1;
         }
-        
+
         wprintf(L"[*] Found PID: %lu\n", pid);
     }
 
@@ -332,22 +378,32 @@ static int ModeInject(const wchar_t* target, const wchar_t* dllPath)
         PROCESS_QUERY_INFORMATION;
 
     HANDLE processHandle = OpenProcess(ACCESS, FALSE, pid);
-    
+
     if (!processHandle)
     {
         wprintf(L"[!] OpenProcess failed (error %lu). Try running as Administrator.\n",
             GetLastError());
         return 1;
     }
-    
+
     wprintf(L"[*] Opened process handle.\n");
 
     WarnBitnessMismatch(processHandle);
 
+    // Create FastDL MMF before injection so InitFastDL() can read it
+    HANDLE hMMF = nullptr;
+    if (!fastdlUrl.empty())
+    {
+        hMMF = CreateFastDLMapping(pid, fastdlUrl);
+        if (hMMF)
+            wprintf(L"[*] FastDL URL MMF created for PID %lu.\n", pid);
+    }
+
     bool ok = InjectDll(processHandle, dllPath);
-    
+
+    if (hMMF) CloseHandle(hMMF);
     CloseHandle(processHandle);
-    
+
     return ok ? 0 : 1;
 }
 
@@ -356,7 +412,8 @@ static int ModeInject(const wchar_t* target, const wchar_t* dllPath)
 // ---------------------------------------------------------------------------
 static int ModeLaunch(const wchar_t* exePath,
                       const std::vector<std::wstring>& gameArgs,
-                      const wchar_t* dllPath)
+                      const wchar_t* dllPath,
+                      const std::wstring& fastdlUrl)
 {
     // Verify the executable exists
     if (GetFileAttributesW(exePath) == INVALID_FILE_ATTRIBUTES)
@@ -417,7 +474,18 @@ static int ModeLaunch(const wchar_t* exePath,
 
     WarnBitnessMismatch(processInformation.hProcess);
 
+    // Create FastDL MMF before injection so InitFastDL() can read it
+    HANDLE hMMF = nullptr;
+    if (!fastdlUrl.empty())
+    {
+        hMMF = CreateFastDLMapping(processInformation.dwProcessId, fastdlUrl);
+        if (hMMF)
+            wprintf(L"[*] FastDL URL MMF created for PID %lu.\n", processInformation.dwProcessId);
+    }
+
     bool ok = InjectDll(processInformation.hProcess, dllPath);
+
+    if (hMMF) CloseHandle(hMMF);
 
     if (!ok)
     {
@@ -425,7 +493,7 @@ static int ModeLaunch(const wchar_t* exePath,
         TerminateProcess(processInformation.hProcess, 1);
         CloseHandle(processInformation.hThread);
         CloseHandle(processInformation.hProcess);
-        
+
         return 1;
     }
 
@@ -446,27 +514,51 @@ static int ModeLaunch(const wchar_t* exePath,
 // ---------------------------------------------------------------------------
 int wmain(int argc, wchar_t* argv[])
 {
+    // ---- Pre-scan for global options (--fastdl-url <url>)
+    std::wstring fastdlUrl;
+    std::vector<wchar_t*> args;
+
+    for (int i = 1; i < argc; ++i)
+    {
+        if (wcscmp(argv[i], L"--fastdl-url") == 0)
+        {
+            if (i + 1 >= argc)
+            {
+                wprintf(L"[!] --fastdl-url requires a URL argument.\n\n");
+                PrintUsage();
+                return 1;
+            }
+            fastdlUrl = argv[++i];
+        }
+        else
+        {
+            args.push_back(argv[i]);
+        }
+    }
+
+    int filteredArgc = static_cast<int>(args.size());
+
     // ---- Launch mode: --launch <exe> [args...] -- <dll>
     //                or --launch <exe> <dll>               (no game args)
-    if (argc >= 2 && wcscmp(argv[1], L"--launch") == 0)
+    if (filteredArgc >= 1 && wcscmp(args[0], L"--launch") == 0)
     {
-        if (argc < 3)
+        if (filteredArgc < 2)
         {
             wprintf(L"[!] --launch requires at least an executable path.\n\n");
             PrintUsage();
             return 1;
         }
 
-        const wchar_t* exeArguments = argv[2];
+        const wchar_t* exeArguments = args[1];
         const wchar_t* dllArguments = nullptr;
         std::vector<std::wstring> gameArguments;
 
         // Scan for the "--" separator
         int separatorIndex = -1;
-        
-        for (int i = 3; i < argc; ++i)
+
+        for (int i = 2; i < filteredArgc; ++i)
         {
-            if (wcscmp(argv[i], L"--") == 0)
+            if (wcscmp(args[i], L"--") == 0)
             {
                 separatorIndex = i;
                 break;
@@ -477,60 +569,60 @@ int wmain(int argc, wchar_t* argv[])
         {
             // Everything before "--" is game args; the first token after "--" (if
             // any) is the DLL path. Omitting it triggers default DLL discovery.
-            for (int i = 3; i < separatorIndex; ++i)
-                gameArguments.push_back(argv[i]);
-            
-            if (separatorIndex + 1 < argc)
-                dllArguments = argv[separatorIndex + 1];
+            for (int i = 2; i < separatorIndex; ++i)
+                gameArguments.push_back(args[i]);
+
+            if (separatorIndex + 1 < filteredArgc)
+                dllArguments = args[separatorIndex + 1];
         }
-        else if (argc >= 4)
+        else if (filteredArgc >= 3)
         {
             // No "--" separator. If the last argument ends in ".dll" (case-insensitive)
             // treat it as the DLL path; otherwise treat all extra arguments as game
             // args and fall back to default DLL discovery.
-            const wchar_t* last = argv[argc - 1];
+            const wchar_t* last = args[filteredArgc - 1];
             size_t length = wcslen(last);
-            
+
             bool lastIsDll = (length >= 4 && _wcsicmp(last + length - 4, L".dll") == 0);
 
             if (lastIsDll)
             {
                 dllArguments = last;
-                
-                for (int i = 3; i < argc - 1; ++i)
-                    gameArguments.push_back(argv[i]);
+
+                for (int i = 2; i < filteredArgc - 1; ++i)
+                    gameArguments.push_back(args[i]);
             }
             else
             {
                 // No DLL arg; all extra tokens are game args
-                for (int i = 3; i < argc; ++i)
-                    gameArguments.push_back(argv[i]);
+                for (int i = 2; i < filteredArgc; ++i)
+                    gameArguments.push_back(args[i]);
             }
         }
-        // argc == 3: just "--launch <exe>", no extra args → dllArg stays null
+        // filteredArgc == 2: just "--launch <exe>", no extra args → dllArg stays null
 
         wchar_t dllPath[MAX_PATH]{};
-        
+
         if (!ResolveDll(dllArguments, dllPath))
             return 1;
 
-        return ModeLaunch(exeArguments, gameArguments, dllPath);
+        return ModeLaunch(exeArguments, gameArguments, dllPath, fastdlUrl);
     }
 
     // ---- Inject mode: <process-name-or-PID> [dll]
-    if (argc == 2 || argc == 3)
+    if (filteredArgc == 1 || filteredArgc == 2)
     {
-        const wchar_t* dllArguments = (argc == 3) ? argv[2] : nullptr;
+        const wchar_t* dllArguments = (filteredArgc == 2) ? args[1] : nullptr;
 
         wchar_t dllPath[MAX_PATH]{};
         if (!ResolveDll(dllArguments, dllPath))
             return 1;
 
-        return ModeInject(argv[1], dllPath);
+        return ModeInject(args[0], dllPath, fastdlUrl);
     }
 
     // ---- Bad args
     PrintUsage();
-    
+
     return 1;
 }

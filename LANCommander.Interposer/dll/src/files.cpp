@@ -1,9 +1,15 @@
 #include "files.h"
 #include "config.h"
+#include "fastdl.h"
 
 #include <windows.h>
 #include <MinHook.h>
 #include <string>
+
+// Reentrancy guard: FastDL downloads call CreateFileW internally (to write
+// temp files, read local files for CRC, etc.). We must not re-enter the hook
+// chain when we are already handling a FastDL operation on this thread.
+static thread_local bool g_inFastDLHook = false;
 
 // ---------------------------------------------------------------------------
 // Trampoline types & pointers
@@ -45,6 +51,16 @@ static HANDLE CreateFileWImpl(
         LogFileAccess(L"[FILE REDIRECT]", path.c_str(), redirected.c_str());
     else
         LogFileAccess(AccessVerb(dwDesiredAccess), path.c_str());
+
+    // FastDL: for read-only opens, ensure the file is downloaded if eligible.
+    // Guard against reentrancy caused by CreateFileW calls inside TryFastDLDownload.
+    if (!g_inFastDLHook &&
+        !(dwDesiredAccess & (GENERIC_WRITE | FILE_WRITE_DATA | FILE_APPEND_DATA)))
+    {
+        g_inFastDLHook = true;
+        TryFastDLDownload(redirected);
+        g_inFastDLHook = false;
+    }
 
     return g_origCreateFileW(
         redirected.c_str(), dwDesiredAccess, dwShareMode,
@@ -105,7 +121,23 @@ static DWORD WINAPI HookGetFileAttributesW(LPCWSTR lpFileName)
     }
 
     LogFileAccess(L"[FILE ATTR]    ", path.c_str());
-    return g_origGetFileAttributesW(lpFileName);
+
+    DWORD attrs = g_origGetFileAttributesW(lpFileName);
+
+    // FastDL: if the file doesn't exist locally but is available on the server,
+    // report FILE_ATTRIBUTE_NORMAL so the game proceeds to open it (which will
+    // trigger the actual download in CreateFileW).
+    if (attrs == INVALID_FILE_ATTRIBUTES && !g_inFastDLHook)
+    {
+        g_inFastDLHook = true;
+        bool exists = FastDLFileExists(path);
+        g_inFastDLHook = false;
+
+        if (exists)
+            return FILE_ATTRIBUTE_NORMAL;
+    }
+
+    return attrs;
 }
 
 static DWORD WINAPI HookGetFileAttributesA(LPCSTR lpFileName)
@@ -129,7 +161,21 @@ static DWORD WINAPI HookGetFileAttributesA(LPCSTR lpFileName)
     }
 
     LogFileAccess(L"[FILE ATTR]    ", wpath.c_str());
-    return g_origGetFileAttributesA(lpFileName);
+
+    DWORD attrs = g_origGetFileAttributesA(lpFileName);
+
+    // FastDL: same existence check as the W variant
+    if (attrs == INVALID_FILE_ATTRIBUTES && !g_inFastDLHook)
+    {
+        g_inFastDLHook = true;
+        bool exists = FastDLFileExists(wpath);
+        g_inFastDLHook = false;
+
+        if (exists)
+            return FILE_ATTRIBUTE_NORMAL;
+    }
+
+    return attrs;
 }
 
 // ---------------------------------------------------------------------------

@@ -10,6 +10,12 @@
 bool g_logFiles    = false;
 bool g_logRegistry = false;
 
+bool                      g_fastdlEnabled    = false;
+bool                      g_logFastDL        = true;
+std::wstring              g_fastdlBaseUrl;
+std::vector<std::wstring> g_fastdlAllowedExtensions;
+std::vector<FastDLPath>   g_fastdlPaths;
+
 static std::vector<FileRedirect> g_redirects;
 static HANDLE                    g_logHandle = INVALID_HANDLE_VALUE;
 static std::mutex                g_logMutex;
@@ -136,6 +142,14 @@ void LogRegistryAccess(const wchar_t* verb, const wchar_t* keyPath, const wchar_
     }
     else
         WriteLogLine(verb, keyPath, nullptr);
+}
+
+void LogFastDLAccess(const wchar_t* verb, const wchar_t* url, const wchar_t* localPath)
+{
+    if (!g_logFastDL)
+        return;
+
+    WriteLogLine(verb, url, localPath);
 }
 
 void CloseLog()
@@ -293,16 +307,78 @@ void LoadConfig()
             }
             catch (const std::regex_error&) { /* skip malformed patterns */ }
         }
+        else if (currentSection == L"fastdl")
+        {
+            std::wstring lkey = ToLowerW(key);
+
+            if (lkey == L"enabled")
+                g_fastdlEnabled = ParseBool(value);
+            else if (lkey == L"baseurl")
+                g_fastdlBaseUrl = value;
+            else if (lkey == L"logdownloads")
+                g_logFastDL = ParseBool(value);
+            else if (lkey == L"allowedextensions")
+            {
+                // Split comma-separated list, normalize each extension
+                size_t start = 0;
+                while (start <= value.size())
+                {
+                    size_t comma = value.find(L',', start);
+                    if (comma == std::wstring::npos) comma = value.size();
+
+                    std::wstring ext = Trim(value.substr(start, comma - start));
+                    ext = ToLowerW(ext);
+
+                    if (!ext.empty())
+                    {
+                        if (ext[0] != L'.') ext = L'.' + ext;
+                        g_fastdlAllowedExtensions.push_back(ext);
+                    }
+
+                    start = comma + 1;
+                }
+            }
+        }
+        else if (currentSection == L"fastdlpaths")
+        {
+            // key = local directory prefix, value = remote sub-path
+            FastDLPath fdp;
+            fdp.localPrefix   = key;
+            fdp.remoteSubPath = value;
+
+            // Ensure localPrefix ends with a backslash so prefix matching is
+            // unambiguous (prevents C:\foo matching C:\foobar).
+            if (!fdp.localPrefix.empty())
+            {
+                wchar_t last = fdp.localPrefix.back();
+                if (last != L'\\' && last != L'/')
+                    fdp.localPrefix += L'\\';
+            }
+
+            // Strip any trailing slash from remoteSubPath
+            while (!fdp.remoteSubPath.empty() &&
+                   (fdp.remoteSubPath.back() == L'/' || fdp.remoteSubPath.back() == L'\\'))
+                fdp.remoteSubPath.pop_back();
+
+            g_fastdlPaths.push_back(std::move(fdp));
+        }
     };
 
     std::wstring cursor;
     
-    for (wchar_t c : content)
+    for (wchar_t character : content)
     {
-        if (c == L'\n') { processLine(cursor); cursor.clear(); }
-        else            cursor += c;
+        if (character == L'\n')
+        {
+            processLine(cursor); 
+            cursor.clear();
+        }
+        else
+            cursor += character;
     }
-    if (!cursor.empty()) processLine(cursor);
+    
+    if (!cursor.empty())
+        processLine(cursor);
 
     // Open log file if a path was provided
     if (!logFilePath.empty())

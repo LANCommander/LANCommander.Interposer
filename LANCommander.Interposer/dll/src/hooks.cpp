@@ -1,5 +1,6 @@
 #include "hooks.h"
 #include "config.h"
+#include "fastdl.h"
 #include "files.h"
 #include "registry.h"
 #include "window.h"
@@ -220,6 +221,7 @@ void InstallHooks()
     LoadConfig();
     InstallRegistryHooks();
     InstallFileHooks();
+    InitFastDL();
 
     MH_CreateHookApi(L"user32", "CreateWindowExW",
         reinterpret_cast<LPVOID>(HookCreateWindowExW),
@@ -247,6 +249,7 @@ void InstallHooks()
 void RemoveHooks()
 {
     RemoveRegistryHooks();
+    ShutdownFastDL();
     MH_DisableHook(MH_ALL_HOOKS);
     MH_Uninitialize();
     CloseLog();
