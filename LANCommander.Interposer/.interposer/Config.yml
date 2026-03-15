@@ -6,6 +6,22 @@
 # (\n, \t, etc.) and should be avoided for paths.
 
 # ---------------------------------------------------------------------------
+# Player
+#
+#   Username     - Username returned to the game when it calls GetUserNameW/A.
+#                  Leave empty (the default) to return the real Windows username.
+#                  Can be overridden at launch time with --username <name>.
+#
+#   ComputerName - Computer name returned to the game when it calls
+#                  GetComputerNameW/A. Leave empty (the default) to return the
+#                  real Windows computer name. Can be overridden at launch time
+#                  with --computername <name>.
+# ---------------------------------------------------------------------------
+Player:
+  Username: ''
+  ComputerName: ''
+
+# ---------------------------------------------------------------------------
 # Window
 #
 #   Borderless - true to strip border styles from the game window and center

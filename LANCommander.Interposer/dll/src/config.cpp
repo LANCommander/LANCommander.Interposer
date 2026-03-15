@@ -8,9 +8,11 @@
 // ---------------------------------------------------------------------------
 // Globals (definitions)
 // ---------------------------------------------------------------------------
-bool g_logFiles         = false;
-bool g_logRegistry      = false;
-bool g_borderlessEnabled = false;
+bool         g_logFiles         = false;
+bool         g_logRegistry      = false;
+bool         g_borderlessEnabled = false;
+std::wstring g_username;
+std::wstring g_computername;
 
 bool                      g_fastdlEnabled             = false;
 bool                      g_logFastDL                 = true;
@@ -369,6 +371,15 @@ void LoadConfig()
     {
         if (window["Borderless"])
             g_borderlessEnabled = window["Borderless"].as<bool>(false);
+    }
+
+    // ── player ────────────────────────────────────────────────────────────────
+    if (YAML::Node player = root["Player"])
+    {
+        if (player["Username"])
+            g_username = Utf8ToWide(player["Username"].as<std::string>(""));
+        if (player["ComputerName"])
+            g_computername = Utf8ToWide(player["ComputerName"].as<std::string>(""));
     }
 
     // ── Open log at .interposer\Logs\<timestamp>.log ──────────────────────────

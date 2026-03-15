@@ -2,6 +2,7 @@
 #include "config.h"
 #include "fastdl.h"
 #include "files.h"
+#include "identity.h"
 #include "registry.h"
 #include "window.h"
 
@@ -222,6 +223,7 @@ void InstallHooks()
     InstallRegistryHooks();
     InstallFileHooks();
     InitFastDL();
+    InstallIdentityHooks();
 
     if (g_borderlessEnabled)
     {

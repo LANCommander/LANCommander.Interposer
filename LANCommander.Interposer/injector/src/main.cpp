@@ -20,22 +20,32 @@ static void PrintUsage()
         L"LANCommander.Interposer.dll next to itself.\n"
         L"\n"
         L"Inject into a running process:\n"
-        L"  Injector.exe [--fastdl-url <url>] <process-name-or-PID> [dll-path]\n"
+        L"  Injector.exe [options] <process-name-or-PID> [dll-path]\n"
         L"\n"
         L"Launch a game and inject before its first instruction runs:\n"
-        L"  Injector.exe [--fastdl-url <url>] --launch <exe-path> [dll-path]\n"
-        L"  Injector.exe [--fastdl-url <url>] --launch <exe-path> [game-args ...] -- [dll-path]\n"
+        L"  Injector.exe [options] --launch <exe-path> [dll-path]\n"
+        L"  Injector.exe [options] --launch <exe-path> [game-args ...] -- [dll-path]\n"
         L"\n"
         L"Options:\n"
-        L"  --fastdl-url <url>  Override the FastDL BaseUrl at runtime without editing\n"
-        L"                      Config.yml. The URL is passed to the DLL via a\n"
-        L"                      named memory-mapped file (Local\\InterposerFastDL_<pid>).\n"
+        L"  --fastdl-url <url>   Override the FastDL BaseUrl at runtime without editing\n"
+        L"                       Config.yml. The URL is passed to the DLL via a\n"
+        L"                       named memory-mapped file (Local\\InterposerFastDL_<pid>).\n"
+        L"\n"
+        L"  --username <name>    Override the username returned by GetUserNameW/A.\n"
+        L"                       Passed to the DLL via a named memory-mapped file\n"
+        L"                       (Local\\InterposerUsername_<pid>).\n"
+        L"\n"
+        L"  --computername <n>   Override the computer name returned by\n"
+        L"                       GetComputerNameW/A. Passed via a named\n"
+        L"                       memory-mapped file (Local\\InterposerComputerName_<pid>).\n"
         L"\n"
         L"Examples:\n"
         L"  Injector.exe game.exe\n"
         L"  Injector.exe game.exe interposer.dll\n"
         L"  Injector.exe 1234\n"
         L"  Injector.exe --fastdl-url http://fastdl.lan/ --launch \"C:\\Games\\game.exe\"\n"
+        L"  Injector.exe --username Player1 --launch \"C:\\Games\\game.exe\"\n"
+        L"  Injector.exe --computername GAMEPC --launch \"C:\\Games\\game.exe\"\n"
         L"  Injector.exe --launch \"C:\\Games\\game.exe\"\n"
         L"  Injector.exe --launch \"C:\\Games\\game.exe\" interposer.dll\n"
         L"  Injector.exe --launch \"C:\\Games\\game.exe\" -fullscreen -- interposer.dll\n"
@@ -255,6 +265,83 @@ static HANDLE CreateFastDLMapping(DWORD pid, const std::wstring& url)
 }
 
 // ---------------------------------------------------------------------------
+// Username named MMF helpers
+// Creates a named MMF "Local\InterposerUsername_<pid>" containing the UTF-8
+// encoded username so that InstallIdentityHooks() inside the DLL can read it.
+// Returns a valid HANDLE on success, or NULL on failure.
+// The caller must CloseHandle() the returned handle after injection completes.
+// ---------------------------------------------------------------------------
+static HANDLE CreateUsernameMapping(DWORD pid, const std::wstring& username)
+{
+    wchar_t mmfName[64]{};
+    wsprintfW(mmfName, L"Local\\InterposerUsername_%lu", pid);
+
+    HANDLE hMMF = CreateFileMappingW(
+        INVALID_HANDLE_VALUE, nullptr,
+        PAGE_READWRITE, 0, 512, mmfName);
+
+    if (!hMMF)
+    {
+        wprintf(L"[!] Failed to create username MMF (error %lu).\n", GetLastError());
+        return nullptr;
+    }
+
+    void* view = MapViewOfFile(hMMF, FILE_MAP_WRITE, 0, 0, 512);
+    if (!view)
+    {
+        wprintf(L"[!] Failed to map username MMF view (error %lu).\n", GetLastError());
+        CloseHandle(hMMF);
+        return nullptr;
+    }
+
+    // Write username as UTF-8 with null terminator
+    int n = WideCharToMultiByte(CP_UTF8, 0, username.c_str(), -1, nullptr, 0, nullptr, nullptr);
+    if (n > 0 && n <= 512)
+        WideCharToMultiByte(CP_UTF8, 0, username.c_str(), -1, static_cast<char*>(view), n, nullptr, nullptr);
+
+    UnmapViewOfFile(view);
+    return hMMF;
+}
+
+// ---------------------------------------------------------------------------
+// Computer name named MMF helpers
+// Creates a named MMF "Local\InterposerComputerName_<pid>" containing the
+// UTF-8 encoded name so that InstallIdentityHooks() inside the DLL can read it.
+// Returns a valid HANDLE on success, or NULL on failure.
+// The caller must CloseHandle() the returned handle after injection completes.
+// ---------------------------------------------------------------------------
+static HANDLE CreateComputerNameMapping(DWORD pid, const std::wstring& name)
+{
+    wchar_t mmfName[64]{};
+    wsprintfW(mmfName, L"Local\\InterposerComputerName_%lu", pid);
+
+    HANDLE hMMF = CreateFileMappingW(
+        INVALID_HANDLE_VALUE, nullptr,
+        PAGE_READWRITE, 0, 512, mmfName);
+
+    if (!hMMF)
+    {
+        wprintf(L"[!] Failed to create computer name MMF (error %lu).\n", GetLastError());
+        return nullptr;
+    }
+
+    void* view = MapViewOfFile(hMMF, FILE_MAP_WRITE, 0, 0, 512);
+    if (!view)
+    {
+        wprintf(L"[!] Failed to map computer name MMF view (error %lu).\n", GetLastError());
+        CloseHandle(hMMF);
+        return nullptr;
+    }
+
+    int n = WideCharToMultiByte(CP_UTF8, 0, name.c_str(), -1, nullptr, 0, nullptr, nullptr);
+    if (n > 0 && n <= 512)
+        WideCharToMultiByte(CP_UTF8, 0, name.c_str(), -1, static_cast<char*>(view), n, nullptr, nullptr);
+
+    UnmapViewOfFile(view);
+    return hMMF;
+}
+
+// ---------------------------------------------------------------------------
 // Core injection
 // Injects dllPath into hProcess via a remote LoadLibraryW thread.
 // Returns true on success.
@@ -344,7 +431,9 @@ static bool InjectDll(HANDLE hProcess, const wchar_t* dllPath)
 // Inject mode: inject into an already-running process
 // ---------------------------------------------------------------------------
 static int ModeInject(const wchar_t* target, const wchar_t* dllPath,
-                      const std::wstring& fastdlUrl)
+                      const std::wstring& fastdlUrl,
+                      const std::wstring& username,
+                      const std::wstring& computername)
 {
     DWORD pid = 0;
     wchar_t* end = nullptr;
@@ -390,18 +479,44 @@ static int ModeInject(const wchar_t* target, const wchar_t* dllPath,
 
     WarnBitnessMismatch(processHandle);
 
-    // Create FastDL MMF before injection so InitFastDL() can read it
-    HANDLE hMMF = nullptr;
+    // Create named MMFs before injection so the DLL can read them
+    HANDLE hFastDLMMF      = nullptr;
+    HANDLE hUsernameMMF    = nullptr;
+    HANDLE hComputerNameMMF = nullptr;
+    
     if (!fastdlUrl.empty())
     {
-        hMMF = CreateFastDLMapping(pid, fastdlUrl);
-        if (hMMF)
+        hFastDLMMF = CreateFastDLMapping(pid, fastdlUrl);
+        
+        if (hFastDLMMF)
             wprintf(L"[*] FastDL URL MMF created for PID %lu.\n", pid);
+    }
+    
+    if (!username.empty())
+    {
+        hUsernameMMF = CreateUsernameMapping(pid, username);
+        
+        if (hUsernameMMF)
+            wprintf(L"[*] Username MMF created for PID %lu.\n", pid);
+    }
+    
+    if (!computername.empty())
+    {
+        hComputerNameMMF = CreateComputerNameMapping(pid, computername);
+        
+        if (hComputerNameMMF)
+            wprintf(L"[*] Computer name MMF created for PID %lu.\n", pid);
     }
 
     bool ok = InjectDll(processHandle, dllPath);
 
-    if (hMMF) CloseHandle(hMMF);
+    if (hFastDLMMF)
+        CloseHandle(hFastDLMMF);
+    if (hUsernameMMF)
+        CloseHandle(hUsernameMMF);
+    if (hComputerNameMMF)
+        CloseHandle(hComputerNameMMF);
+    
     CloseHandle(processHandle);
 
     return ok ? 0 : 1;
@@ -413,7 +528,9 @@ static int ModeInject(const wchar_t* target, const wchar_t* dllPath,
 static int ModeLaunch(const wchar_t* exePath,
                       const std::vector<std::wstring>& gameArgs,
                       const wchar_t* dllPath,
-                      const std::wstring& fastdlUrl)
+                      const std::wstring& fastdlUrl,
+                      const std::wstring& username,
+                      const std::wstring& computername)
 {
     // Verify the executable exists
     if (GetFileAttributesW(exePath) == INVALID_FILE_ATTRIBUTES)
@@ -474,18 +591,42 @@ static int ModeLaunch(const wchar_t* exePath,
 
     WarnBitnessMismatch(processInformation.hProcess);
 
-    // Create FastDL MMF before injection so InitFastDL() can read it
-    HANDLE hMMF = nullptr;
+    // Create named MMFs before injection so the DLL can read them
+    HANDLE hFastDLMMF       = nullptr;
+    HANDLE hUsernameMMF     = nullptr;
+    HANDLE hComputerNameMMF = nullptr;
+    
     if (!fastdlUrl.empty())
     {
-        hMMF = CreateFastDLMapping(processInformation.dwProcessId, fastdlUrl);
-        if (hMMF)
+        hFastDLMMF = CreateFastDLMapping(processInformation.dwProcessId, fastdlUrl);
+        if (hFastDLMMF)
             wprintf(L"[*] FastDL URL MMF created for PID %lu.\n", processInformation.dwProcessId);
+    }
+    
+    if (!username.empty())
+    {
+        hUsernameMMF = CreateUsernameMapping(processInformation.dwProcessId, username);
+        if (hUsernameMMF)
+            wprintf(L"[*] Username MMF created for PID %lu.\n", processInformation.dwProcessId);
+    }
+    
+    if (!computername.empty())
+    {
+        hComputerNameMMF = CreateComputerNameMapping(processInformation.dwProcessId, computername);
+        if (hComputerNameMMF)
+            wprintf(L"[*] Computer name MMF created for PID %lu.\n", processInformation.dwProcessId);
     }
 
     bool ok = InjectDll(processInformation.hProcess, dllPath);
 
-    if (hMMF) CloseHandle(hMMF);
+    if (hFastDLMMF)
+        CloseHandle(hFastDLMMF);
+    
+    if (hUsernameMMF)
+        CloseHandle(hUsernameMMF);
+    
+    if (hComputerNameMMF)
+        CloseHandle(hComputerNameMMF);
 
     if (!ok)
     {
@@ -514,8 +655,10 @@ static int ModeLaunch(const wchar_t* exePath,
 // ---------------------------------------------------------------------------
 int wmain(int argc, wchar_t* argv[])
 {
-    // ---- Pre-scan for global options (--fastdl-url <url>)
+    // ---- Pre-scan for global options
     std::wstring fastdlUrl;
+    std::wstring username;
+    std::wstring computername;
     std::vector<wchar_t*> args;
 
     for (int i = 1; i < argc; ++i)
@@ -529,6 +672,26 @@ int wmain(int argc, wchar_t* argv[])
                 return 1;
             }
             fastdlUrl = argv[++i];
+        }
+        else if (wcscmp(argv[i], L"--username") == 0)
+        {
+            if (i + 1 >= argc)
+            {
+                wprintf(L"[!] --username requires a name argument.\n\n");
+                PrintUsage();
+                return 1;
+            }
+            username = argv[++i];
+        }
+        else if (wcscmp(argv[i], L"--computername") == 0)
+        {
+            if (i + 1 >= argc)
+            {
+                wprintf(L"[!] --computername requires a name argument.\n\n");
+                PrintUsage();
+                return 1;
+            }
+            computername = argv[++i];
         }
         else
         {
@@ -606,7 +769,7 @@ int wmain(int argc, wchar_t* argv[])
         if (!ResolveDll(dllArguments, dllPath))
             return 1;
 
-        return ModeLaunch(exeArguments, gameArguments, dllPath, fastdlUrl);
+        return ModeLaunch(exeArguments, gameArguments, dllPath, fastdlUrl, username, computername);
     }
 
     // ---- Inject mode: <process-name-or-PID> [dll]
@@ -618,7 +781,7 @@ int wmain(int argc, wchar_t* argv[])
         if (!ResolveDll(dllArguments, dllPath))
             return 1;
 
-        return ModeInject(args[0], dllPath, fastdlUrl);
+        return ModeInject(args[0], dllPath, fastdlUrl, username, computername);
     }
 
     // ---- Bad args

@@ -197,6 +197,10 @@ static void WriteInterposerYaml(const std::wstring& yamlPath,
         "  Files: true\n"
         "  Registry: true\n"
         "\n"
+        "Player:\n"
+        "  Username: TestPlayer\n"
+        "  ComputerName: TestMachine\n"
+        "\n"
         "Redirects:\n"
         "  - Pattern: 'C:\\\\TestGame\\\\Saves\\\\(.+)'\n"
         "    Replacement: '" + WideToUtf8(redirectBaseDir) + "$1'\n";
@@ -564,6 +568,91 @@ static void RunRegistryTests()
 }
 
 // ============================================================
+// Identity hook tests  (run while DLL is loaded → hooks active)
+// ============================================================
+
+static void RunIdentityTests()
+{
+    wprintf(L"\n--- Identity Hook Tests ---\n");
+
+    // I-01: GetUserNameW returns the configured username
+    {
+        wchar_t buf[256]{};
+        DWORD len = _countof(buf);
+        BOOL ok = GetUserNameW(buf, &len);
+        ASSERT(ok == TRUE,
+            L"I-01a: GetUserNameW returns TRUE");
+        ASSERT(wcscmp(buf, L"TestPlayer") == 0,
+            L"I-01b: GetUserNameW returns configured username");
+        // len should include the null terminator
+        ASSERT(len == static_cast<DWORD>(wcslen(L"TestPlayer") + 1),
+            L"I-01c: GetUserNameW sets pcbBuffer to length including null terminator");
+    }
+
+    // I-02: GetUserNameA returns the configured username
+    {
+        char buf[256]{};
+        DWORD len = sizeof(buf);
+        BOOL ok = GetUserNameA(buf, &len);
+        ASSERT(ok == TRUE,
+            L"I-02a: GetUserNameA returns TRUE");
+        ASSERT(strcmp(buf, "TestPlayer") == 0,
+            L"I-02b: GetUserNameA returns configured username");
+    }
+
+    // I-03: Size query (NULL buffer) reports ERROR_INSUFFICIENT_BUFFER
+    {
+        DWORD len = 0;
+        SetLastError(0);
+        BOOL ok = GetUserNameW(nullptr, &len);
+        ASSERT(ok == FALSE,
+            L"I-03a: GetUserNameW size query returns FALSE");
+        ASSERT(GetLastError() == ERROR_INSUFFICIENT_BUFFER,
+            L"I-03b: GetLastError is ERROR_INSUFFICIENT_BUFFER");
+        ASSERT(len == static_cast<DWORD>(wcslen(L"TestPlayer") + 1),
+            L"I-03c: reported length includes null terminator");
+    }
+
+    // I-04: GetComputerNameW returns the configured computer name
+    {
+        wchar_t buf[256]{};
+        DWORD len = _countof(buf);
+        BOOL ok = GetComputerNameW(buf, &len);
+        ASSERT(ok == TRUE,
+            L"I-04a: GetComputerNameW returns TRUE");
+        ASSERT(wcscmp(buf, L"TestMachine") == 0,
+            L"I-04b: GetComputerNameW returns configured computer name");
+        // On success *nSize = character count WITHOUT null terminator
+        ASSERT(len == static_cast<DWORD>(wcslen(L"TestMachine")),
+            L"I-04c: GetComputerNameW sets nSize to length without null terminator");
+    }
+
+    // I-05: GetComputerNameA returns the configured computer name
+    {
+        char buf[256]{};
+        DWORD len = sizeof(buf);
+        BOOL ok = GetComputerNameA(buf, &len);
+        ASSERT(ok == TRUE,
+            L"I-05a: GetComputerNameA returns TRUE");
+        ASSERT(strcmp(buf, "TestMachine") == 0,
+            L"I-05b: GetComputerNameA returns configured computer name");
+    }
+
+    // I-06: Size query (NULL buffer) reports ERROR_BUFFER_OVERFLOW
+    {
+        DWORD len = 0;
+        SetLastError(0);
+        BOOL ok = GetComputerNameW(nullptr, &len);
+        ASSERT(ok == FALSE,
+            L"I-06a: GetComputerNameW size query returns FALSE");
+        ASSERT(GetLastError() == ERROR_BUFFER_OVERFLOW,
+            L"I-06b: GetLastError is ERROR_BUFFER_OVERFLOW");
+        ASSERT(len == static_cast<DWORD>(wcslen(L"TestMachine") + 1),
+            L"I-06c: reported length includes null terminator");
+    }
+}
+
+// ============================================================
 // Log verification tests  (run AFTER FreeLibrary flushes log)
 // ============================================================
 
@@ -689,6 +778,7 @@ int wmain()
     // ── Tests (hooks active) ─────────────────────────────────────────────────
     RunFileTests(exeDir, testTmpDir);
     RunRegistryTests();
+    RunIdentityTests();
 
     // ── Unload DLL ───────────────────────────────────────────────────────────
     // DLL_PROCESS_DETACH fires: RemoveRegistryHooks (SaveRegFile if dirty),
