@@ -77,8 +77,8 @@ A game opening `HKEY_LOCAL_MACHINE\SOFTWARE\MyGame\1.0` and then enumerating sub
 To verify that registry emulation is working, enable registry logging in `.interposer\Config.yml`:
 
 ```yaml
-settings:
-  logRegistry: true
+Logging:
+  Registry: true
 ```
 
 A working session looks like:
