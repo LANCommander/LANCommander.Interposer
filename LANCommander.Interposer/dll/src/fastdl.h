@@ -20,3 +20,8 @@ bool TryFastDLDownload(const std::wstring& localPath);
 // Used by GetFileAttributes hooks to indicate the file will be available
 // without triggering the actual download yet.
 bool FastDLFileExists(const std::wstring& localPath);
+
+// If FastDL is enabled, the download overlay is active, and an overlay copy of
+// localPath already exists on disk, returns the absolute overlay path.
+// Returns an empty string otherwise (no overlay, or file not yet downloaded).
+std::wstring GetExistingOverlayPath(const std::wstring& localPath);

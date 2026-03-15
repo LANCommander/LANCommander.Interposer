@@ -1151,9 +1151,17 @@ static LSTATUS WINAPI HookRegEnumValueW(HKEY hKey, DWORD dwIndex, LPWSTR lpValue
     LPDWORD lpcchValueName, LPDWORD /*lpReserved*/, LPDWORD lpType, LPBYTE lpData, LPDWORD lpcbData)
 {
     std::wstring path = GetVirtualPath(hKey);
-    
+
     if (path.empty())
+    {
+        if (g_logRegistry)
+        {
+            std::wstring realPath = GetAnyPathFull(hKey);
+            if (!realPath.empty())
+                LogRegistryAccess(L"[REG ENUM]     ", realPath.c_str());
+        }
         return g_origRegEnumValueW(hKey, dwIndex, lpValueName, lpcchValueName, nullptr, lpType, lpData, lpcbData);
+    }
 
     std::shared_lock lock(g_storeMutex);
     
@@ -1221,9 +1229,17 @@ static LSTATUS WINAPI HookRegEnumValueA(HKEY hKey, DWORD dwIndex, LPSTR lpValueN
     LPDWORD lpcchValueName, LPDWORD /*lpReserved*/, LPDWORD lpType, LPBYTE lpData, LPDWORD lpcbData)
 {
     std::wstring path = GetVirtualPath(hKey);
-    
+
     if (path.empty())
+    {
+        if (g_logRegistry)
+        {
+            std::wstring realPath = GetAnyPathFull(hKey);
+            if (!realPath.empty())
+                LogRegistryAccess(L"[REG ENUM]     ", realPath.c_str());
+        }
         return g_origRegEnumValueA(hKey, dwIndex, lpValueName, lpcchValueName, nullptr, lpType, lpData, lpcbData);
+    }
 
     std::shared_lock lock(g_storeMutex);
     
@@ -1344,9 +1360,17 @@ static LSTATUS WINAPI HookRegEnumKeyExW(HKEY hKey, DWORD dwIndex, LPWSTR lpName,
     PFILETIME lpftLastWriteTime)
 {
     std::wstring path = GetVirtualPath(hKey);
-    
+
     if (path.empty())
+    {
+        if (g_logRegistry)
+        {
+            std::wstring realPath = GetAnyPathFull(hKey);
+            if (!realPath.empty())
+                LogRegistryAccess(L"[REG ENUM]     ", realPath.c_str());
+        }
         return g_origRegEnumKeyExW(hKey, dwIndex, lpName, lpcchName, nullptr, lpClass, lpcchClass, lpftLastWriteTime);
+    }
 
     auto children = GetDirectChildren(path);
     
@@ -1385,9 +1409,17 @@ static LSTATUS WINAPI HookRegEnumKeyExA(HKEY hKey, DWORD dwIndex, LPSTR lpName,
     PFILETIME lpftLastWriteTime)
 {
     std::wstring path = GetVirtualPath(hKey);
-    
+
     if (path.empty())
+    {
+        if (g_logRegistry)
+        {
+            std::wstring realPath = GetAnyPathFull(hKey);
+            if (!realPath.empty())
+                LogRegistryAccess(L"[REG ENUM]     ", realPath.c_str());
+        }
         return g_origRegEnumKeyExA(hKey, dwIndex, lpName, lpcchName, nullptr, lpClass, lpcchClass, lpftLastWriteTime);
+    }
 
     auto children = GetDirectChildren(path);
     
@@ -1430,11 +1462,19 @@ static LSTATUS WINAPI HookRegQueryInfoKeyW(HKEY hKey, LPWSTR lpClass, LPDWORD lp
     LPDWORD lpcbMaxValueLen, LPDWORD lpcbSecurityDescriptor, PFILETIME lpftLastWriteTime)
 {
     std::wstring path = GetVirtualPath(hKey);
-    
+
     if (path.empty())
+    {
+        if (g_logRegistry)
+        {
+            std::wstring realPath = GetAnyPathFull(hKey);
+            if (!realPath.empty())
+                LogRegistryAccess(L"[REG QUERY]    ", realPath.c_str());
+        }
         return g_origRegQueryInfoKeyW(hKey, lpClass, lpcchClass, nullptr, lpcSubKeys,
             lpcbMaxSubKeyLen, lpcbMaxClassLen, lpcValues, lpcbMaxValueNameLen,
             lpcbMaxValueLen, lpcbSecurityDescriptor, lpftLastWriteTime);
+    }
 
     if (lpClass && lpcchClass)
         *lpcchClass = 0;

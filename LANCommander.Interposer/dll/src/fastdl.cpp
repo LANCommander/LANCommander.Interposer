@@ -12,7 +12,9 @@
 // ---------------------------------------------------------------------------
 // Module-level state
 // ---------------------------------------------------------------------------
-static HINTERNET g_session = nullptr;
+static HINTERNET              g_session           = nullptr;
+static std::wstring           g_fastdlDownloadBase;           // resolved overlay directory (trailing \)
+static std::vector<std::wstring> g_blockedPaths;              // absolute lowercase paths that may not be overwritten
 
 // ---------------------------------------------------------------------------
 // CRC32 (ISO 3309 / ITU-T V.42, polynomial 0xEDB88320)
@@ -129,6 +131,77 @@ static std::wstring BuildFastDLUrl(const std::wstring& localPath)
     }
 
     return {};
+}
+
+// Computes the overlay (download cache) path for localPath.
+// Returns empty string if: overlay is disabled, no FastDLPath prefix matches,
+// or the computed path escapes the download base (path traversal attempt).
+static std::wstring ComputeOverlayPath(const std::wstring& localPath)
+{
+    if (!g_fastdlUseDownloadDir || g_fastdlDownloadBase.empty())
+        return {};
+
+    std::wstring lowerLocal = ToLowerFastDL(localPath);
+
+    for (const auto& mapping : g_fastdlPaths)
+    {
+        std::wstring prefix = ToLowerFastDL(mapping.localPrefix);
+
+        if (lowerLocal.size() < prefix.size())
+            continue;
+
+        if (lowerLocal.substr(0, prefix.size()) != prefix)
+            continue;
+
+        // Relative portion after the prefix
+        std::wstring relative = localPath.substr(mapping.localPrefix.size());
+
+        // Strip any leading separator
+        while (!relative.empty() && (relative[0] == L'\\' || relative[0] == L'/'))
+            relative.erase(relative.begin());
+
+        // Build: <downloadBase>\<remoteSubPath>\<relative>
+        std::wstring overlay = g_fastdlDownloadBase;
+
+        if (!mapping.remoteSubPath.empty())
+            overlay += mapping.remoteSubPath + L"\\";
+
+        overlay += relative;
+
+        // Normalize all forward slashes to backslashes
+        for (auto& c : overlay)
+            if (c == L'/') c = L'\\';
+
+        // Path traversal check: resolved path must stay within the download base
+        wchar_t resolved[MAX_PATH]{};
+
+        if (GetFullPathNameW(overlay.c_str(), MAX_PATH, resolved, nullptr) == 0)
+            return {};
+
+        std::wstring resolvedLower = ToLowerFastDL(resolved);
+        std::wstring baseLower     = ToLowerFastDL(g_fastdlDownloadBase);
+
+        if (resolvedLower.substr(0, baseLower.size()) != baseLower)
+            return {}; // path traversal attempt — reject
+
+        return std::wstring(resolved);
+    }
+
+    return {};
+}
+
+// Returns true if downloadTarget is on the blocked-paths list.
+static bool IsPathBlocked(const std::wstring& downloadTarget)
+{
+    if (!g_fastdlBlockSensitiveFiles || g_blockedPaths.empty())
+        return false;
+
+    std::wstring lower = ToLowerFastDL(downloadTarget);
+
+    for (const auto& blocked : g_blockedPaths)
+        if (lower == blocked) return true;
+
+    return false;
 }
 
 // Creates all parent directories needed for filePath to exist.
@@ -339,6 +412,76 @@ void InitFastDL()
         WINHTTP_NO_PROXY_NAME,
         WINHTTP_NO_PROXY_BYPASS,
         0);
+
+    // Locate the DLL's own path and directory (needed below)
+    HMODULE hSelf = nullptr;
+    GetModuleHandleExW(
+        GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+        reinterpret_cast<LPCWSTR>(&InitFastDL),
+        &hSelf);
+
+    wchar_t dllPath[MAX_PATH]{};
+    GetModuleFileNameW(hSelf, dllPath, MAX_PATH);
+
+    std::wstring dllDir(dllPath);
+    {
+        size_t slash = dllDir.find_last_of(L"\\/");
+        if (slash != std::wstring::npos)
+            dllDir.resize(slash + 1);
+    }
+
+    // Resolve overlay download directory
+    if (g_fastdlUseDownloadDir)
+    {
+        std::wstring candidate;
+
+        if (!g_fastdlDownloadDir.empty())
+        {
+            // Treat as absolute if it begins with a drive letter or UNC prefix
+            bool isAbsolute =
+                (g_fastdlDownloadDir.size() >= 3 && g_fastdlDownloadDir[1] == L':') ||
+                (g_fastdlDownloadDir.size() >= 2 &&
+                 g_fastdlDownloadDir[0] == L'\\' && g_fastdlDownloadDir[1] == L'\\');
+
+            candidate = isAbsolute ? g_fastdlDownloadDir : (dllDir + g_fastdlDownloadDir);
+        }
+        else
+        {
+            candidate = dllDir + L".downloads";
+        }
+
+        wchar_t resolved[MAX_PATH]{};
+        if (GetFullPathNameW(candidate.c_str(), MAX_PATH, resolved, nullptr) > 0)
+            g_fastdlDownloadBase = resolved;
+        else
+            g_fastdlDownloadBase = candidate;
+
+        // Ensure trailing backslash
+        if (!g_fastdlDownloadBase.empty() && g_fastdlDownloadBase.back() != L'\\')
+            g_fastdlDownloadBase += L'\\';
+    }
+
+    // Build list of paths that FastDL must never overwrite
+    if (g_fastdlBlockSensitiveFiles)
+    {
+        auto addBlocked = [](const std::wstring& path)
+        {
+            wchar_t resolved[MAX_PATH]{};
+            if (GetFullPathNameW(path.c_str(), MAX_PATH, resolved, nullptr) > 0)
+                g_blockedPaths.push_back(ToLowerFastDL(resolved));
+        };
+
+        addBlocked(dllPath);                              // interposer DLL itself
+        addBlocked(dllDir + L"interposer.ini");           // config file
+        addBlocked(dllDir + L"VirtualRegistry.reg");      // virtual registry file
+        addBlocked(dllDir + L"LANCommander.Interposer.Injector.exe");
+        addBlocked(dllDir + L"Injector.exe");
+
+        // The game executable
+        wchar_t gameExe[MAX_PATH]{};
+        if (GetModuleFileNameW(nullptr, gameExe, MAX_PATH) > 0)
+            addBlocked(gameExe);
+    }
 }
 
 void ShutdownFastDL()
@@ -401,14 +544,30 @@ static bool FastDLImpl(const std::wstring& localPath, bool headOnly)
         return true;
     }
 
+    // Compute effective download target (overlay path or localPath if overlay disabled)
+    std::wstring downloadPath;
+    {
+        std::wstring overlay = ComputeOverlayPath(localPath);
+        downloadPath = overlay.empty() ? localPath : overlay;
+    }
+
+    // Refuse to overwrite sensitive files
+    if (IsPathBlocked(downloadPath))
+    {
+        WinHttpCloseHandle(connectHandler);
+        return false;
+    }
+
     // Determine whether we need to download
+    // CRC comparison is performed against the existing download (overlay file),
+    // not the original game file, so the overlay stays in sync with the server.
     bool needDownload = true;
     bool hasCRC = (crcBuffer[0] != L'\0');
 
     if (hasCRC)
     {
-        // Compare CRC against local file (if it exists)
-        HANDLE fileHandler = CreateFileW(localPath.c_str(), GENERIC_READ, FILE_SHARE_READ,
+        // Compare CRC against the current download (if it exists)
+        HANDLE fileHandler = CreateFileW(downloadPath.c_str(), GENERIC_READ, FILE_SHARE_READ,
             nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
 
         if (fileHandler != INVALID_HANDLE_VALUE)
@@ -442,8 +601,8 @@ static bool FastDLImpl(const std::wstring& localPath, bool headOnly)
         return true; // file is already current
     }
 
-    // GET download
-    bool ok = DoGetDownload(connectHandler, urlPath, flags, localPath);
+    // GET download to the effective download target
+    bool ok = DoGetDownload(connectHandler, urlPath, flags, downloadPath);
     WinHttpCloseHandle(connectHandler);
 
     if (ok)
@@ -455,6 +614,23 @@ static bool FastDLImpl(const std::wstring& localPath, bool headOnly)
 bool TryFastDLDownload(const std::wstring& localPath)
 {
     return FastDLImpl(localPath, false);
+}
+
+std::wstring GetExistingOverlayPath(const std::wstring& localPath)
+{
+    if (!g_fastdlEnabled || !g_fastdlUseDownloadDir)
+        return {};
+
+    std::wstring overlay = ComputeOverlayPath(localPath);
+
+    if (overlay.empty())
+        return {};
+
+    // Check whether the file actually exists in the overlay directory
+    if (GetFileAttributesW(overlay.c_str()) == INVALID_FILE_ATTRIBUTES)
+        return {};
+
+    return overlay;
 }
 
 bool FastDLFileExists(const std::wstring& localPath)

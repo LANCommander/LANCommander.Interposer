@@ -27,6 +27,9 @@ extern bool                      g_logFastDL;
 extern std::wstring              g_fastdlBaseUrl;
 extern std::vector<std::wstring> g_fastdlAllowedExtensions; // empty = allow all
 extern std::vector<FastDLPath>   g_fastdlPaths;
+extern bool                      g_fastdlUseDownloadDir;     // true = write to overlay dir (default)
+extern std::wstring              g_fastdlDownloadDir;        // empty = <dlldir>\downloads
+extern bool                      g_fastdlBlockSensitiveFiles; // true = block overwriting sensitive files (default)
 
 // Parse <dlldir>\interposer.ini and open the log file. Call before MH_EnableHook.
 void LoadConfig();

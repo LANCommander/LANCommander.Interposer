@@ -10,11 +10,14 @@
 bool g_logFiles    = false;
 bool g_logRegistry = false;
 
-bool                      g_fastdlEnabled    = false;
-bool                      g_logFastDL        = true;
+bool                      g_fastdlEnabled             = false;
+bool                      g_logFastDL                 = true;
 std::wstring              g_fastdlBaseUrl;
 std::vector<std::wstring> g_fastdlAllowedExtensions;
 std::vector<FastDLPath>   g_fastdlPaths;
+bool                      g_fastdlUseDownloadDir      = true;
+std::wstring              g_fastdlDownloadDir;
+bool                      g_fastdlBlockSensitiveFiles = true;
 
 static std::vector<FileRedirect> g_redirects;
 static HANDLE                    g_logHandle = INVALID_HANDLE_VALUE;
@@ -338,6 +341,12 @@ void LoadConfig()
                     start = comma + 1;
                 }
             }
+            else if (lkey == L"usedownloaddirectory")
+                g_fastdlUseDownloadDir = ParseBool(value);
+            else if (lkey == L"downloaddirectory")
+                g_fastdlDownloadDir = value;
+            else if (lkey == L"blocksensitivefiles")
+                g_fastdlBlockSensitiveFiles = ParseBool(value);
         }
         else if (currentSection == L"fastdlpaths")
         {
