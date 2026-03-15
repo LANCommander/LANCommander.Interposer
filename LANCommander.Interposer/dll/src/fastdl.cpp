@@ -143,18 +143,18 @@ static std::wstring ComputeOverlayPath(const std::wstring& localPath)
 
     std::wstring lowerLocal = ToLowerFastDL(localPath);
 
-    for (const auto& mapping : g_fastdlPaths)
+    for (const auto& [localPrefix, remoteSubPath] : g_fastdlPaths)
     {
-        std::wstring prefix = ToLowerFastDL(mapping.localPrefix);
+        std::wstring prefix = ToLowerFastDL(localPrefix);
 
         if (lowerLocal.size() < prefix.size())
             continue;
 
-        if (lowerLocal.substr(0, prefix.size()) != prefix)
+        if (!lowerLocal.starts_with(prefix))
             continue;
 
         // Relative portion after the prefix
-        std::wstring relative = localPath.substr(mapping.localPrefix.size());
+        std::wstring relative = localPath.substr(localPrefix.size());
 
         // Strip any leading separator
         while (!relative.empty() && (relative[0] == L'\\' || relative[0] == L'/'))
@@ -163,14 +163,15 @@ static std::wstring ComputeOverlayPath(const std::wstring& localPath)
         // Build: <downloadBase>\<remoteSubPath>\<relative>
         std::wstring overlay = g_fastdlDownloadBase;
 
-        if (!mapping.remoteSubPath.empty())
-            overlay += mapping.remoteSubPath + L"\\";
+        if (!remoteSubPath.empty())
+            overlay += remoteSubPath + L"\\";
 
         overlay += relative;
 
         // Normalize all forward slashes to backslashes
         for (auto& c : overlay)
-            if (c == L'/') c = L'\\';
+            if (c == L'/')
+                c = L'\\';
 
         // Path traversal check: resolved path must stay within the download base
         wchar_t resolved[MAX_PATH]{};
@@ -181,7 +182,7 @@ static std::wstring ComputeOverlayPath(const std::wstring& localPath)
         std::wstring resolvedLower = ToLowerFastDL(resolved);
         std::wstring baseLower     = ToLowerFastDL(g_fastdlDownloadBase);
 
-        if (resolvedLower.substr(0, baseLower.size()) != baseLower)
+        if (!resolvedLower.starts_with(baseLower))
             return {}; // path traversal attempt — reject
 
         return std::wstring(resolved);
@@ -447,7 +448,7 @@ void InitFastDL()
         }
         else
         {
-            candidate = dllDir + L".downloads";
+            candidate = dllDir + L".interposer\\Downloads";
         }
 
         wchar_t resolved[MAX_PATH]{};
@@ -471,9 +472,9 @@ void InitFastDL()
                 g_blockedPaths.push_back(ToLowerFastDL(resolved));
         };
 
-        addBlocked(dllPath);                              // interposer DLL itself
-        addBlocked(dllDir + L"interposer.ini");           // config file
-        addBlocked(dllDir + L"VirtualRegistry.reg");      // virtual registry file
+        addBlocked(dllPath);                                               // interposer DLL itself
+        addBlocked(dllDir + L".interposer\\Config.yml");                   // config file
+        addBlocked(dllDir + L".interposer\\Registry.reg");                 // virtual registry file
         addBlocked(dllDir + L"LANCommander.Interposer.Injector.exe");
         addBlocked(dllDir + L"Injector.exe");
 
@@ -562,7 +563,7 @@ static bool FastDLImpl(const std::wstring& localPath, bool headOnly)
     // CRC comparison is performed against the existing download (overlay file),
     // not the original game file, so the overlay stays in sync with the server.
     bool needDownload = true;
-    bool hasCRC = (crcBuffer[0] != L'\0');
+    bool hasCRC = crcBuffer[0] != L'\0';
 
     if (hasCRC)
     {

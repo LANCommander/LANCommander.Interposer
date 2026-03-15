@@ -1552,25 +1552,28 @@ static LSTATUS WINAPI HookRegQueryInfoKeyA(HKEY hKey, LPSTR lpClass, LPDWORD lpc
 // ============================================================
 void InstallRegistryHooks()
 {
-    // Locate VirtualRegistry.reg next to our DLL
+    // Locate .interposer\Registry.reg next to our DLL
     HMODULE hSelf = nullptr;
-    
+
     GetModuleHandleExW(
         GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
         reinterpret_cast<LPCWSTR>(&InstallRegistryHooks),
         &hSelf);
 
     wchar_t dllPath[MAX_PATH] = {};
-    
+
     GetModuleFileNameW(hSelf, dllPath, MAX_PATH);
 
     std::wstring directory(dllPath);
     auto slash = directory.find_last_of(L"\\/");
-    
-    if (slash != std::wstring::npos) 
+
+    if (slash != std::wstring::npos)
         directory.resize(slash + 1);
-    
-    g_filePath = directory + L"VirtualRegistry.reg";
+
+    std::wstring interposerDir = directory + L".interposer\\";
+    CreateDirectoryW(interposerDir.c_str(), nullptr);
+
+    g_filePath = interposerDir + L"Registry.reg";
 
     LoadRegFile();
 

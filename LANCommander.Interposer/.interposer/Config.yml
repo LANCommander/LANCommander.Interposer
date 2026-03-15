@@ -1,0 +1,115 @@
+# LANCommander Interposer Configuration
+# Place this directory (.interposer/) in the same directory as LANCommander.Interposer.dll
+#
+# Single-quoted strings pass backslashes literally — safe for Windows paths
+# and ECMAScript regex patterns.  Double-quoted strings process YAML escapes
+# (\n, \t, etc.) and should be avoided for paths.
+
+# ---------------------------------------------------------------------------
+# Logging
+#
+#   Files     - true to log file open/attribute operations, false to disable.
+#
+#   Registry  - true to log registry open/read/write/delete operations, false to disable.
+#
+#   Downloads - true to log FastDL downloads, false to disable.
+#
+# Logs are written automatically to .interposer\Logs\<timestamp>.log next to
+# the DLL.  A new file is created each session.
+# ---------------------------------------------------------------------------
+Logging:
+  Files: true
+  Registry: true
+  Downloads: true
+
+# ---------------------------------------------------------------------------
+# Redirects
+#
+# Redirect file paths at the CreateFile / GetFileAttributes level.
+# Each entry has two keys:
+#
+#   Pattern     : ECMAScript regular expression matched against the full file
+#                 path (case-insensitive).  Use single-quoted YAML strings so
+#                 that backslashes are literal (no YAML escaping needed).
+#                 The first matching rule wins.
+#
+#   Replacement : Target path.  Supports:
+#                 - $1 .. $9   for regex capture groups
+#                 - %ENVVAR%   expanded after capture-group substitution
+#
+# Examples:
+#
+#   Redirect a game's local save folder to %APPDATA%:
+#   - Pattern: 'C:\\Games\\MyGame\\Saves\\(.+)'
+#     Replacement: '%APPDATA%\MyGame\Saves\$1'
+#
+#   Redirect a hard-coded config path to a portable location:
+#   - Pattern: 'C:\\Program Files.*\\MyGame\\config\.ini'
+#     Replacement: '%APPDATA%\MyGame\config.ini'
+# ---------------------------------------------------------------------------
+Redirects: []
+# Redirects:
+#   - Pattern: 'C:\\Games\\MyGame\\Saves\\(.+)'
+#     Replacement: '%APPDATA%\MyGame\Saves\$1'
+
+# ---------------------------------------------------------------------------
+# FastDL
+#
+#   Enabled              - true to enable FastDL downloads, false to disable (default).
+#
+#   BaseUrl              - Root URL of the FastDL HTTP server. A trailing slash
+#                          is required. Supports http:// and https://.
+#
+#   AllowedExtensions    - List of file extensions to allow for download (e.g.
+#                          [.pk3, .bsp, .wav]). Leading dot is optional.
+#                          Leave empty ([]) to allow all file types.
+#
+#   UseDownloadDirectory - true (default) to write downloaded files to
+#                          .interposer\Downloads\ instead of overwriting game files.
+#                          Set to false to download directly into the game directory
+#                          (opt-out, not recommended).
+#
+#   DownloadDirectory    - Override the download path. Relative paths are resolved
+#                          relative to the DLL directory. Absolute paths are used
+#                          as-is. Defaults to "<dlldir>\.interposer\Downloads" when
+#                          empty or omitted.
+#
+#   BlockSensitiveFiles  - true (default) to prevent FastDL from overwriting the
+#                          interposer DLL, injector executable, game executable,
+#                          and interposer config files. Set to false to disable
+#                          this protection (opt-out, not recommended).
+# ---------------------------------------------------------------------------
+FastDL:
+  Enabled: false
+  BaseUrl: 'http://fastdl.example.com/'
+  AllowedExtensions: []    # e.g. [.pk3, .bsp, .wav]
+  UseDownloadDirectory: true
+  DownloadDirectory: ''    # empty = <dlldir>\.interposer\Downloads
+  BlockSensitiveFiles: true
+
+# ---------------------------------------------------------------------------
+# FastDL Paths
+#
+# Maps local directory prefixes to URL sub-paths under BaseUrl. Only files
+# beneath a configured prefix are eligible for FastDL.
+#
+#   Local  : Absolute path to a local directory. Files inside it will be
+#            checked against the server. A trailing backslash is optional.
+#
+#   Remote : Sub-path appended to BaseUrl before the relative file path.
+#            Leave empty to map directly under BaseUrl.
+#
+# Example (Quake 3 custom content):
+#   - Local: 'C:\Games\Quake3\baseq3'
+#     Remote: baseq3
+#
+# With the example above a request for:
+#   C:\Games\Quake3\baseq3\maps\q3dm1.bsp
+# would fetch:
+#   http://fastdl.example.com/baseq3/maps/q3dm1.bsp
+# ---------------------------------------------------------------------------
+FastDL:
+  Paths: []
+# Paths:
+#   - Local: 'C:\Games\Quake3\baseq3'
+#     Remote: baseq3

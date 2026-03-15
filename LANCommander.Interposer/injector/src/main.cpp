@@ -28,7 +28,7 @@ static void PrintUsage()
         L"\n"
         L"Options:\n"
         L"  --fastdl-url <url>  Override the FastDL BaseUrl at runtime without editing\n"
-        L"                      interposer.ini. The URL is passed to the DLL via a\n"
+        L"                      Config.yml. The URL is passed to the DLL via a\n"
         L"                      named memory-mapped file (Local\\InterposerFastDL_<pid>).\n"
         L"\n"
         L"Examples:\n"

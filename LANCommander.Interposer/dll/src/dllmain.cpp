@@ -9,7 +9,7 @@ static void WriteLog(const wchar_t* message)
     
     GetTempPathW(MAX_PATH, temporaryPath);
     
-    wcscat_s(temporaryPath, L"interposer.log");
+    wcscat_s(temporaryPath, L"Interposer.log");
     
     HANDLE fileHandle = CreateFileW(temporaryPath, FILE_APPEND_DATA, FILE_SHARE_READ,
         nullptr, OPEN_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);

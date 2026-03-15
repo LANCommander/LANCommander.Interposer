@@ -6,13 +6,13 @@
 #include <vector>
 #include <regex>
 
-// A compiled file-redirect rule loaded from [FileRedirects] in interposer.ini.
+// A compiled file-redirect rule loaded from fileRedirects in interposer.yaml.
 struct FileRedirect {
     std::wregex  pattern;     // ECMAScript regex, case-insensitive
     std::wstring replacement; // ECMAScript format string; %ENVVAR% expanded after substitution
 };
 
-// A FastDL path mapping loaded from [FastDLPaths] in interposer.ini.
+// A FastDL path mapping loaded from fastDLPaths in interposer.yaml.
 struct FastDLPath {
     std::wstring localPrefix;   // local directory prefix, trailing backslash included
     std::wstring remoteSubPath; // URL sub-path under BaseUrl, e.g. baseq3
@@ -31,7 +31,7 @@ extern bool                      g_fastdlUseDownloadDir;     // true = write to 
 extern std::wstring              g_fastdlDownloadDir;        // empty = <dlldir>\downloads
 extern bool                      g_fastdlBlockSensitiveFiles; // true = block overwriting sensitive files (default)
 
-// Parse <dlldir>\interposer.ini and open the log file. Call before MH_EnableHook.
+// Parse <dlldir>\.interposer\Config.yml and open <dlldir>\.interposer\Logs\<timestamp>.log. Call before MH_EnableHook.
 void LoadConfig();
 
 // Flush and close the log file. Call from RemoveHooks().
