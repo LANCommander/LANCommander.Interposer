@@ -71,8 +71,8 @@ jobs:
           New-Item -ItemType Directory -Force "$d\x64", "$d\x86" | Out-Null
           Copy-Item 'x64\Release\LANCommander.Interposer.dll'            "$d\x64\"
           Copy-Item 'x64\Release\LANCommander.Interposer.Injector.exe'   "$d\x64\"
-          Copy-Item 'Win32\Release\LANCommander.Interposer.dll'          "$d\x86\"
-          Copy-Item 'Win32\Release\LANCommander.Interposer.Injector.exe' "$d\x86\"
+          Copy-Item 'x86\Release\LANCommander.Interposer.dll'          "$d\x86\"
+          Copy-Item 'x86\Release\LANCommander.Interposer.Injector.exe' "$d\x86\"
           Copy-Item -Recurse $sampleDir "$d\"
           Compress-Archive -Path "$d\*" -DestinationPath "LANCommander.Interposer.$version.zip"
 
@@ -80,7 +80,7 @@ jobs:
           $d = 'pkg\proxy'
           New-Item -ItemType Directory -Force "$d\x64", "$d\x86" | Out-Null
           Copy-Item 'x64\Release Proxy\version.dll'   "$d\x64\"
-          Copy-Item 'Win32\Release Proxy\version.dll' "$d\x86\"
+          Copy-Item 'x86\Release Proxy\version.dll' "$d\x86\"
           Copy-Item -Recurse $sampleDir "$d\"
           Compress-Archive -Path "$d\*" -DestinationPath "LANCommander.Interposer.Proxy.$version.zip"
 
@@ -88,7 +88,7 @@ jobs:
           $d = 'pkg\asi'
           New-Item -ItemType Directory -Force "$d\x64", "$d\x86" | Out-Null
           Copy-Item 'x64\Release ASI\LANCommander.Interposer.asi'   "$d\x64\"
-          Copy-Item 'Win32\Release ASI\LANCommander.Interposer.asi' "$d\x86\"
+          Copy-Item 'x86\Release ASI\LANCommander.Interposer.asi' "$d\x86\"
           Copy-Item -Recurse $sampleDir "$d\"
           Compress-Archive -Path "$d\*" -DestinationPath "LANCommander.Interposer.ASI.$version.zip"
 
