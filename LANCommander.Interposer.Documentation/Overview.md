@@ -29,6 +29,7 @@ This compatibility shim is _not_ meant to tackle things like graphics APIs or Li
 ## Installation and Use
 Configuration and use of the Interposer is broken down on this site under the following resources:
 
+- [Releases](Releases)
 - [Getting Started](GettingStarted)
 - [Logging](Logging)
 - [File Redirection](FileRedirection)
