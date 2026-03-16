@@ -1,0 +1,153 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+jobs:
+  release:
+    runs-on: windows-latest
+    permissions:
+      contents: write
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup MSBuild
+        uses: microsoft/setup-msbuild@v2
+
+      - name: Install dependencies (x64)
+        run: vcpkg install --triplet x64-windows-static-md --x-install-root=vcpkg_installed
+
+      - name: Install dependencies (x86)
+        run: vcpkg install --triplet x86-windows-static-md --x-install-root=vcpkg_installed_x86
+
+      - name: Build Release x64
+        run: >
+          msbuild LANCommander.Interposer.slnx
+          /t:LANCommander_Interposer;LANCommander_Interposer_Injector
+          /p:Configuration=Release /p:Platform=x64
+
+      - name: Build Release x86
+        run: >
+          msbuild LANCommander.Interposer.slnx
+          /t:LANCommander_Interposer;LANCommander_Interposer_Injector
+          /p:Configuration=Release /p:Platform=x86
+
+      - name: Build Release Proxy x64
+        run: >
+          msbuild LANCommander.Interposer.slnx
+          /t:LANCommander_Interposer
+          /p:Configuration="Release Proxy" /p:Platform=x64
+
+      - name: Build Release Proxy x86
+        run: >
+          msbuild LANCommander.Interposer.slnx
+          /t:LANCommander_Interposer
+          /p:Configuration="Release Proxy" /p:Platform=x86
+
+      - name: Build Release ASI x64
+        run: >
+          msbuild LANCommander.Interposer.slnx
+          /t:LANCommander_Interposer
+          /p:Configuration="Release ASI" /p:Platform=x64
+
+      - name: Build Release ASI x86
+        run: >
+          msbuild LANCommander.Interposer.slnx
+          /t:LANCommander_Interposer
+          /p:Configuration="Release ASI" /p:Platform=x86
+
+      - name: Create release ZIPs
+        shell: pwsh
+        run: |
+          $version   = '${{ github.ref_name }}'
+          $sampleDir = 'LANCommander.Interposer\.interposer'
+
+          # Standard (DLL + Injector)
+          $d = 'pkg\standard'
+          New-Item -ItemType Directory -Force "$d\x64", "$d\x86" | Out-Null
+          Copy-Item 'x64\Release\LANCommander.Interposer.dll'            "$d\x64\"
+          Copy-Item 'x64\Release\LANCommander.Interposer.Injector.exe'   "$d\x64\"
+          Copy-Item 'Win32\Release\LANCommander.Interposer.dll'          "$d\x86\"
+          Copy-Item 'Win32\Release\LANCommander.Interposer.Injector.exe' "$d\x86\"
+          Copy-Item -Recurse $sampleDir "$d\"
+          Compress-Archive -Path "$d\*" -DestinationPath "LANCommander.Interposer.$version.zip"
+
+          # Proxy (version.dll)
+          $d = 'pkg\proxy'
+          New-Item -ItemType Directory -Force "$d\x64", "$d\x86" | Out-Null
+          Copy-Item 'x64\Release Proxy\version.dll'   "$d\x64\"
+          Copy-Item 'Win32\Release Proxy\version.dll' "$d\x86\"
+          Copy-Item -Recurse $sampleDir "$d\"
+          Compress-Archive -Path "$d\*" -DestinationPath "LANCommander.Interposer.Proxy.$version.zip"
+
+          # ASI
+          $d = 'pkg\asi'
+          New-Item -ItemType Directory -Force "$d\x64", "$d\x86" | Out-Null
+          Copy-Item 'x64\Release ASI\LANCommander.Interposer.asi'   "$d\x64\"
+          Copy-Item 'Win32\Release ASI\LANCommander.Interposer.asi' "$d\x86\"
+          Copy-Item -Recurse $sampleDir "$d\"
+          Compress-Archive -Path "$d\*" -DestinationPath "LANCommander.Interposer.ASI.$version.zip"
+
+      - name: Create LCX packages
+        shell: pwsh
+        run: |
+          Add-Type -AssemblyName System.IO.Compression.FileSystem
+
+          $version   = '${{ github.ref_name }}'
+          $buildDate = (Get-Date -Format 'yyyy-MM-ddTHH:mm:ssZ')
+          $redistDir = 'LANCommander.Interposer.Redistributable'
+
+          function New-LcxPackage {
+            param([string]$ZipPath, [string]$OutPath)
+
+            $archiveGuid   = [guid]::NewGuid().ToString()
+            $objectKeyGuid = [guid]::NewGuid().ToString()
+
+            # Measure sizes
+            $compressedSize   = (Get-Item $ZipPath).Length
+            $uncompressedSize = 0
+            $zf = [System.IO.Compression.ZipFile]::OpenRead($ZipPath)
+            foreach ($e in $zf.Entries) { $uncompressedSize += $e.Length }
+            $zf.Dispose()
+
+            # Substitute variables in Manifest.yml
+            $manifest = (Get-Content "$redistDir\Manifest.yml" -Raw) `
+              -replace '\{BuildDate\}',       $buildDate `
+              -replace '\{ArchiveGUID\}',      $archiveGuid `
+              -replace '\{ObjectKeyGUID\}',    $objectKeyGuid `
+              -replace '\{VersionTag\}',       $version `
+              -replace '\{CompressedSize\}',   $compressedSize `
+              -replace '\{UncompressedSize\}', $uncompressedSize
+
+            # Assemble LCX contents in a temp directory
+            $tmp = "lcx_tmp_$archiveGuid"
+            New-Item -ItemType Directory -Force "$tmp\Archives" | Out-Null
+            Set-Content "$tmp\Manifest.yml" $manifest -Encoding UTF8NoBOM
+
+            # Copy any extra files from the redistributable directory
+            Get-ChildItem $redistDir -Exclude 'Manifest.yml' | ForEach-Object {
+              Copy-Item $_.FullName $tmp -Recurse
+            }
+
+            # Embed the ZIP as Archives/{ObjectKeyGUID}
+            Copy-Item $ZipPath "$tmp\Archives\$objectKeyGuid"
+
+            Compress-Archive -Path "$tmp\*" -DestinationPath $OutPath
+            Remove-Item -Recurse -Force $tmp
+          }
+
+          New-LcxPackage "LANCommander.Interposer.$version.zip"       "LANCommander.Interposer.$version.lcx"
+          New-LcxPackage "LANCommander.Interposer.Proxy.$version.zip" "LANCommander.Interposer.Proxy.$version.lcx"
+          New-LcxPackage "LANCommander.Interposer.ASI.$version.zip"   "LANCommander.Interposer.ASI.$version.lcx"
+
+      - name: Create GitHub release
+        uses: softprops/action-gh-release@v2
+        with:
+          generate_release_notes: true
+          files: |
+            LANCommander.Interposer*.zip
+            LANCommander.Interposer*.lcx

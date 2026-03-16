@@ -1,0 +1,23 @@
+Id: 2180362b-b469-4cbc-be5d-9d0baae164a4
+Name: LANCommander Interposer
+Description: A collection of Windows API compatibility shims
+ReleasedOn: {BuildDate}
+Archives:
+- Id: {ArchiveGUID}
+  Changelog: 
+  ObjectKey: {ObjectKeyGUID}
+  Version: {VersionTag}
+  CompressedSize: {CompressedSize}
+  UncompressedSize: {UncompressedSize}
+Scripts:
+- Id: e4e0c4da-36a5-4a6f-9d35-727d4b1e42e1
+  Type: Install
+  Name: Install Script
+  Description: 
+  RequiresAdmin: false
+- Id: eed8c097-3886-473a-9c2f-194b64ba9e36
+  Type: NameChange
+  Name: Name Change Script
+  Description: 
+  RequiresAdmin: false
+ManifestVersion: 2.0.1

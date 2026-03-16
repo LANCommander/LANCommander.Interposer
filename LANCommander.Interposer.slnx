@@ -2,6 +2,10 @@
   <Configurations>
     <Platform Name="x64" />
     <Platform Name="x86" />
+    <BuildType Name="Debug" />
+    <BuildType Name="Release" />
+    <BuildType Name="Release Proxy" />
+    <BuildType Name="Release ASI" />
   </Configurations>
   <Project Path="LANCommander.Interposer/LANCommander.Interposer.Injector.vcxproj" Id="8f2a1b3c-4d5e-6f7a-8b9c-0d1e2f3a4b5c" />
   <Project Path="LANCommander.Interposer/LANCommander.Interposer.vcxproj" Id="61d926cb-eaec-4c45-af2d-571b2c61120a" />
