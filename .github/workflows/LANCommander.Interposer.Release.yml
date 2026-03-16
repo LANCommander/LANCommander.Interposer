@@ -27,13 +27,13 @@ jobs:
       - name: Build Release x64
         run: >
           msbuild LANCommander.Interposer.slnx
-          /t:LANCommander_Interposer;LANCommander_Interposer_Injector
+          /t:LANCommander_Interposer,LANCommander_Interposer_Injector
           /p:Configuration=Release /p:Platform=x64
 
       - name: Build Release x86
         run: >
           msbuild LANCommander.Interposer.slnx
-          /t:LANCommander_Interposer;LANCommander_Interposer_Injector
+          /t:LANCommander_Interposer,LANCommander_Interposer_Injector
           /p:Configuration=Release /p:Platform=x86
 
       - name: Build Release Proxy x64
