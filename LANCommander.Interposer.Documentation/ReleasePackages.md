@@ -1,9 +1,9 @@
 ---
-sidebar_label: Releases
+sidebar_label: Release Packages
 sidebar_position: 2
 ---
 
-# Releases
+# Release Packages
 
 Each release publishes three package variants — a ZIP for manual deployment and a matching LCX for import into LANCommander. Choose the variant that matches how the DLL will be loaded into the game process.
 
@@ -78,6 +78,6 @@ Each variant is also distributed as an `.lcx` file for direct import into LANCom
 
 | File | Variant |
 |---|---|
-| `LANCommander.Interposer.<version>.lcx` | Standard |
-| `LANCommander.Interposer.Proxy.<version>.lcx` | Proxy |
-| `LANCommander.Interposer.ASI.<version>.lcx` | ASI |
+| `LANCommander.Interposer.<version>.<architecture>.lcx` | Standard |
+| `LANCommander.Interposer.Proxy.<version>.<architecture>.lcx` | Proxy |
+| `LANCommander.Interposer.ASI.<version>.<architecture>.lcx` | ASI |
