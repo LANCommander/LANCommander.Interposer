@@ -100,10 +100,10 @@ jobs:
           Copy-Item -Recurse $sampleDir "$d\x64\"
           Compress-Archive -Path "$d\x64\*" -DestinationPath "LANCommander.Interposer.ASI.$version.x64.zip"
 
-          New-Item -ItemType Directory -Force "$d\x64" | Out-Null
-          Copy-Item 'Release\ASI\x64\LANCommander.Interposer.asi' "$d\x64\"
-          Copy-Item -Recurse $sampleDir "$d\x64\"
-          Compress-Archive -Path "$d\x64\*" -DestinationPath "LANCommander.Interposer.ASI.$version.x64.zip"
+          New-Item -ItemType Directory -Force "$d\x86" | Out-Null
+          Copy-Item 'Release\ASI\x86\LANCommander.Interposer.asi' "$d\x86\"
+          Copy-Item -Recurse $sampleDir "$d\x86\"
+          Compress-Archive -Path "$d\x86\*" -DestinationPath "LANCommander.Interposer.ASI.$version.x86.zip"
 
       - name: Create LCX packages
         shell: pwsh
