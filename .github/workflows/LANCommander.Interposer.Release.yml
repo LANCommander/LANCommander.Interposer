@@ -1,6 +1,7 @@
 name: Release
 
 on:
+  workflow_dispatch:
   push:
     tags:
       - 'v*'
@@ -68,29 +69,41 @@ jobs:
 
           # Standard (DLL + Injector)
           $d = 'pkg\standard'
-          New-Item -ItemType Directory -Force "$d\x64", "$d\x86" | Out-Null
-          Copy-Item 'x64\Release\LANCommander.Interposer.dll'            "$d\x64\"
-          Copy-Item 'x64\Release\LANCommander.Interposer.Injector.exe'   "$d\x64\"
-          Copy-Item 'x86\Release\LANCommander.Interposer.dll'          "$d\x86\"
-          Copy-Item 'x86\Release\LANCommander.Interposer.Injector.exe' "$d\x86\"
-          Copy-Item -Recurse $sampleDir "$d\"
-          Compress-Archive -Path "$d\*" -DestinationPath "LANCommander.Interposer.$version.zip"
+          New-Item -ItemType Directory -Force "$d\x64" | Out-Null
+          Copy-Item 'Release\Injector\x64\LANCommander.Interposer.dll'            "$d\x64\"
+          Copy-Item 'Release\Injector\x64\LANCommander.Interposer.Injector.exe'   "$d\x64\"
+          Copy-Item -Recurse $sampleDir "$d\x64\"
+          Compress-Archive -Path "$d\x64\*" -DestinationPath "LANCommander.Interposer.$version.x64.zip"
+
+          New-Item -ItemType Directory -Force "$d\x86" | Out-Null
+          Copy-Item 'Release\Injector\x86\LANCommander.Interposer.dll'            "$d\x86\"
+          Copy-Item 'Release\Injector\x86\LANCommander.Interposer.Injector.exe'   "$d\x86\"
+          Copy-Item -Recurse $sampleDir "$d\x86\"
+          Compress-Archive -Path "$d\x86\*" -DestinationPath "LANCommander.Interposer.$version.x86.zip"
 
           # Proxy (version.dll)
           $d = 'pkg\proxy'
-          New-Item -ItemType Directory -Force "$d\x64", "$d\x86" | Out-Null
-          Copy-Item 'x64\Release Proxy\version.dll'   "$d\x64\"
-          Copy-Item 'x86\Release Proxy\version.dll' "$d\x86\"
-          Copy-Item -Recurse $sampleDir "$d\"
-          Compress-Archive -Path "$d\*" -DestinationPath "LANCommander.Interposer.Proxy.$version.zip"
+          New-Item -ItemType Directory -Force "$d\x64" | Out-Null
+          Copy-Item 'Release\Proxy\x64\version.dll' "$d\x64\"
+          Copy-Item -Recurse $sampleDir "$d\x64\"
+          Compress-Archive -Path "$d\x64\*" -DestinationPath "LANCommander.Interposer.Proxy.$version.x64.zip"
+
+          New-Item -ItemType Directory -Force "$d\x86" | Out-Null
+          Copy-Item 'Release\Proxy\x86\version.dll' "$d\x86\"
+          Copy-Item -Recurse $sampleDir "$d\x86\"
+          Compress-Archive -Path "$d\x86\*" -DestinationPath "LANCommander.Interposer.Proxy.$version.x86.zip"
 
           # ASI
           $d = 'pkg\asi'
-          New-Item -ItemType Directory -Force "$d\x64", "$d\x86" | Out-Null
-          Copy-Item 'x64\Release ASI\LANCommander.Interposer.asi'   "$d\x64\"
-          Copy-Item 'x86\Release ASI\LANCommander.Interposer.asi' "$d\x86\"
-          Copy-Item -Recurse $sampleDir "$d\"
-          Compress-Archive -Path "$d\*" -DestinationPath "LANCommander.Interposer.ASI.$version.zip"
+          New-Item -ItemType Directory -Force "$d\x64" | Out-Null
+          Copy-Item 'Release\ASI\x64\LANCommander.Interposer.asi' "$d\x64\"
+          Copy-Item -Recurse $sampleDir "$d\x64\"
+          Compress-Archive -Path "$d\x64\*" -DestinationPath "LANCommander.Interposer.ASI.$version.x64.zip"
+
+          New-Item -ItemType Directory -Force "$d\x64" | Out-Null
+          Copy-Item 'Release\ASI\x64\LANCommander.Interposer.asi' "$d\x64\"
+          Copy-Item -Recurse $sampleDir "$d\x64\"
+          Compress-Archive -Path "$d\x64\*" -DestinationPath "LANCommander.Interposer.ASI.$version.x64.zip"
 
       - name: Create LCX packages
         shell: pwsh
@@ -140,9 +153,12 @@ jobs:
             Remove-Item -Recurse -Force $tmp
           }
 
-          New-LcxPackage "LANCommander.Interposer.$version.zip"       "LANCommander.Interposer.$version.lcx"
-          New-LcxPackage "LANCommander.Interposer.Proxy.$version.zip" "LANCommander.Interposer.Proxy.$version.lcx"
-          New-LcxPackage "LANCommander.Interposer.ASI.$version.zip"   "LANCommander.Interposer.ASI.$version.lcx"
+          New-LcxPackage "LANCommander.Interposer.$version.x86.zip"       "LANCommander.Interposer.$version.x86.lcx"
+          New-LcxPackage "LANCommander.Interposer.Proxy.$version.x86.zip" "LANCommander.Interposer.Proxy.$version.x86.lcx"
+          New-LcxPackage "LANCommander.Interposer.ASI.$version.x86.zip"   "LANCommander.Interposer.ASI.$version.x86.lcx"
+          New-LcxPackage "LANCommander.Interposer.$version.x64.zip"       "LANCommander.Interposer.$version.x64.lcx"
+          New-LcxPackage "LANCommander.Interposer.Proxy.$version.x64.zip" "LANCommander.Interposer.Proxy.$version.x64.lcx"
+          New-LcxPackage "LANCommander.Interposer.ASI.$version.x64.zip"   "LANCommander.Interposer.ASI.$version.x64.lcx"
 
       - name: Create GitHub release
         uses: softprops/action-gh-release@v2
