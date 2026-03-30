@@ -3,6 +3,7 @@
 #include "fastdl.h"
 #include "files.h"
 #include "identity.h"
+#include "plugins.h"
 #include "registry.h"
 #include "window.h"
 
@@ -249,10 +250,13 @@ void InstallHooks()
     }
 
     MH_EnableHook(MH_ALL_HOOKS);
+
+    LoadPlugins();
 }
 
 void RemoveHooks()
 {
+    UnloadPlugins();
     RemoveRegistryHooks();
     ShutdownFastDL();
     MH_DisableHook(MH_ALL_HOOKS);

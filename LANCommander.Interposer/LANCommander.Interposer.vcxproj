@@ -312,6 +312,7 @@
     <ClCompile Include="dll\src\files.cpp" />
     <ClCompile Include="dll\src\hooks.cpp" />
     <ClCompile Include="dll\src\identity.cpp" />
+    <ClCompile Include="dll\src\plugins.cpp" />
     <ClCompile Include="dll\src\registry.cpp" />
     <ClCompile Include="dll\src\window.cpp" />
   </ItemGroup>
@@ -322,6 +323,7 @@
     <ClInclude Include="dll\src\files.h" />
     <ClInclude Include="dll\src\hooks.h" />
     <ClInclude Include="dll\src\identity.h" />
+    <ClInclude Include="dll\src\plugins.h" />
     <ClInclude Include="dll\src\registry.h" />
     <ClInclude Include="dll\src\window.h" />
   </ItemGroup>
