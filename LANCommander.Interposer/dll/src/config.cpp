@@ -1,6 +1,7 @@
 #include "config.h"
 
 #include <mutex>
+#include <shared_mutex>
 #include <string>
 #include <vector>
 #include <yaml-cpp/yaml.h>
@@ -26,6 +27,10 @@ bool                      g_fastdlBlockSensitiveFiles = true;
 static std::vector<FileRedirect> g_redirects;
 static HANDLE                    g_logHandle = INVALID_HANDLE_VALUE;
 static std::mutex                g_logMutex;
+
+// Persisted YAML root for plugin config queries (read-only after LoadConfig).
+static YAML::Node        g_configRoot;
+static std::shared_mutex g_configMutex;
 
 // ---------------------------------------------------------------------------
 // ExpandEnvVars
@@ -58,6 +63,19 @@ static std::wstring Utf8ToWide(const std::string& s)
     if (len <= 1) return {};
     std::wstring out(len - 1, L'\0');
     MultiByteToWideChar(CP_UTF8, 0, s.c_str(), -1, out.data(), len);
+    return out;
+}
+
+// ---------------------------------------------------------------------------
+// WideToUtf8
+// ---------------------------------------------------------------------------
+static std::string WideToUtf8(const std::wstring& s)
+{
+    if (s.empty()) return {};
+    int len = WideCharToMultiByte(CP_UTF8, 0, s.c_str(), -1, nullptr, 0, nullptr, nullptr);
+    if (len <= 1) return {};
+    std::string out(len - 1, '\0');
+    WideCharToMultiByte(CP_UTF8, 0, s.c_str(), -1, out.data(), len, nullptr, nullptr);
     return out;
 }
 
@@ -211,6 +229,91 @@ void CloseLog()
 }
 
 // ---------------------------------------------------------------------------
+// Plugin API exports
+// ---------------------------------------------------------------------------
+
+// Return the effective username: the configured/injected override if set, otherwise
+// the real Windows account name from GetUserNameW.
+// bufferSize is in wchar_t units and must include room for the null terminator.
+// Returns TRUE on success, FALSE if the buffer is too small or GetUserNameW fails.
+extern "C" __declspec(dllexport)
+BOOL InterposerGetUsername(wchar_t* buffer, DWORD bufferSize)
+{
+    if (!buffer || bufferSize == 0) return FALSE;
+
+    if (!g_username.empty())
+    {
+        DWORD needed = static_cast<DWORD>(g_username.size() + 1);
+        if (bufferSize < needed) return FALSE;
+        wmemcpy(buffer, g_username.c_str(), needed);
+        return TRUE;
+    }
+
+    // No override configured — delegate to the real API (hooks not yet involved here).
+    return GetUserNameW(buffer, &bufferSize);
+}
+
+// Write a line to the session log. Always writes regardless of logging flags.
+// verb    — label shown in the log (e.g. L"MYPLUGIN" or L"[MYPLUGIN]"); automatically
+//           stripped of existing brackets/whitespace, truncated to 16 chars, and
+//           re-wrapped as [verb] right-padded to 18 characters.
+// message — path or free-form text
+extern "C" __declspec(dllexport)
+void InterposerLog(const wchar_t* verb, const wchar_t* message)
+{
+    if (!verb || !message) return;
+    WriteLogLine(verb, message, nullptr);
+}
+
+// Read a scalar value from Config.yml by dot-separated YAML path.
+// dotPath    — e.g. L"Plugins.MyPlugin.Setting"
+// buffer     — receives the null-terminated wide string value
+// bufferSize — capacity of buffer in wchar_t units
+// Returns TRUE on success, FALSE if the key does not exist, is not a scalar,
+// or the buffer is too small.
+extern "C" __declspec(dllexport)
+BOOL InterposerGetConfigString(const wchar_t* dotPath, wchar_t* buffer, DWORD bufferSize)
+{
+    if (!dotPath || !buffer || bufferSize == 0) return FALSE;
+
+    std::shared_lock lk(g_configMutex);
+
+    // Traverse the node tree one segment at a time
+    YAML::Node node = g_configRoot;
+    std::wstring wpath(dotPath);
+    size_t start = 0;
+
+    while (start <= wpath.size())
+    {
+        size_t dot = wpath.find(L'.', start);
+        std::wstring wseg = (dot == std::wstring::npos)
+            ? wpath.substr(start)
+            : wpath.substr(start, dot - start);
+
+        if (wseg.empty()) return FALSE;
+
+        std::string seg = WideToUtf8(wseg);
+        if (!node[seg]) return FALSE;
+        node = node[seg];
+
+        if (dot == std::wstring::npos) break;
+        start = dot + 1;
+    }
+
+    if (!node.IsScalar()) return FALSE;
+
+    std::string value;
+    try { value = node.as<std::string>(); }
+    catch (...) { return FALSE; }
+
+    int wlen = MultiByteToWideChar(CP_UTF8, 0,
+        value.c_str(), static_cast<int>(value.size()) + 1,
+        buffer, static_cast<int>(bufferSize));
+
+    return wlen > 0 ? TRUE : FALSE;
+}
+
+// ---------------------------------------------------------------------------
 // LoadConfig
 // ---------------------------------------------------------------------------
 void LoadConfig()
@@ -282,6 +385,11 @@ void LoadConfig()
     YAML::Node root;
     try { root = YAML::Load(utf8str); }
     catch (...) { return; }
+
+    {
+        std::unique_lock lk(g_configMutex);
+        g_configRoot = root;
+    }
 
     // ── settings ─────────────────────────────────────────────────────────────
     if (YAML::Node logging = root["Logging"])

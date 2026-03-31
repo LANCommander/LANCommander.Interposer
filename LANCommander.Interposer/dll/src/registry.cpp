@@ -529,31 +529,43 @@ static void LoadRegFile()
             continue;
 
         // Check whether this line starts a backslash-continued value
-        if (line[0] == L'"' && !line.empty() && line.back() == L'\\' &&
+        if ((line[0] == L'"' || line[0] == L'@') && !line.empty() && line.back() == L'\\' &&
             line.find(L'=') != std::wstring::npos)
         {
             pending = line;
             pending.pop_back();
-            
+
             continue;
         }
 
-        // Value entry: "name"=<data>
-        if (line[0] != L'"')
-            continue;
+        // Value entry: "name"=<data>  or  @=<data> (default/unnamed value)
+        std::wstring valueName;
+        std::wstring valueData;
 
-        size_t nameEnd = line.find(L'"', 1);
-        
-        if (nameEnd == std::wstring::npos)
-            continue;
-        
-        size_t equalSignPosition = nameEnd + 1;
-        
-        if (equalSignPosition >= line.size() || line[equalSignPosition] != L'=')
-            continue;
+        if (line[0] == L'@' && line.size() >= 2 && line[1] == L'=')
+        {
+            // valueName stays empty — that is the default value's key in g_store
+            valueData = line.substr(2);
+        }
+        else if (line[0] == L'"')
+        {
+            size_t nameEnd = line.find(L'"', 1);
 
-        std::wstring valueName = ToUpper(line.substr(1, nameEnd - 1));
-        std::wstring valueData = line.substr(equalSignPosition + 1);
+            if (nameEnd == std::wstring::npos)
+                continue;
+
+            size_t equalSignPosition = nameEnd + 1;
+
+            if (equalSignPosition >= line.size() || line[equalSignPosition] != L'=')
+                continue;
+
+            valueName = ToUpper(line.substr(1, nameEnd - 1));
+            valueData = line.substr(equalSignPosition + 1);
+        }
+        else
+        {
+            continue;
+        }
 
         RegValue registryValue{};
 
@@ -634,9 +646,14 @@ static void SaveRegFile()
 
             for (auto& [name, rv] : values)
             {
-                output += L'"';
-                output += name;
-                output += L"\"=";
+                if (name.empty())
+                    output += L"@=";
+                else
+                {
+                    output += L'"';
+                    output += name;
+                    output += L"\"=";
+                }
 
                 if (rv.type == REG_SZ)
                 {
@@ -1676,4 +1693,76 @@ void RemoveRegistryHooks()
     // Just flush any pending writes.
     if (g_dirty)
         SaveRegFile();
+}
+
+// ---------------------------------------------------------------------------
+// Plugin API export
+// ---------------------------------------------------------------------------
+
+// Inject a REG_SZ value into the in-memory virtual store so that subsequent
+// RegQueryValueEx calls for keyPath\valueName return value.
+// keyPath must be a full path starting with a hive name, e.g.
+//   L"HKEY_LOCAL_MACHINE\\SOFTWARE\\MyGame"
+// valueName may be "@" or nullptr/empty to target the default (unnamed) value.
+// The value is in-memory only and is NOT persisted to Registry.reg.
+extern "C" __declspec(dllexport)
+void InterposerSetRegistryValue(const wchar_t* keyPath, const wchar_t* valueName, const wchar_t* value)
+{
+    if (!keyPath || !value) return;
+
+    std::wstring upperPath = ToUpper(keyPath);
+    std::wstring upperName = valueName ? ToUpper(valueName) : std::wstring{};
+    if (upperName == L"@") upperName.clear(); // @ = default value
+
+    std::wstring wval(value);
+    RegValue rv;
+    rv.type = REG_SZ;
+    rv.data.resize((wval.size() + 1) * sizeof(wchar_t));
+    memcpy(rv.data.data(), wval.c_str(), rv.data.size());
+
+    std::unique_lock lk(g_storeMutex);
+    g_store[upperPath][upperName] = std::move(rv);
+    // g_dirty intentionally NOT set — plugin values are transient
+}
+
+// Inject a transient REG_SZ value into every virtual store key whose path ends
+// with keySuffix (matched on a backslash boundary, case-insensitive).
+// valueName may be "@" or nullptr/empty to target the default (unnamed) value.
+// Returns the number of keys updated; 0 means keySuffix matched nothing in the
+// virtual store — ensure the key exists in Registry.reg.
+extern "C" __declspec(dllexport)
+DWORD InterposerSetRegistryValueBySuffix(const wchar_t* keySuffix, const wchar_t* valueName, const wchar_t* value)
+{
+    if (!keySuffix || !value) return 0;
+
+    std::wstring upperSuffix = ToUpper(keySuffix);
+    if (!upperSuffix.empty() && upperSuffix.front() == L'\\')
+        upperSuffix.erase(0, 1); // strip optional leading backslash
+
+    std::wstring upperName = valueName ? ToUpper(valueName) : std::wstring{};
+    if (upperName == L"@") upperName.clear(); // @ = default value
+
+    std::wstring wval(value);
+    RegValue rv;
+    rv.type = REG_SZ;
+    rv.data.resize((wval.size() + 1) * sizeof(wchar_t));
+    memcpy(rv.data.data(), wval.c_str(), rv.data.size());
+
+    DWORD count = 0;
+    std::unique_lock lk(g_storeMutex);
+    for (auto& [path, values] : g_store)
+    {
+        if (path.size() >= upperSuffix.size())
+        {
+            size_t offset = path.size() - upperSuffix.size();
+            if ((offset == 0 || path[offset - 1] == L'\\') &&
+                path.compare(offset, upperSuffix.size(), upperSuffix) == 0)
+            {
+                values[upperName] = rv;
+                ++count;
+            }
+        }
+    }
+    // g_dirty intentionally NOT set — plugin values are transient
+    return count;
 }

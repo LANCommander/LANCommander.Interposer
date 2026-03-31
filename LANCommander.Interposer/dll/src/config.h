@@ -50,3 +50,20 @@ std::wstring ApplyFileRedirects(const std::wstring& path);
 void LogFileAccess(const wchar_t* verb, const wchar_t* sourcePath, const wchar_t* redirectionPath = nullptr);
 void LogRegistryAccess(const wchar_t* verb, const wchar_t* keyPath, const wchar_t* valueName = nullptr);
 void LogFastDLAccess(const wchar_t* verb, const wchar_t* url, const wchar_t* localPath);
+
+// ---------------------------------------------------------------------------
+// Plugin API — exported by name, resolved by plugins via GetProcAddress.
+// ---------------------------------------------------------------------------
+
+// Return the effective username (configured override or real Windows account name).
+// bufferSize is in wchar_t units including the null terminator.
+extern "C" __declspec(dllexport) BOOL InterposerGetUsername(wchar_t* buffer, DWORD bufferSize);
+
+// Write a line to the session log regardless of logging flags.
+// verb should be padded to ~15 chars for alignment, e.g. "[MYPLUGIN]     "
+extern "C" __declspec(dllexport) void InterposerLog(const wchar_t* verb, const wchar_t* message);
+
+// Read a scalar value from Config.yml by dot-separated YAML path.
+// Returns TRUE on success; FALSE if the key is missing, not scalar, or buffer too small.
+// Example: InterposerGetConfigString(L"Plugins.MyPlugin.Setting", buf, ARRAYSIZE(buf))
+extern "C" __declspec(dllexport) BOOL InterposerGetConfigString(const wchar_t* dotPath, wchar_t* buffer, DWORD bufferSize);
