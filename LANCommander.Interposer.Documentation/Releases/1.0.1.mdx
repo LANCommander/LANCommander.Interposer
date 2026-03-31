@@ -1,0 +1,22 @@
+---
+sidebar_label: 1.0.1
+sidebar_position: 2
+---
+
+import ReleaseDownloads from '@site/src/components/ReleaseDownloads';
+
+# Interposer 1.0.1 Release Notes
+
+## Downloads
+
+<ReleaseDownloads repo="LANCommander/LANCommander.Interposer" release="v1.0.1" />
+
+## What's Changed
+
+### Plugin Support
+
+The interposer now loads `.dll` and `.asi` files from `.interposer\Plugins\` on startup. Plugins are loaded after all built-in hooks are active, so they can safely install their own hooks. Place any compatible plugin alongside your config directory and it will be picked up automatically. Successful loads are recorded in the session log as `[PLUGIN LOAD]`; failures include the Win32 error code.
+
+### Registry Emulation: WOW64 VirtualStore Handling
+
+Fixed an edge case where registry operations on paths in the virtual store could bypass emulation on non-elevated processes. Windows UAC registry virtualization silently redirects writes to `HKLM\SOFTWARE\...` from non-elevated processes to `HKCU\Software\Classes\VirtualStore\MACHINE\...`. If a handle to the VirtualStore path reached the hooks — for example, a handle opened before injection or resolved via `NtQueryKey` — `InVirtualSpace` would return false and the operation would fall through to the real registry. Both the `HKEY_CURRENT_USER\...\VirtualStore\MACHINE\` and `HKEY_USERS\<SID>\...\VirtualStore\MACHINE\` path forms are now normalized to their canonical `HKEY_LOCAL_MACHINE\` equivalents before any virtual space checks.
