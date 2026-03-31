@@ -88,6 +88,44 @@ static std::wstring ToUpper(std::wstring s)
     return s;
 }
 
+// Translate WOW64 UAC registry virtualization paths back to their canonical locations.
+//   HKEY_CURRENT_USER\SOFTWARE\CLASSES\VIRTUALSTORE\MACHINE\<X>  ->  HKEY_LOCAL_MACHINE\<X>
+//   HKEY_USERS\<SID>\SOFTWARE\CLASSES\VIRTUALSTORE\MACHINE\<X>   ->  HKEY_LOCAL_MACHINE\<X>
+// Input must already be uppercased (as returned by ToUpper / BuildPath).
+static std::wstring NormalizeVirtualStore(std::wstring path)
+{
+    // HKEY_CURRENT_USER variant
+    {
+        static const wchar_t kPrefix[] =
+            L"HKEY_CURRENT_USER\\SOFTWARE\\CLASSES\\VIRTUALSTORE\\MACHINE\\";
+        const size_t kPrefixLen = ARRAYSIZE(kPrefix) - 1;
+        if (path.size() > kPrefixLen && path.compare(0, kPrefixLen, kPrefix) == 0)
+            return L"HKEY_LOCAL_MACHINE\\" + path.substr(kPrefixLen);
+    }
+
+    // HKEY_USERS\<SID>\... variant
+    {
+        static const wchar_t kHU[]  = L"HKEY_USERS\\";
+        static const wchar_t kVSM[] = L"\\SOFTWARE\\CLASSES\\VIRTUALSTORE\\MACHINE\\";
+        const size_t kHULen  = ARRAYSIZE(kHU)  - 1;
+        const size_t kVSMLen = ARRAYSIZE(kVSM) - 1;
+
+        if (path.size() > kHULen + kVSMLen &&
+            path.compare(0, kHULen, kHU) == 0)
+        {
+            size_t sidEnd = path.find(L'\\', kHULen);
+            if (sidEnd != std::wstring::npos &&
+                path.size() > sidEnd + kVSMLen &&
+                path.compare(sidEnd, kVSMLen, kVSM) == 0)
+            {
+                return L"HKEY_LOCAL_MACHINE\\" + path.substr(sidEnd + kVSMLen);
+            }
+        }
+    }
+
+    return path;
+}
+
 // Returns the full uppercase path from base hKey + optional subkey.
 // Returns "" if hKey is an unrecognised real OS handle.
 static std::wstring BuildPath(HKEY hKey, LPCWSTR lpSubKey)
@@ -126,7 +164,7 @@ static std::wstring BuildPath(HKEY hKey, LPCWSTR lpSubKey)
         base += lpSubKey;
     }
 
-    return ToUpper(base);
+    return NormalizeVirtualStore(ToUpper(base));
 }
 
 // Ask the OS for the full path of any open HKEY via NtQueryKey, then convert
@@ -204,7 +242,7 @@ static std::wstring GetAnyPathFull(HKEY h)
     }
     if (const wchar_t* name = PredefinedName(h))
         return ToUpper(name);
-    return GetKeyPathViaSystem(h);
+    return NormalizeVirtualStore(GetKeyPathViaSystem(h));
 }
 
 // True if upperPath exactly matches, or is an ancestor/descendant of any stored key.
