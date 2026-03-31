@@ -50,14 +50,14 @@ void LoadPlugins()
             if (hMod)
             {
                 g_plugins.push_back(hMod);
-                LogFileAccess(L"[PLUGIN LOAD]  ", fullPath.c_str());
+                LogFileAccess(L"PLUGIN LOAD", fullPath.c_str());
             }
             else
             {
                 // Log load failure (error code appended to path)
                 wchar_t errBuf[MAX_PATH + 32];
                 wsprintfW(errBuf, L"%s  (error %u)", fullPath.c_str(), GetLastError());
-                LogFileAccess(L"[PLUGIN ERROR] ", errBuf);
+                LogFileAccess(L"PLUGIN ERROR", errBuf);
             }
         }
         while (FindNextFileW(hFind, &fd));

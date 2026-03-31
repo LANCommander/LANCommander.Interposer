@@ -607,7 +607,7 @@ static bool FastDLImpl(const std::wstring& localPath, bool headOnly)
     WinHttpCloseHandle(connectHandler);
 
     if (ok)
-        LogFastDLAccess(L"[FASTDL]       ", url.c_str(), localPath.c_str());
+        LogFastDLAccess(L"FASTDL", url.c_str(), localPath.c_str());
 
     return ok;
 }

@@ -762,7 +762,7 @@ static LSTATUS WINAPI HookRegOpenKeyExW(HKEY hKey, LPCWSTR lpSubKey, DWORD ulOpt
 {
     std::wstring path = BuildPath(hKey, lpSubKey);
     
-    LogRegistryAccess(L"[REG OPEN]     ", path.empty() ? L"(unknown)" : path.c_str());
+    LogRegistryAccess(L"REG OPEN", path.empty() ? L"(unknown)" : path.c_str());
 
     if (!path.empty() && InVirtualSpace(path))
     {
@@ -783,7 +783,7 @@ static LSTATUS WINAPI HookRegOpenKeyExA(HKEY hKey, LPCSTR lpSubKey, DWORD ulOpti
 {
     std::wstring wideSubKey = lpSubKey ? AnsiToWide(lpSubKey) : std::wstring{};
     std::wstring path = BuildPath(hKey, wideSubKey.empty() ? nullptr : wideSubKey.c_str());
-    LogRegistryAccess(L"[REG OPEN]     ", path.empty() ? L"(unknown)" : path.c_str());
+    LogRegistryAccess(L"REG OPEN", path.empty() ? L"(unknown)" : path.c_str());
 
     if (!path.empty() && InVirtualSpace(path))
     {
@@ -808,7 +808,7 @@ static LSTATUS WINAPI HookRegCreateKeyExW(HKEY hKey, LPCWSTR lpSubKey, DWORD Res
 {
     std::wstring path = BuildPath(hKey, lpSubKey);
     
-    LogRegistryAccess(L"[REG CREATE]   ", path.empty() ? L"(unknown)" : path.c_str());
+    LogRegistryAccess(L"REG CREATE", path.empty() ? L"(unknown)" : path.c_str());
 
     if (!path.empty() && InVirtualSpace(path))
     {
@@ -845,7 +845,7 @@ static LSTATUS WINAPI HookRegCreateKeyExA(HKEY hKey, LPCSTR lpSubKey, DWORD Rese
     std::wstring wideSubKey = lpSubKey ? AnsiToWide(lpSubKey) : std::wstring{};
     std::wstring path = BuildPath(hKey, wideSubKey.empty() ? nullptr : wideSubKey.c_str());
     
-    LogRegistryAccess(L"[REG CREATE]   ", path.empty() ? L"(unknown)" : path.c_str());
+    LogRegistryAccess(L"REG CREATE", path.empty() ? L"(unknown)" : path.c_str());
 
     if (!path.empty() && InVirtualSpace(path))
     {
@@ -947,7 +947,7 @@ static LSTATUS WINAPI HookRegQueryValueExW(HKEY hKey, LPCWSTR lpValueName, LPDWO
     
     if (!path.empty())
     {
-        LogRegistryAccess(L"[REG READ]     ", path.c_str(), lpValueName);
+        LogRegistryAccess(L"REG READ", path.c_str(), lpValueName);
         
         return VirtualQueryValueW(path, lpValueName, lpType, lpData, lpcbData);
     }
@@ -958,7 +958,7 @@ static LSTATUS WINAPI HookRegQueryValueExW(HKEY hKey, LPCWSTR lpValueName, LPDWO
         std::wstring realPath = GetAnyPathFull(hKey);
         
         if (!realPath.empty())
-            LogRegistryAccess(L"[REG READ]     ", realPath.c_str(), lpValueName);
+            LogRegistryAccess(L"REG READ", realPath.c_str(), lpValueName);
     }
 
     return g_origRegQueryValueExW(hKey, lpValueName, lpReserved, lpType, lpData, lpcbData);
@@ -978,7 +978,7 @@ static LSTATUS WINAPI HookRegQueryValueExA(HKEY hKey, LPCSTR lpValueName, LPDWOR
             std::wstring wideName = lpValueName ? AnsiToWide(lpValueName) : std::wstring{};
             
             if (!realPath.empty())
-                LogRegistryAccess(L"[REG READ]     ", realPath.c_str(), wideName.c_str());
+                LogRegistryAccess(L"REG READ", realPath.c_str(), wideName.c_str());
         }
         
         return g_origRegQueryValueExA(hKey, lpValueName, lpReserved, lpType, lpData, lpcbData);
@@ -986,7 +986,7 @@ static LSTATUS WINAPI HookRegQueryValueExA(HKEY hKey, LPCSTR lpValueName, LPDWOR
 
     std::wstring wideName = lpValueName ? AnsiToWide(lpValueName) : std::wstring{};
     
-    LogRegistryAccess(L"[REG READ]     ", path.c_str(), wideName.c_str());
+    LogRegistryAccess(L"REG READ", path.c_str(), wideName.c_str());
     
     DWORD type = 0;
 
@@ -1059,13 +1059,13 @@ static LSTATUS WINAPI HookRegSetValueExW(HKEY hKey, LPCWSTR lpValueName, DWORD /
             std::wstring realPath = GetAnyPathFull(hKey);
             
             if (!realPath.empty())
-                LogRegistryAccess(L"[REG WRITE]    ", realPath.c_str(), lpValueName);
+                LogRegistryAccess(L"REG WRITE", realPath.c_str(), lpValueName);
         }
         
         return g_origRegSetValueExW(hKey, lpValueName, 0, dwType, lpData, cbData);
     }
 
-    LogRegistryAccess(L"[REG WRITE]    ", path.c_str(), lpValueName);
+    LogRegistryAccess(L"REG WRITE", path.c_str(), lpValueName);
 
     RegValue registryValue;
     registryValue.type = dwType;
@@ -1097,13 +1097,13 @@ static LSTATUS WINAPI HookRegSetValueExA(HKEY hKey, LPCSTR lpValueName, DWORD /*
             std::wstring realPath = GetAnyPathFull(hKey);
             
             if (!realPath.empty())
-                LogRegistryAccess(L"[REG WRITE]    ", realPath.c_str(), wideRegistyValueName.c_str());
+                LogRegistryAccess(L"REG WRITE", realPath.c_str(), wideRegistyValueName.c_str());
         }
         
         return g_origRegSetValueExA(hKey, lpValueName, 0, dwType, lpData, cbData);
     }
 
-    LogRegistryAccess(L"[REG WRITE]    ", path.c_str(), wideRegistyValueName.c_str());
+    LogRegistryAccess(L"REG WRITE", path.c_str(), wideRegistyValueName.c_str());
     
     RegValue registryValue;
     registryValue.type = dwType;
@@ -1146,13 +1146,13 @@ static LSTATUS WINAPI HookRegDeleteValueW(HKEY hKey, LPCWSTR lpValueName)
         {
             std::wstring realPath = GetAnyPathFull(hKey);
             if (!realPath.empty())
-                LogRegistryAccess(L"[REG DELETE]   ", realPath.c_str(), lpValueName);
+                LogRegistryAccess(L"REG DELETE", realPath.c_str(), lpValueName);
         }
         
         return g_origRegDeleteValueW(hKey, lpValueName);
     }
 
-    LogRegistryAccess(L"[REG DELETE]   ", path.c_str(), lpValueName);
+    LogRegistryAccess(L"REG DELETE", path.c_str(), lpValueName);
     
     std::wstring upperName = ToUpper(lpValueName ? lpValueName : L"");
     {
@@ -1196,7 +1196,7 @@ static LSTATUS WINAPI HookRegEnumValueW(HKEY hKey, DWORD dwIndex, LPWSTR lpValue
         {
             std::wstring realPath = GetAnyPathFull(hKey);
             if (!realPath.empty())
-                LogRegistryAccess(L"[REG ENUM]     ", realPath.c_str());
+                LogRegistryAccess(L"REG ENUM", realPath.c_str());
         }
         return g_origRegEnumValueW(hKey, dwIndex, lpValueName, lpcchValueName, nullptr, lpType, lpData, lpcbData);
     }
@@ -1274,7 +1274,7 @@ static LSTATUS WINAPI HookRegEnumValueA(HKEY hKey, DWORD dwIndex, LPSTR lpValueN
         {
             std::wstring realPath = GetAnyPathFull(hKey);
             if (!realPath.empty())
-                LogRegistryAccess(L"[REG ENUM]     ", realPath.c_str());
+                LogRegistryAccess(L"REG ENUM", realPath.c_str());
         }
         return g_origRegEnumValueA(hKey, dwIndex, lpValueName, lpcchValueName, nullptr, lpType, lpData, lpcbData);
     }
@@ -1405,7 +1405,7 @@ static LSTATUS WINAPI HookRegEnumKeyExW(HKEY hKey, DWORD dwIndex, LPWSTR lpName,
         {
             std::wstring realPath = GetAnyPathFull(hKey);
             if (!realPath.empty())
-                LogRegistryAccess(L"[REG ENUM]     ", realPath.c_str());
+                LogRegistryAccess(L"REG ENUM", realPath.c_str());
         }
         return g_origRegEnumKeyExW(hKey, dwIndex, lpName, lpcchName, nullptr, lpClass, lpcchClass, lpftLastWriteTime);
     }
@@ -1454,7 +1454,7 @@ static LSTATUS WINAPI HookRegEnumKeyExA(HKEY hKey, DWORD dwIndex, LPSTR lpName,
         {
             std::wstring realPath = GetAnyPathFull(hKey);
             if (!realPath.empty())
-                LogRegistryAccess(L"[REG ENUM]     ", realPath.c_str());
+                LogRegistryAccess(L"REG ENUM", realPath.c_str());
         }
         return g_origRegEnumKeyExA(hKey, dwIndex, lpName, lpcchName, nullptr, lpClass, lpcchClass, lpftLastWriteTime);
     }
@@ -1507,7 +1507,7 @@ static LSTATUS WINAPI HookRegQueryInfoKeyW(HKEY hKey, LPWSTR lpClass, LPDWORD lp
         {
             std::wstring realPath = GetAnyPathFull(hKey);
             if (!realPath.empty())
-                LogRegistryAccess(L"[REG QUERY]    ", realPath.c_str());
+                LogRegistryAccess(L"REG QUERY", realPath.c_str());
         }
         return g_origRegQueryInfoKeyW(hKey, lpClass, lpcchClass, nullptr, lpcSubKeys,
             lpcbMaxSubKeyLen, lpcbMaxClassLen, lpcValues, lpcbMaxValueNameLen,

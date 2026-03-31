@@ -43,9 +43,9 @@ static const wchar_t* AccessVerb(DWORD access)
 {
     bool r = (access & (GENERIC_READ  | FILE_READ_DATA))                    != 0;
     bool w = (access & (GENERIC_WRITE | FILE_WRITE_DATA | FILE_APPEND_DATA)) != 0;
-    if (w && r) return L"[FILE R/W]     ";
-    if (w)      return L"[FILE WRITE]   ";
-    return             L"[FILE READ]    ";
+    if (w && r) return L"FILE R/W";
+    if (w)      return L"FILE WRITE";
+    return             L"FILE READ";
 }
 
 // Core wide-path implementation shared by both W and A CreateFile hooks.
@@ -66,7 +66,7 @@ static HANDLE CreateFileWImpl(
     std::wstring redirected = ApplyFileRedirects(path);
 
     if (redirected != path)
-        LogFileAccess(L"[FILE REDIRECT]", path.c_str(), redirected.c_str());
+        LogFileAccess(L"FILE REDIRECT", path.c_str(), redirected.c_str());
     else
         LogFileAccess(AccessVerb(dwDesiredAccess), path.c_str());
 
@@ -82,7 +82,7 @@ static HANDLE CreateFileWImpl(
 
         if (!overlayPath.empty())
         {
-            LogFileAccess(L"[FILE OVERLAY] ", redirected.c_str(), overlayPath.c_str());
+            LogFileAccess(L"FILE OVERLAY", redirected.c_str(), overlayPath.c_str());
             return g_origCreateFileW(overlayPath.c_str(), dwDesiredAccess, dwShareMode,
                 lpSA, dwCreationDisposition, dwFlagsAndAttributes, hTemplateFile);
         }
@@ -149,11 +149,11 @@ static DWORD WINAPI HookGetFileAttributesW(LPCWSTR lpFileName)
 
     if (redirected != path)
     {
-        LogFileAccess(L"[FILE REDIRECT]", path.c_str(), redirected.c_str());
+        LogFileAccess(L"FILE REDIRECT", path.c_str(), redirected.c_str());
         return g_origGetFileAttributesW(redirected.c_str());
     }
 
-    LogFileAccess(L"[FILE ATTR]    ", path.c_str());
+    LogFileAccess(L"FILE ATTR", path.c_str());
 
     DWORD attrs = g_origGetFileAttributesW(lpFileName);
 
@@ -201,11 +201,11 @@ static DWORD WINAPI HookGetFileAttributesA(LPCSTR lpFileName)
 
     if (redirected != wpath)
     {
-        LogFileAccess(L"[FILE REDIRECT]", wpath.c_str(), redirected.c_str());
+        LogFileAccess(L"FILE REDIRECT", wpath.c_str(), redirected.c_str());
         return g_origGetFileAttributesW(redirected.c_str());
     }
 
-    LogFileAccess(L"[FILE ATTR]    ", wpath.c_str());
+    LogFileAccess(L"FILE ATTR", wpath.c_str());
 
     DWORD attrs = g_origGetFileAttributesA(lpFileName);
 
@@ -244,11 +244,11 @@ static HANDLE WINAPI HookFindFirstFileW(LPCWSTR lpFileName, LPWIN32_FIND_DATAW l
 
     if (redirected != path)
     {
-        LogFileAccess(L"[FILE REDIRECT]", path.c_str(), redirected.c_str());
+        LogFileAccess(L"FILE REDIRECT", path.c_str(), redirected.c_str());
         return g_origFindFirstFileW(redirected.c_str(), lpFindFileData);
     }
 
-    LogFileAccess(L"[FILE FIND]    ", path.c_str());
+    LogFileAccess(L"FILE FIND", path.c_str());
     return g_origFindFirstFileW(lpFileName, lpFindFileData);
 }
 
@@ -268,7 +268,7 @@ static HANDLE WINAPI HookFindFirstFileA(LPCSTR lpFileName, LPWIN32_FIND_DATAA lp
 
     if (redirected != widePath)
     {
-        LogFileAccess(L"[FILE REDIRECT]", widePath.c_str(), redirected.c_str());
+        LogFileAccess(L"FILE REDIRECT", widePath.c_str(), redirected.c_str());
         // Convert redirected wide path back to ANSI for the A trampoline
         int ansiLength = WideCharToMultiByte(CP_ACP, 0, redirected.c_str(), -1, nullptr, 0, nullptr, nullptr);
         if (ansiLength > 1)
@@ -281,7 +281,7 @@ static HANDLE WINAPI HookFindFirstFileA(LPCSTR lpFileName, LPWIN32_FIND_DATAA lp
         return g_origFindFirstFileA(lpFileName, lpFindFileData);
     }
 
-    LogFileAccess(L"[FILE FIND]    ", widePath.c_str());
+    LogFileAccess(L"FILE FIND", widePath.c_str());
     return g_origFindFirstFileA(lpFileName, lpFindFileData);
 }
 
@@ -297,9 +297,9 @@ static HMODULE WINAPI HookLoadLibraryW(LPCWSTR lpLibFileName)
     std::wstring redirected = ApplyFileRedirects(path);
 
     if (redirected != path)
-        LogFileAccess(L"[FILE REDIRECT]", path.c_str(), redirected.c_str());
+        LogFileAccess(L"FILE REDIRECT", path.c_str(), redirected.c_str());
     else
-        LogFileAccess(L"[DLL LOAD]     ", path.c_str());
+        LogFileAccess(L"DLL LOAD", path.c_str());
 
     return g_origLoadLibraryW(redirected.c_str());
 }
@@ -320,12 +320,12 @@ static HMODULE WINAPI HookLoadLibraryA(LPCSTR lpLibFileName)
 
     if (redirected != widePath)
     {
-        LogFileAccess(L"[FILE REDIRECT]", widePath.c_str(), redirected.c_str());
+        LogFileAccess(L"FILE REDIRECT", widePath.c_str(), redirected.c_str());
         // Use the W trampoline since we already have a wide redirected path
         return g_origLoadLibraryW(redirected.c_str());
     }
 
-    LogFileAccess(L"[DLL LOAD]     ", widePath.c_str());
+    LogFileAccess(L"DLL LOAD", widePath.c_str());
     return g_origLoadLibraryA(lpLibFileName);
 }
 
@@ -338,9 +338,9 @@ static HMODULE WINAPI HookLoadLibraryExW(LPCWSTR lpLibFileName, HANDLE hFile, DW
     std::wstring redirected = ApplyFileRedirects(path);
 
     if (redirected != path)
-        LogFileAccess(L"[FILE REDIRECT]", path.c_str(), redirected.c_str());
+        LogFileAccess(L"FILE REDIRECT", path.c_str(), redirected.c_str());
     else
-        LogFileAccess(L"[DLL LOAD]     ", path.c_str());
+        LogFileAccess(L"DLL LOAD", path.c_str());
 
     return g_origLoadLibraryExW(redirected.c_str(), hFile, dwFlags);
 }
@@ -361,11 +361,11 @@ static HMODULE WINAPI HookLoadLibraryExA(LPCSTR lpLibFileName, HANDLE hFile, DWO
 
     if (redirected != widePath)
     {
-        LogFileAccess(L"[FILE REDIRECT]", widePath.c_str(), redirected.c_str());
+        LogFileAccess(L"FILE REDIRECT", widePath.c_str(), redirected.c_str());
         return g_origLoadLibraryExW(redirected.c_str(), hFile, dwFlags);
     }
 
-    LogFileAccess(L"[DLL LOAD]     ", widePath.c_str());
+    LogFileAccess(L"DLL LOAD", widePath.c_str());
     return g_origLoadLibraryExA(lpLibFileName, hFile, dwFlags);
 }
 

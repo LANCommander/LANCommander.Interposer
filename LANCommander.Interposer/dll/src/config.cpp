@@ -85,6 +85,33 @@ std::wstring ApplyFileRedirects(const std::wstring& path)
 // ---------------------------------------------------------------------------
 // Logging
 // ---------------------------------------------------------------------------
+
+// Strip any existing [] wrapper and whitespace, truncate to 16 chars,
+// re-wrap as [content] right-padded to 18 total characters.
+static std::wstring NormalizeVerb(const wchar_t* raw)
+{
+    std::wstring s(raw ? raw : L"");
+
+    // Strip leading '['
+    if (!s.empty() && s.front() == L'[') s.erase(s.begin());
+    // Strip trailing whitespace then trailing ']'
+    while (!s.empty() && s.back() == L' ') s.pop_back();
+    if (!s.empty() && s.back() == L']') s.pop_back();
+    while (!s.empty() && s.back() == L' ') s.pop_back();
+
+    // Truncate content to 16 characters
+    if (s.size() > 16) s.resize(16);
+
+    // Re-wrap and right-pad: [<=16 chars] padded to 18 total
+    std::wstring result;
+    result.reserve(18);
+    result += L'[';
+    result += s;
+    result += L']';
+    while (result.size() < 18) result += L' ';
+    return result;
+}
+
 static void WriteLogLine(const wchar_t* verb, const wchar_t* a, const wchar_t* b)
 {
     std::lock_guard<std::mutex> lk(g_logMutex);
@@ -107,7 +134,7 @@ static void WriteLogLine(const wchar_t* verb, const wchar_t* a, const wchar_t* b
 
     line += timestamp;
     line += L"  ";
-    line += verb;
+    line += NormalizeVerb(verb);
     line += L"  ";
     line += a;
 
