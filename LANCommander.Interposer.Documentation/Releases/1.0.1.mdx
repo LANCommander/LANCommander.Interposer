@@ -17,6 +17,20 @@ import ReleaseDownloads from '@site/src/components/ReleaseDownloads';
 
 The interposer now loads `.dll` and `.asi` files from `.interposer\Plugins\` on startup. Plugins are loaded after all built-in hooks are active, so they can safely install their own hooks. Place any compatible plugin alongside your config directory and it will be picked up automatically. Successful loads are recorded in the session log as `[PLUGIN LOAD]`; failures include the Win32 error code.
 
+A plugin API is exposed via `GetProcAddress` — no link-time dependency on the interposer is required. The following exports are available:
+
+| Export | Description |
+|---|---|
+| `InterposerLog` | Write a line to the session log from a plugin |
+| `InterposerGetConfigString` | Read a scalar value from `Config.yml` by dot-separated path |
+| `InterposerGetUsername` | Get the effective player username |
+| `InterposerSetRegistryValue` | Inject a `REG_SZ` value into the virtual registry by full key path |
+| `InterposerSetRegistryValueBySuffix` | Inject a `REG_SZ` value into all virtual keys matching a path suffix |
+
+Log verbs are now normalized automatically: any `[`/`]` brackets and padding are stripped, the content is truncated to 16 characters, and the verb is re-wrapped as `[verb]` right-padded to 18 characters. This applies to all built-in hooks and to any plugin using `InterposerLog` — no manual formatting required.
+
+A **CD Key plugin** (`LANCommander.Interposer.Plugin.CDKey.dll`) is included. It generates a deterministic CD key from the player username using a configurable mask and injects it into a virtual registry value, giving each player on a LAN a unique but consistent key without manual entry.
+
 ### Registry Emulation: WOW64 VirtualStore Handling
 
 Fixed an edge case where registry operations on paths in the virtual store could bypass emulation on non-elevated processes. Windows UAC registry virtualization silently redirects writes to `HKLM\SOFTWARE\...` from non-elevated processes to `HKCU\Software\Classes\VirtualStore\MACHINE\...`. If a handle to the VirtualStore path reached the hooks — for example, a handle opened before injection or resolved via `NtQueryKey` — `InVirtualSpace` would return false and the operation would fall through to the real registry. Both the `HKEY_CURRENT_USER\...\VirtualStore\MACHINE\` and `HKEY_USERS\<SID>\...\VirtualStore\MACHINE\` path forms are now normalized to their canonical `HKEY_LOCAL_MACHINE\` equivalents before any virtual space checks.
