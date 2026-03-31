@@ -36,3 +36,4 @@ Configuration and use of the Interposer is broken down on this site under the fo
 - [Registry Emulation](RegistryEmulation)
 - [FastDL](FastDL)
 - [Borderless Fullscreen](BorderlessFullscreen)
+- [Plugins](Plugins)
