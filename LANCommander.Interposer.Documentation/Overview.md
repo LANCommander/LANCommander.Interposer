@@ -29,11 +29,12 @@ This compatibility shim is _not_ meant to tackle things like graphics APIs or Li
 ## Installation and Use
 Configuration and use of the Interposer is broken down on this site under the following resources:
 
-- [Releases](Releases)
-- [Getting Started](GettingStarted)
-- [Logging](Logging)
-- [File Redirection](FileRedirection)
-- [Registry Emulation](RegistryEmulation)
-- [FastDL](FastDL)
-- [Borderless Fullscreen](BorderlessFullscreen)
-- [Plugins](Plugins)
+- [Releases](/Interposer/Category/Releases)
+- [Getting Started](/Interposer/GettingStarted)
+- [Logging](/Interposer/Logging)
+- [File Redirection](/Interposer/FileRedirection)
+- [Registry Emulation](/Interposer/RegistryEmulation)
+- [FastDL](/Interposer/FastDL)
+- [Borderless Fullscreen](/Interposer/BorderlessFullscreen)
+- [Player Identity](/Interposer/PlayerIdentity)
+- [Plugins](/Interposer/Plugins/Overview)

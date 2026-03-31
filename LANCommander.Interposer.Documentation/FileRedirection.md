@@ -1,5 +1,5 @@
 ---
-sidebar_label: Overview
+sidebar_label: File Redirection
 sidebar_position: 4
 ---
 
@@ -11,7 +11,7 @@ File redirection intercepts calls to `CreateFileW/A`, `GetFileAttributesW/A`, `F
 
 Common use cases:
 
-- **Portable save files** — redirect a hard-coded save path (e.g. `C:\Program Files\MyGame\saves\`) to a per-user location (`%APPDATA%\MyGame\saves\`)
+- **Portable save files** — redirect a hard-coded save path (e.g. `C:\Program Files\MyGame\saves\`) to a per-user location (`%USERPROFILE%\Saved Games\My Game\`)
 - **Config file portability** — redirect absolute paths baked into old games to locations inside the game directory
 - **Multi-user coexistence** — different users can be redirected to different profile directories without modifying the game
 - **Registry-adjacent paths** — some games write config to hard-coded paths under `C:\Windows` or `C:\Program Files`; redirect these to writable locations
@@ -23,7 +23,7 @@ Redirects are defined as a list in `.interposer/Config.yml` under the `Redirects
 ```yaml
 Redirects:
   - Pattern: 'C:\\Games\\MyGame\\Saves\\(.+)'
-    Replacement: '%APPDATA%\MyGame\Saves\$1'
+    Replacement: '%USERPROFILE%\Saved Games\My Game\$1'
 ```
 
 :::tip Use single-quoted strings for patterns
@@ -51,12 +51,12 @@ Use parentheses to capture parts of the matched path for use in the replacement:
 
 ```yaml
 - Pattern: 'C:\\Games\\MyGame\\Saves\\(.+)'
-  Replacement: '%APPDATA%\MyGame\Saves\$1'
+  Replacement: '%USERPROFILE%\Saved Games\My Game\$1'
 ```
 
 For the path `C:\Games\MyGame\Saves\profile.dat`:
 - `$1` captures `profile.dat`
-- The replacement expands to `%APPDATA%\MyGame\Saves\profile.dat` (with `%APPDATA%` further expanded)
+- The replacement expands to `%USERPROFILE%\Saved Games\My Game\profile.dat` (with `%APPDATA%` further expanded)
 
 Up to nine capture groups (`$1` through `$9`) are supported.
 
@@ -102,9 +102,9 @@ FileRedirects:
 ```yaml
 Redirects:
   - Pattern: 'C:\\Games\\MyGame\\Saves\\current\\(.+)'
-    Replacement: '%APPDATA%\MyGame\Saves\slot1\$1'
+    Replacement: '%USERPROFILE%\Saved Games\My Game\slot1\$1'
   - Pattern: 'C:\\Games\\MyGame\\Saves\\(.+)'
-    Replacement: '%APPDATA%\MyGame\Saves\$1'
+    Replacement: '%USERPROFILE%\Saved Games\My Game\$1'
 ```
 
 The first rule redirects any path under `current\` specifically; the second catches everything else under `Saves\`.
