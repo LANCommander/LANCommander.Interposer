@@ -40,6 +40,9 @@ Window:
 #
 #   Downloads - true to log FastDL downloads, false to disable.
 #
+#   Network   - true to log server connection/DNS events (addresses the game
+#               connects to), false to disable (default).
+#
 # Logs are written automatically to .interposer\Logs\<timestamp>.log next to
 # the DLL.  A new file is created each session.
 # ---------------------------------------------------------------------------
@@ -47,6 +50,7 @@ Logging:
   Files: true
   Registry: true
   Downloads: true
+  Network: false
 
 # ---------------------------------------------------------------------------
 # Redirects
@@ -85,6 +89,20 @@ Redirects: []
 #
 #   BaseUrl              - Root URL of the FastDL HTTP server. A trailing slash
 #                          is required. Supports http:// and https://.
+#                          Leave empty to rely on ProbeConnections for auto-discovery.
+#
+#   ProbeConnections     - true to probe every server the game connects to for a
+#                          FastDL endpoint (see ProbePort / ProbePath below).
+#                          When a probe succeeds the discovered URL is used as
+#                          BaseUrl for the rest of the session. Requires Enabled:
+#                          true and at least one entry in Paths. (default false)
+#
+#   ProbePort            - HTTP port used when probing discovered addresses.
+#                          (default 80)
+#
+#   ProbePath            - HTTP path sent in the HEAD probe request. Must begin
+#                          with '/'. A 200 response means FastDL is available.
+#                          (default '/')
 #
 #   AllowedExtensions    - List of file extensions to allow for download (e.g.
 #                          [.pk3, .bsp, .wav]). Leading dot is optional.
@@ -104,15 +122,7 @@ Redirects: []
 #                          interposer DLL, injector executable, game executable,
 #                          and interposer config files. Set to false to disable
 #                          this protection (opt-out, not recommended).
-# ---------------------------------------------------------------------------
-FastDL:
-  Enabled: false
-  BaseUrl: 'http://fastdl.example.com/'
-  AllowedExtensions: []    # e.g. [.pk3, .bsp, .wav]
-  UseDownloadDirectory: true
-  DownloadDirectory: ''    # empty = <dlldir>\.interposer\Downloads
-  BlockSensitiveFiles: true
-
+#
 # ---------------------------------------------------------------------------
 # FastDL Paths
 #
@@ -135,6 +145,16 @@ FastDL:
 #   http://fastdl.example.com/baseq3/maps/q3dm1.bsp
 # ---------------------------------------------------------------------------
 FastDL:
+  Enabled: false
+  BaseUrl: ''                  # leave empty to use ProbeConnections auto-discovery
+  ProbeConnections: true       # probe game server addresses for a FastDL endpoint
+  ProbePort: 80                # HTTP port to probe
+  ProbePath: '/'               # HTTP path to probe
+  AllowedExtensions: []        # e.g. [.pk3, .bsp, .wav]
+  UseDownloadDirectory: true
+  DownloadDirectory: ''        # empty = <dlldir>\.interposer\Downloads
+  BlockSensitiveFiles: true
+
   Paths: []
 # Paths:
 #   - Local: 'C:\Games\Quake3\baseq3'

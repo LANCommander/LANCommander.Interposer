@@ -3,6 +3,7 @@
 #include "fastdl.h"
 #include "files.h"
 #include "identity.h"
+#include "network.h"
 #include "plugins.h"
 #include "registry.h"
 #include "window.h"
@@ -224,6 +225,7 @@ void InstallHooks()
     InstallRegistryHooks();
     InstallFileHooks();
     InitFastDL();
+    InstallNetworkHooks();
     InstallIdentityHooks();
 
     if (g_borderlessEnabled)
@@ -258,6 +260,7 @@ void RemoveHooks()
 {
     UnloadPlugins();
     RemoveRegistryHooks();
+    RemoveNetworkHooks();
     ShutdownFastDL();
     MH_DisableHook(MH_ALL_HOOKS);
     MH_Uninitialize();

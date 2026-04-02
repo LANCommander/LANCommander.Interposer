@@ -23,6 +23,11 @@ std::vector<FastDLPath>   g_fastdlPaths;
 bool                      g_fastdlUseDownloadDir      = true;
 std::wstring              g_fastdlDownloadDir;
 bool                      g_fastdlBlockSensitiveFiles = true;
+bool                      g_fastdlProbeConnections    = false;
+int                       g_fastdlProbePort           = 80;
+std::wstring              g_fastdlProbePath           = L"/";
+
+bool         g_logNetwork = false;
 
 static std::vector<FileRedirect> g_redirects;
 static HANDLE                    g_logHandle = INVALID_HANDLE_VALUE;
@@ -217,6 +222,14 @@ void LogFastDLAccess(const wchar_t* verb, const wchar_t* url, const wchar_t* loc
     WriteLogLine(verb, url, localPath);
 }
 
+void LogNetworkAccess(const wchar_t* verb, const wchar_t* address, const wchar_t* info)
+{
+    if (!g_logNetwork)
+        return;
+
+    WriteLogLine(verb, address, info);
+}
+
 void CloseLog()
 {
     std::lock_guard<std::mutex> lk(g_logMutex);
@@ -399,7 +412,9 @@ void LoadConfig()
         if (logging["Registry"])
             g_logRegistry = logging["Registry"].as<bool>(false);
         if (logging["Downloads"])
-            g_logFastDL = logging["logDownloads"].as<bool>(true);
+            g_logFastDL = logging["Downloads"].as<bool>(true);
+        if (logging["Network"])
+            g_logNetwork = logging["Network"].as<bool>(false);
     }
 
     // ── fileRedirects ─────────────────────────────────────────────────────────
@@ -443,7 +458,14 @@ void LoadConfig()
             g_fastdlDownloadDir = Utf8ToWide(fastDl["DownloadDirectory"].as<std::string>(""));
         if (fastDl["BlockSensitiveFiles"])
             g_fastdlBlockSensitiveFiles = fastDl["BlockSensitiveFiles"].as<bool>(true);
-        
+
+        if (fastDl["ProbeConnections"])
+            g_fastdlProbeConnections = fastDl["ProbeConnections"].as<bool>(false);
+        if (fastDl["ProbePort"])
+            g_fastdlProbePort = fastDl["ProbePort"].as<int>(80);
+        if (fastDl["ProbePath"])
+            g_fastdlProbePath = Utf8ToWide(fastDl["ProbePath"].as<std::string>("/"));
+
         if (YAML::Node allowedExtensions = fastDl["AllowedExtensions"])
         {
             if (allowedExtensions.IsSequence())

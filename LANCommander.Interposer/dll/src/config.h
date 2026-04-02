@@ -33,6 +33,11 @@ extern std::vector<FastDLPath>   g_fastdlPaths;
 extern bool                      g_fastdlUseDownloadDir;     // true = write to overlay dir (default)
 extern std::wstring              g_fastdlDownloadDir;        // empty = <dlldir>\downloads
 extern bool                      g_fastdlBlockSensitiveFiles; // true = block overwriting sensitive files (default)
+extern bool                      g_fastdlProbeConnections;   // true = probe discovered server addresses for FastDL
+extern int                       g_fastdlProbePort;          // HTTP port to probe (default 80)
+extern std::wstring              g_fastdlProbePath;          // HTTP path to probe (default "/")
+
+extern bool         g_logNetwork;       // true = log connection/DNS events
 
 // Parse <dlldir>\.interposer\Config.yml and open <dlldir>\.interposer\Logs\<timestamp>.log. Call before MH_EnableHook.
 void LoadConfig();
@@ -50,6 +55,7 @@ std::wstring ApplyFileRedirects(const std::wstring& path);
 void LogFileAccess(const wchar_t* verb, const wchar_t* sourcePath, const wchar_t* redirectionPath = nullptr);
 void LogRegistryAccess(const wchar_t* verb, const wchar_t* keyPath, const wchar_t* valueName = nullptr);
 void LogFastDLAccess(const wchar_t* verb, const wchar_t* url, const wchar_t* localPath);
+void LogNetworkAccess(const wchar_t* verb, const wchar_t* address, const wchar_t* info = nullptr);
 
 // ---------------------------------------------------------------------------
 // Plugin API — exported by name, resolved by plugins via GetProcAddress.

@@ -3,11 +3,16 @@
 #include <windows.h>
 #include <winhttp.h>
 #include <cstdint>
+#include <shared_mutex>
 #include <string>
 #include <vector>
 
 #include "fastdl.h"
 #include "config.h"
+
+// Response header that a LANCommander FastDL endpoint must return.
+// Any value is accepted — its mere presence confirms the endpoint is ours.
+static constexpr LPCWSTR FASTDL_PROBE_HEADER = L"X-FastDL";
 
 // ---------------------------------------------------------------------------
 // Module-level state
@@ -15,6 +20,14 @@
 static HINTERNET              g_session           = nullptr;
 static std::wstring           g_fastdlDownloadBase;           // resolved overlay directory (trailing \)
 static std::vector<std::wstring> g_blockedPaths;              // absolute lowercase paths that may not be overwritten
+
+// URLs discovered at runtime via ProbeServerForFastDL.
+// Protected by g_probedUrlMutex. Used as BaseUrl fallback when g_fastdlBaseUrl is empty.
+// Verified   = server returned FASTDL_PROBE_HEADER (preferred).
+// Unverified = server returned HTTP 200 without the header (fallback).
+static std::wstring      g_probedBaseUrlVerified;
+static std::wstring      g_probedBaseUrl;
+static std::shared_mutex g_probedUrlMutex;
 
 // ---------------------------------------------------------------------------
 // CRC32 (ISO 3309 / ITU-T V.42, polynomial 0xEDB88320)
@@ -91,11 +104,122 @@ static bool IsExtensionAllowed(const std::wstring& path)
     return false;
 }
 
+// Returns the DLL's own file version as a string (e.g. "1.2.0.0").
+// Falls back to "1.0" if no version resource is embedded.
+// Result is cached after the first call.
+static const wchar_t* GetDllVersion()
+{
+    static wchar_t s_version[32] = L"1.0";
+    static bool    s_ready       = false;
+
+    if (s_ready)
+        return s_version;
+
+    s_ready = true;
+
+    HMODULE hSelf = nullptr;
+    GetModuleHandleExW(
+        GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+        reinterpret_cast<LPCWSTR>(&GetDllVersion), &hSelf);
+
+    wchar_t dllPath[MAX_PATH]{};
+    if (!GetModuleFileNameW(hSelf, dllPath, MAX_PATH))
+        return s_version;
+
+    DWORD dummy = 0;
+    DWORD size  = GetFileVersionInfoSizeW(dllPath, &dummy);
+    if (size == 0)
+        return s_version;
+
+    std::vector<BYTE> buf(size);
+    if (!GetFileVersionInfoW(dllPath, 0, size, buf.data()))
+        return s_version;
+
+    VS_FIXEDFILEINFO* info    = nullptr;
+    UINT              infoLen = 0;
+    if (!VerQueryValueW(buf.data(), L"\\",
+            reinterpret_cast<LPVOID*>(&info), &infoLen) || !info)
+        return s_version;
+
+    if (info->dwFileVersionMS == 0 && info->dwFileVersionLS == 0)
+        return s_version;
+
+    wsprintfW(s_version, L"%d.%d.%d.%d",
+        HIWORD(info->dwFileVersionMS), LOWORD(info->dwFileVersionMS),
+        HIWORD(info->dwFileVersionLS), LOWORD(info->dwFileVersionLS));
+
+    return s_version;
+}
+
+// Result of a FastDL probe request.
+enum class ProbeResult { NotFound, Unverified, Verified };
+
+// Makes a HEAD request on hConnect at path with custom headers.
+// Returns Verified if HTTP 200 and FASTDL_PROBE_HEADER is present,
+// Unverified if HTTP 200 without the header, NotFound otherwise.
+static ProbeResult DoProbeRequest(HINTERNET hConnect, LPCWSTR path, DWORD flags,
+                                  LPCWSTR additionalHeaders)
+{
+    HINTERNET hReq = WinHttpOpenRequest(
+        hConnect, L"HEAD", path, nullptr,
+        WINHTTP_NO_REFERER, WINHTTP_DEFAULT_ACCEPT_TYPES, flags);
+
+    if (!hReq)
+        return ProbeResult::NotFound;
+
+    if (additionalHeaders && additionalHeaders[0] != L'\0')
+        WinHttpAddRequestHeaders(hReq, additionalHeaders, static_cast<DWORD>(-1),
+            WINHTTP_ADDREQ_FLAG_ADD | WINHTTP_ADDREQ_FLAG_REPLACE);
+
+    if (!WinHttpSendRequest(hReq, WINHTTP_NO_ADDITIONAL_HEADERS, 0, nullptr, 0, 0, 0) ||
+        !WinHttpReceiveResponse(hReq, nullptr))
+    {
+        WinHttpCloseHandle(hReq);
+        return ProbeResult::NotFound;
+    }
+
+    DWORD statusCode = 0;
+    DWORD statusSize = sizeof(statusCode);
+    WinHttpQueryHeaders(hReq,
+        WINHTTP_QUERY_STATUS_CODE | WINHTTP_QUERY_FLAG_NUMBER,
+        nullptr, &statusCode, &statusSize, nullptr);
+
+    if (statusCode != 200)
+    {
+        WinHttpCloseHandle(hReq);
+        return ProbeResult::NotFound;
+    }
+
+    // Check for the LANCommander verification header (any value is accepted).
+    wchar_t headerVal[32]{};
+    DWORD   headerSize = sizeof(headerVal);
+    bool    verified   = WinHttpQueryHeaders(hReq, WINHTTP_QUERY_CUSTOM,
+        FASTDL_PROBE_HEADER, headerVal, &headerSize, nullptr) == TRUE;
+
+    WinHttpCloseHandle(hReq);
+    return verified ? ProbeResult::Verified : ProbeResult::Unverified;
+}
+
+// Returns the effective FastDL base URL.
+// Priority: configured BaseUrl > verified probe URL > unverified probe URL.
+static std::wstring GetEffectiveBaseUrl()
+{
+    if (!g_fastdlBaseUrl.empty())
+        return g_fastdlBaseUrl;
+
+    std::shared_lock<std::shared_mutex> lk(g_probedUrlMutex);
+    return g_probedBaseUrlVerified.empty() ? g_probedBaseUrl : g_probedBaseUrlVerified;
+}
+
 // Finds the first FastDLPath whose localPrefix matches the beginning of localPath
 // (case-insensitive) and returns the full HTTP URL, or an empty string if no
 // mapping applies.
 static std::wstring BuildFastDLUrl(const std::wstring& localPath)
 {
+    const std::wstring baseUrl = GetEffectiveBaseUrl();
+    if (baseUrl.empty())
+        return {};
+
     std::wstring lowerLocalPath = ToLowerFastDL(localPath);
 
     for (const auto& mapping : g_fastdlPaths)
@@ -120,11 +244,11 @@ static std::wstring BuildFastDLUrl(const std::wstring& localPath)
             if (character == L'\\') character = L'/';
 
         // Compose: baseUrl + remoteSubPath + "/" + relative
-        std::wstring url = g_fastdlBaseUrl;
-        
+        std::wstring url = baseUrl;
+
         if (!mapping.remoteSubPath.empty())
             url += mapping.remoteSubPath + L"/";
-        
+
         url += relative;
 
         return url;
@@ -615,6 +739,84 @@ static bool FastDLImpl(const std::wstring& localPath, bool headOnly)
 bool TryFastDLDownload(const std::wstring& localPath)
 {
     return FastDLImpl(localPath, false);
+}
+
+void ProbeServerForFastDL(const std::wstring& host, int probePort, int gameServerPort)
+{
+    if (!g_session)
+        return;
+
+    // Skip immediately if we already have a verified URL — nothing better exists.
+    {
+        std::shared_lock<std::shared_mutex> lk(g_probedUrlMutex);
+        if (!g_probedBaseUrlVerified.empty())
+            return;
+    }
+
+    std::wstring probePath = g_fastdlProbePath;
+    if (probePath.empty())
+        probePath = L"/";
+
+    // Build the header block for this probe request.
+    // User-Agent identifies the interposer version.
+    // X-LANCommander-GameServer-Host / Port let the FastDL server route the
+    // response to the correct game-server instance when one HTTP port serves
+    // multiple game servers.
+    std::wstring headers;
+    headers += L"User-Agent: LANCommander.Interposer.FastDL/";
+    headers += GetDllVersion();
+    headers += L"\r\n";
+    headers += L"X-Server-Host: ";
+    headers += host;
+    headers += L"\r\n";
+    if (gameServerPort > 0)
+    {
+        wchar_t portBuf[16]{};
+        wsprintfW(portBuf, L"%d", gameServerPort);
+        headers += L"X-Server-Port: ";
+        headers += portBuf;
+        headers += L"\r\n";
+    }
+
+    HINTERNET hConnect = WinHttpConnect(g_session, host.c_str(),
+        static_cast<INTERNET_PORT>(probePort), 0);
+    if (!hConnect)
+        return;
+
+    const ProbeResult result = DoProbeRequest(hConnect, probePath.c_str(), 0, headers.c_str());
+    WinHttpCloseHandle(hConnect);
+
+    if (result == ProbeResult::NotFound)
+        return;
+
+    // Build the discovered base URL
+    std::wstring discovered = L"http://" + host;
+    if (probePort != 80)
+        discovered += L":" + std::to_wstring(probePort);
+    discovered += probePath;
+    if (!discovered.empty() && discovered.back() != L'/')
+        discovered += L'/';
+
+    {
+        std::unique_lock<std::shared_mutex> lk(g_probedUrlMutex);
+
+        if (result == ProbeResult::Verified)
+        {
+            // Verified always wins — overwrite any previous unverified result.
+            if (g_probedBaseUrlVerified.empty())
+                g_probedBaseUrlVerified = discovered;
+        }
+        else // Unverified
+        {
+            // Only store if we have nothing yet (verified or unverified).
+            if (g_probedBaseUrlVerified.empty() && g_probedBaseUrl.empty())
+                g_probedBaseUrl = discovered;
+        }
+    }
+
+    const wchar_t* verb = (result == ProbeResult::Verified)
+        ? L"FASTDL PROBE OK" : L"FASTDL PROBE";
+    LogFastDLAccess(verb, discovered.c_str(), host.c_str());
 }
 
 std::wstring GetExistingOverlayPath(const std::wstring& localPath)
