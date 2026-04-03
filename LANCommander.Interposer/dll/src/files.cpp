@@ -1,6 +1,7 @@
 #include "files.h"
 #include "config.h"
 #include "fastdl.h"
+#include "hooks.h"
 
 #include <windows.h>
 #include <MinHook.h>
@@ -301,7 +302,9 @@ static HMODULE WINAPI HookLoadLibraryW(LPCWSTR lpLibFileName)
     else
         LogFileAccess(L"DLL LOAD", path.c_str());
 
-    return g_origLoadLibraryW(redirected.c_str());
+    HMODULE hMod = g_origLoadLibraryW(redirected.c_str());
+    OnLibraryLoaded(hMod);
+    return hMod;
 }
 
 static HMODULE WINAPI HookLoadLibraryA(LPCSTR lpLibFileName)
@@ -318,15 +321,20 @@ static HMODULE WINAPI HookLoadLibraryA(LPCSTR lpLibFileName)
 
     std::wstring redirected = ApplyFileRedirects(widePath);
 
+    HMODULE hMod;
     if (redirected != widePath)
     {
         LogFileAccess(L"FILE REDIRECT", widePath.c_str(), redirected.c_str());
         // Use the W trampoline since we already have a wide redirected path
-        return g_origLoadLibraryW(redirected.c_str());
+        hMod = g_origLoadLibraryW(redirected.c_str());
     }
-
-    LogFileAccess(L"DLL LOAD", widePath.c_str());
-    return g_origLoadLibraryA(lpLibFileName);
+    else
+    {
+        LogFileAccess(L"DLL LOAD", widePath.c_str());
+        hMod = g_origLoadLibraryA(lpLibFileName);
+    }
+    OnLibraryLoaded(hMod);
+    return hMod;
 }
 
 static HMODULE WINAPI HookLoadLibraryExW(LPCWSTR lpLibFileName, HANDLE hFile, DWORD dwFlags)
@@ -342,7 +350,13 @@ static HMODULE WINAPI HookLoadLibraryExW(LPCWSTR lpLibFileName, HANDLE hFile, DW
     else
         LogFileAccess(L"DLL LOAD", path.c_str());
 
-    return g_origLoadLibraryExW(redirected.c_str(), hFile, dwFlags);
+    HMODULE hMod = g_origLoadLibraryExW(redirected.c_str(), hFile, dwFlags);
+    constexpr DWORD dataFlags = LOAD_LIBRARY_AS_DATAFILE
+                              | LOAD_LIBRARY_AS_DATAFILE_EXCLUSIVE
+                              | LOAD_LIBRARY_AS_IMAGE_RESOURCE;
+    if (!(dwFlags & dataFlags))
+        OnLibraryLoaded(hMod);
+    return hMod;
 }
 
 static HMODULE WINAPI HookLoadLibraryExA(LPCSTR lpLibFileName, HANDLE hFile, DWORD dwFlags)
@@ -359,14 +373,23 @@ static HMODULE WINAPI HookLoadLibraryExA(LPCSTR lpLibFileName, HANDLE hFile, DWO
 
     std::wstring redirected = ApplyFileRedirects(widePath);
 
+    HMODULE hMod;
     if (redirected != widePath)
     {
         LogFileAccess(L"FILE REDIRECT", widePath.c_str(), redirected.c_str());
-        return g_origLoadLibraryExW(redirected.c_str(), hFile, dwFlags);
+        hMod = g_origLoadLibraryExW(redirected.c_str(), hFile, dwFlags);
     }
-
-    LogFileAccess(L"DLL LOAD", widePath.c_str());
-    return g_origLoadLibraryExA(lpLibFileName, hFile, dwFlags);
+    else
+    {
+        LogFileAccess(L"DLL LOAD", widePath.c_str());
+        hMod = g_origLoadLibraryExA(lpLibFileName, hFile, dwFlags);
+    }
+    constexpr DWORD dataFlags = LOAD_LIBRARY_AS_DATAFILE
+                              | LOAD_LIBRARY_AS_DATAFILE_EXCLUSIVE
+                              | LOAD_LIBRARY_AS_IMAGE_RESOURCE;
+    if (!(dwFlags & dataFlags))
+        OnLibraryLoaded(hMod);
+    return hMod;
 }
 
 // ---------------------------------------------------------------------------
@@ -374,43 +397,53 @@ static HMODULE WINAPI HookLoadLibraryExA(LPCSTR lpLibFileName, HANDLE hFile, DWO
 // ---------------------------------------------------------------------------
 void InstallFileHooks()
 {
-    MH_CreateHookApi(L"kernel32", "CreateFileW",
-        reinterpret_cast<LPVOID>(HookCreateFileW),
-        reinterpret_cast<LPVOID*>(&g_origCreateFileW));
+    LogHookInit(L"kernel32", "CreateFileW",
+        MH_CreateHookApi(L"kernel32", "CreateFileW",
+            reinterpret_cast<LPVOID>(HookCreateFileW),
+            reinterpret_cast<LPVOID*>(&g_origCreateFileW)));
 
-    MH_CreateHookApi(L"kernel32", "CreateFileA",
-        reinterpret_cast<LPVOID>(HookCreateFileA),
-        reinterpret_cast<LPVOID*>(&g_origCreateFileA));
+    LogHookInit(L"kernel32", "CreateFileA",
+        MH_CreateHookApi(L"kernel32", "CreateFileA",
+            reinterpret_cast<LPVOID>(HookCreateFileA),
+            reinterpret_cast<LPVOID*>(&g_origCreateFileA)));
 
-    MH_CreateHookApi(L"kernel32", "GetFileAttributesW",
-        reinterpret_cast<LPVOID>(HookGetFileAttributesW),
-        reinterpret_cast<LPVOID*>(&g_origGetFileAttributesW));
+    LogHookInit(L"kernel32", "GetFileAttributesW",
+        MH_CreateHookApi(L"kernel32", "GetFileAttributesW",
+            reinterpret_cast<LPVOID>(HookGetFileAttributesW),
+            reinterpret_cast<LPVOID*>(&g_origGetFileAttributesW)));
 
-    MH_CreateHookApi(L"kernel32", "GetFileAttributesA",
-        reinterpret_cast<LPVOID>(HookGetFileAttributesA),
-        reinterpret_cast<LPVOID*>(&g_origGetFileAttributesA));
+    LogHookInit(L"kernel32", "GetFileAttributesA",
+        MH_CreateHookApi(L"kernel32", "GetFileAttributesA",
+            reinterpret_cast<LPVOID>(HookGetFileAttributesA),
+            reinterpret_cast<LPVOID*>(&g_origGetFileAttributesA)));
 
-    MH_CreateHookApi(L"kernel32", "FindFirstFileW",
-        reinterpret_cast<LPVOID>(HookFindFirstFileW),
-        reinterpret_cast<LPVOID*>(&g_origFindFirstFileW));
+    LogHookInit(L"kernel32", "FindFirstFileW",
+        MH_CreateHookApi(L"kernel32", "FindFirstFileW",
+            reinterpret_cast<LPVOID>(HookFindFirstFileW),
+            reinterpret_cast<LPVOID*>(&g_origFindFirstFileW)));
 
-    MH_CreateHookApi(L"kernel32", "FindFirstFileA",
-        reinterpret_cast<LPVOID>(HookFindFirstFileA),
-        reinterpret_cast<LPVOID*>(&g_origFindFirstFileA));
+    LogHookInit(L"kernel32", "FindFirstFileA",
+        MH_CreateHookApi(L"kernel32", "FindFirstFileA",
+            reinterpret_cast<LPVOID>(HookFindFirstFileA),
+            reinterpret_cast<LPVOID*>(&g_origFindFirstFileA)));
 
-    MH_CreateHookApi(L"kernel32", "LoadLibraryW",
-        reinterpret_cast<LPVOID>(HookLoadLibraryW),
-        reinterpret_cast<LPVOID*>(&g_origLoadLibraryW));
+    LogHookInit(L"kernel32", "LoadLibraryW",
+        MH_CreateHookApi(L"kernel32", "LoadLibraryW",
+            reinterpret_cast<LPVOID>(HookLoadLibraryW),
+            reinterpret_cast<LPVOID*>(&g_origLoadLibraryW)));
 
-    MH_CreateHookApi(L"kernel32", "LoadLibraryA",
-        reinterpret_cast<LPVOID>(HookLoadLibraryA),
-        reinterpret_cast<LPVOID*>(&g_origLoadLibraryA));
+    LogHookInit(L"kernel32", "LoadLibraryA",
+        MH_CreateHookApi(L"kernel32", "LoadLibraryA",
+            reinterpret_cast<LPVOID>(HookLoadLibraryA),
+            reinterpret_cast<LPVOID*>(&g_origLoadLibraryA)));
 
-    MH_CreateHookApi(L"kernel32", "LoadLibraryExW",
-        reinterpret_cast<LPVOID>(HookLoadLibraryExW),
-        reinterpret_cast<LPVOID*>(&g_origLoadLibraryExW));
+    LogHookInit(L"kernel32", "LoadLibraryExW",
+        MH_CreateHookApi(L"kernel32", "LoadLibraryExW",
+            reinterpret_cast<LPVOID>(HookLoadLibraryExW),
+            reinterpret_cast<LPVOID*>(&g_origLoadLibraryExW)));
 
-    MH_CreateHookApi(L"kernel32", "LoadLibraryExA",
-        reinterpret_cast<LPVOID>(HookLoadLibraryExA),
-        reinterpret_cast<LPVOID*>(&g_origLoadLibraryExA));
+    LogHookInit(L"kernel32", "LoadLibraryExA",
+        MH_CreateHookApi(L"kernel32", "LoadLibraryExA",
+            reinterpret_cast<LPVOID>(HookLoadLibraryExA),
+            reinterpret_cast<LPVOID*>(&g_origLoadLibraryExA)));
 }

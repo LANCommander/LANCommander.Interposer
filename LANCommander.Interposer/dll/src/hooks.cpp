@@ -32,6 +32,19 @@ void InstallHooks()
     LoadPlugins();
 }
 
+void OnLibraryLoaded(HMODULE hModule)
+{
+    if (!hModule) return;
+
+    wchar_t path[MAX_PATH]{};
+    GetModuleFileNameW(hModule, path, MAX_PATH);
+
+    const wchar_t* slash = wcsrchr(path, L'\\');
+    const wchar_t* name  = slash ? slash + 1 : path;
+
+    LateInstallNetworkHooks(name);
+}
+
 void RemoveHooks()
 {
     UnloadPlugins();

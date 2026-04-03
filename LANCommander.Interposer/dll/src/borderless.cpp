@@ -207,25 +207,30 @@ static LONG WINAPI HookSetWindowLongA(HWND hwnd, int nIndex, LONG dwNewLong)
 // ---------------------------------------------------------------------------
 void InstallBorderlessHooks()
 {
-    MH_CreateHookApi(L"user32", "CreateWindowExW",
-        reinterpret_cast<LPVOID>(HookCreateWindowExW),
-        reinterpret_cast<LPVOID*>(&g_origCreateWindowExW));
+    LogHookInit(L"user32", "CreateWindowExW",
+        MH_CreateHookApi(L"user32", "CreateWindowExW",
+            reinterpret_cast<LPVOID>(HookCreateWindowExW),
+            reinterpret_cast<LPVOID*>(&g_origCreateWindowExW)));
 
-    MH_CreateHookApi(L"user32", "CreateWindowExA",
-        reinterpret_cast<LPVOID>(HookCreateWindowExA),
-        reinterpret_cast<LPVOID*>(&g_origCreateWindowExA));
+    LogHookInit(L"user32", "CreateWindowExA",
+        MH_CreateHookApi(L"user32", "CreateWindowExA",
+            reinterpret_cast<LPVOID>(HookCreateWindowExA),
+            reinterpret_cast<LPVOID*>(&g_origCreateWindowExA)));
 
-    MH_CreateHookApi(L"user32", "SetWindowPos",
-        reinterpret_cast<LPVOID>(HookSetWindowPos),
-        reinterpret_cast<LPVOID*>(&g_origSetWindowPos));
+    LogHookInit(L"user32", "SetWindowPos",
+        MH_CreateHookApi(L"user32", "SetWindowPos",
+            reinterpret_cast<LPVOID>(HookSetWindowPos),
+            reinterpret_cast<LPVOID*>(&g_origSetWindowPos)));
 
-    MH_CreateHookApi(L"user32", "SetWindowLongW",
-        reinterpret_cast<LPVOID>(HookSetWindowLongW),
-        reinterpret_cast<LPVOID*>(&g_origSetWindowLongW));
+    LogHookInit(L"user32", "SetWindowLongW",
+        MH_CreateHookApi(L"user32", "SetWindowLongW",
+            reinterpret_cast<LPVOID>(HookSetWindowLongW),
+            reinterpret_cast<LPVOID*>(&g_origSetWindowLongW)));
 
-    MH_CreateHookApi(L"user32", "SetWindowLongA",
-        reinterpret_cast<LPVOID>(HookSetWindowLongA),
-        reinterpret_cast<LPVOID*>(&g_origSetWindowLongA));
+    LogHookInit(L"user32", "SetWindowLongA",
+        MH_CreateHookApi(L"user32", "SetWindowLongA",
+            reinterpret_cast<LPVOID>(HookSetWindowLongA),
+            reinterpret_cast<LPVOID*>(&g_origSetWindowLongA)));
 }
 
 void ForceBorderless(HWND hwnd)

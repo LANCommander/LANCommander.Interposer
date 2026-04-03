@@ -208,23 +208,27 @@ void InstallIdentityHooks()
 
     if (!g_username.empty())
     {
-        MH_CreateHookApi(L"advapi32", "GetUserNameW",
-            reinterpret_cast<LPVOID>(HookGetUserNameW),
-            reinterpret_cast<LPVOID*>(&g_origGetUserNameW));
+        LogHookInit(L"advapi32", "GetUserNameW",
+            MH_CreateHookApi(L"advapi32", "GetUserNameW",
+                reinterpret_cast<LPVOID>(HookGetUserNameW),
+                reinterpret_cast<LPVOID*>(&g_origGetUserNameW)));
 
-        MH_CreateHookApi(L"advapi32", "GetUserNameA",
-            reinterpret_cast<LPVOID>(HookGetUserNameA),
-            reinterpret_cast<LPVOID*>(&g_origGetUserNameA));
+        LogHookInit(L"advapi32", "GetUserNameA",
+            MH_CreateHookApi(L"advapi32", "GetUserNameA",
+                reinterpret_cast<LPVOID>(HookGetUserNameA),
+                reinterpret_cast<LPVOID*>(&g_origGetUserNameA)));
     }
 
     if (!g_computername.empty())
     {
-        MH_CreateHookApi(L"kernel32", "GetComputerNameW",
-            reinterpret_cast<LPVOID>(HookGetComputerNameW),
-            reinterpret_cast<LPVOID*>(&g_origGetComputerNameW));
+        LogHookInit(L"kernel32", "GetComputerNameW",
+            MH_CreateHookApi(L"kernel32", "GetComputerNameW",
+                reinterpret_cast<LPVOID>(HookGetComputerNameW),
+                reinterpret_cast<LPVOID*>(&g_origGetComputerNameW)));
 
-        MH_CreateHookApi(L"kernel32", "GetComputerNameA",
-            reinterpret_cast<LPVOID>(HookGetComputerNameA),
-            reinterpret_cast<LPVOID*>(&g_origGetComputerNameA));
+        LogHookInit(L"kernel32", "GetComputerNameA",
+            MH_CreateHookApi(L"kernel32", "GetComputerNameA",
+                reinterpret_cast<LPVOID>(HookGetComputerNameA),
+                reinterpret_cast<LPVOID*>(&g_origGetComputerNameA)));
     }
 }

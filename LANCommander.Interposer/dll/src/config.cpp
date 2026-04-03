@@ -230,6 +230,19 @@ void LogNetworkAccess(const wchar_t* verb, const wchar_t* address, const wchar_t
     WriteLogLine(verb, address, info);
 }
 
+void LogHookInit(const wchar_t* module, const char* fn, MH_STATUS status)
+{
+    if (status == MH_ERROR_ALREADY_CREATED)
+        return; // Hook was already installed (e.g. late-install called twice); not an error.
+
+    wchar_t msg[128]{};
+    if (status == MH_OK)
+        wsprintfW(msg, L"%s!%S", module, fn);
+    else
+        wsprintfW(msg, L"%s!%S  %S", module, fn, MH_StatusToString(status));
+    WriteLogLine(L"HOOK INIT", msg, nullptr);
+}
+
 void CloseLog()
 {
     std::lock_guard<std::mutex> lk(g_logMutex);

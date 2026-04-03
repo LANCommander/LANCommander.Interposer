@@ -441,82 +441,145 @@ static int WSAAPI HookRecv32(SOCKET s, char* buf, int len, int flags)
 void InstallNetworkHooks()
 {
     if (!g_logNetwork && !g_fastdlProbeConnections)
+    {
+        InterposerLog(L"HOOK INIT", L"network hooks skipped (Network.Log and FastDL.ProbeConnections both false)");
         return;
+    }
 
-    MH_CreateHookApi(L"ws2_32", "getaddrinfo",
-        reinterpret_cast<LPVOID>(HookGetAddrInfo),
-        reinterpret_cast<LPVOID*>(&g_origGetAddrInfo));
+    LogHookInit(L"ws2_32", "getaddrinfo",
+        MH_CreateHookApi(L"ws2_32", "getaddrinfo",
+            reinterpret_cast<LPVOID>(HookGetAddrInfo),
+            reinterpret_cast<LPVOID*>(&g_origGetAddrInfo)));
 
-    MH_CreateHookApi(L"ws2_32", "GetAddrInfoW",
-        reinterpret_cast<LPVOID>(HookGetAddrInfoW),
-        reinterpret_cast<LPVOID*>(&g_origGetAddrInfoW));
+    LogHookInit(L"ws2_32", "GetAddrInfoW",
+        MH_CreateHookApi(L"ws2_32", "GetAddrInfoW",
+            reinterpret_cast<LPVOID>(HookGetAddrInfoW),
+            reinterpret_cast<LPVOID*>(&g_origGetAddrInfoW)));
 
-    MH_CreateHookApi(L"ws2_32", "connect",
-        reinterpret_cast<LPVOID>(HookConnect),
-        reinterpret_cast<LPVOID*>(&g_origConnect));
+    LogHookInit(L"ws2_32", "connect",
+        MH_CreateHookApi(L"ws2_32", "connect",
+            reinterpret_cast<LPVOID>(HookConnect),
+            reinterpret_cast<LPVOID*>(&g_origConnect)));
 
-    MH_CreateHookApi(L"ws2_32", "WSAConnect",
-        reinterpret_cast<LPVOID>(HookWSAConnect),
-        reinterpret_cast<LPVOID*>(&g_origWSAConnect));
+    LogHookInit(L"ws2_32", "WSAConnect",
+        MH_CreateHookApi(L"ws2_32", "WSAConnect",
+            reinterpret_cast<LPVOID>(HookWSAConnect),
+            reinterpret_cast<LPVOID*>(&g_origWSAConnect)));
 
-    MH_CreateHookApi(L"ws2_32", "sendto",
-        reinterpret_cast<LPVOID>(HookSendTo),
-        reinterpret_cast<LPVOID*>(&g_origSendTo));
+    LogHookInit(L"ws2_32", "sendto",
+        MH_CreateHookApi(L"ws2_32", "sendto",
+            reinterpret_cast<LPVOID>(HookSendTo),
+            reinterpret_cast<LPVOID*>(&g_origSendTo)));
 
-    MH_CreateHookApi(L"ws2_32", "WSASendTo",
-        reinterpret_cast<LPVOID>(HookWSASendTo),
-        reinterpret_cast<LPVOID*>(&g_origWSASendTo));
+    LogHookInit(L"ws2_32", "WSASendTo",
+        MH_CreateHookApi(L"ws2_32", "WSASendTo",
+            reinterpret_cast<LPVOID>(HookWSASendTo),
+            reinterpret_cast<LPVOID*>(&g_origWSASendTo)));
 
-    MH_CreateHookApi(L"ws2_32", "recvfrom",
-        reinterpret_cast<LPVOID>(HookRecvFrom),
-        reinterpret_cast<LPVOID*>(&g_origRecvFrom));
+    LogHookInit(L"ws2_32", "recvfrom",
+        MH_CreateHookApi(L"ws2_32", "recvfrom",
+            reinterpret_cast<LPVOID>(HookRecvFrom),
+            reinterpret_cast<LPVOID*>(&g_origRecvFrom)));
 
-    MH_CreateHookApi(L"ws2_32", "WSARecvFrom",
-        reinterpret_cast<LPVOID>(HookWSARecvFrom),
-        reinterpret_cast<LPVOID*>(&g_origWSARecvFrom));
+    LogHookInit(L"ws2_32", "WSARecvFrom",
+        MH_CreateHookApi(L"ws2_32", "WSARecvFrom",
+            reinterpret_cast<LPVOID>(HookWSARecvFrom),
+            reinterpret_cast<LPVOID*>(&g_origWSARecvFrom)));
 
-    MH_CreateHookApi(L"ws2_32", "send",
-        reinterpret_cast<LPVOID>(HookSend),
-        reinterpret_cast<LPVOID*>(&g_origSend));
+    LogHookInit(L"ws2_32", "send",
+        MH_CreateHookApi(L"ws2_32", "send",
+            reinterpret_cast<LPVOID>(HookSend),
+            reinterpret_cast<LPVOID*>(&g_origSend)));
 
-    MH_CreateHookApi(L"ws2_32", "WSASend",
-        reinterpret_cast<LPVOID>(HookWSASend),
-        reinterpret_cast<LPVOID*>(&g_origWSASend));
+    LogHookInit(L"ws2_32", "WSASend",
+        MH_CreateHookApi(L"ws2_32", "WSASend",
+            reinterpret_cast<LPVOID>(HookWSASend),
+            reinterpret_cast<LPVOID*>(&g_origWSASend)));
 
-    MH_CreateHookApi(L"ws2_32", "recv",
-        reinterpret_cast<LPVOID>(HookRecv),
-        reinterpret_cast<LPVOID*>(&g_origRecv));
+    LogHookInit(L"ws2_32", "recv",
+        MH_CreateHookApi(L"ws2_32", "recv",
+            reinterpret_cast<LPVOID>(HookRecv),
+            reinterpret_cast<LPVOID*>(&g_origRecv)));
 
-    MH_CreateHookApi(L"ws2_32", "WSARecv",
-        reinterpret_cast<LPVOID>(HookWSARecv),
-        reinterpret_cast<LPVOID*>(&g_origWSARecv));
+    LogHookInit(L"ws2_32", "WSARecv",
+        MH_CreateHookApi(L"ws2_32", "WSARecv",
+            reinterpret_cast<LPVOID>(HookWSARecv),
+            reinterpret_cast<LPVOID*>(&g_origWSARecv)));
 
     // wsock32 — older games (Winsock 1) link against this DLL directly.
     // gethostbyname is wsock32-only; connect/send*/recv* share signatures with
     // ws2_32 but need separate trampolines so MinHook patches the right exports.
-    MH_CreateHookApi(L"wsock32", "gethostbyname",
-        reinterpret_cast<LPVOID>(HookGetHostByName),
-        reinterpret_cast<LPVOID*>(&g_origGetHostByName));
+    // MH_ERROR_MODULE_NOT_FOUND here means wsock32.dll was not yet loaded at inject time.
+    LogHookInit(L"wsock32", "gethostbyname",
+        MH_CreateHookApi(L"wsock32", "gethostbyname",
+            reinterpret_cast<LPVOID>(HookGetHostByName),
+            reinterpret_cast<LPVOID*>(&g_origGetHostByName)));
 
-    MH_CreateHookApi(L"wsock32", "connect",
-        reinterpret_cast<LPVOID>(HookConnect32),
-        reinterpret_cast<LPVOID*>(&g_origConnect32));
+    LogHookInit(L"wsock32", "connect",
+        MH_CreateHookApi(L"wsock32", "connect",
+            reinterpret_cast<LPVOID>(HookConnect32),
+            reinterpret_cast<LPVOID*>(&g_origConnect32)));
 
-    MH_CreateHookApi(L"wsock32", "sendto",
-        reinterpret_cast<LPVOID>(HookSendTo32),
-        reinterpret_cast<LPVOID*>(&g_origSendTo32));
+    LogHookInit(L"wsock32", "sendto",
+        MH_CreateHookApi(L"wsock32", "sendto",
+            reinterpret_cast<LPVOID>(HookSendTo32),
+            reinterpret_cast<LPVOID*>(&g_origSendTo32)));
 
-    MH_CreateHookApi(L"wsock32", "recvfrom",
-        reinterpret_cast<LPVOID>(HookRecvFrom32),
-        reinterpret_cast<LPVOID*>(&g_origRecvFrom32));
+    LogHookInit(L"wsock32", "recvfrom",
+        MH_CreateHookApi(L"wsock32", "recvfrom",
+            reinterpret_cast<LPVOID>(HookRecvFrom32),
+            reinterpret_cast<LPVOID*>(&g_origRecvFrom32)));
 
-    MH_CreateHookApi(L"wsock32", "send",
-        reinterpret_cast<LPVOID>(HookSend32),
-        reinterpret_cast<LPVOID*>(&g_origSend32));
+    LogHookInit(L"wsock32", "send",
+        MH_CreateHookApi(L"wsock32", "send",
+            reinterpret_cast<LPVOID>(HookSend32),
+            reinterpret_cast<LPVOID*>(&g_origSend32)));
 
-    MH_CreateHookApi(L"wsock32", "recv",
-        reinterpret_cast<LPVOID>(HookRecv32),
-        reinterpret_cast<LPVOID*>(&g_origRecv32));
+    LogHookInit(L"wsock32", "recv",
+        MH_CreateHookApi(L"wsock32", "recv",
+            reinterpret_cast<LPVOID>(HookRecv32),
+            reinterpret_cast<LPVOID*>(&g_origRecv32)));
+}
+
+void LateInstallNetworkHooks(const wchar_t* moduleName)
+{
+    if (!g_logNetwork && !g_fastdlProbeConnections)
+        return;
+
+    if (_wcsicmp(moduleName, L"wsock32.dll") != 0)
+        return;
+
+    LogHookInit(L"wsock32", "gethostbyname",
+        MH_CreateHookApi(L"wsock32", "gethostbyname",
+            reinterpret_cast<LPVOID>(HookGetHostByName),
+            reinterpret_cast<LPVOID*>(&g_origGetHostByName)));
+
+    LogHookInit(L"wsock32", "connect",
+        MH_CreateHookApi(L"wsock32", "connect",
+            reinterpret_cast<LPVOID>(HookConnect32),
+            reinterpret_cast<LPVOID*>(&g_origConnect32)));
+
+    LogHookInit(L"wsock32", "sendto",
+        MH_CreateHookApi(L"wsock32", "sendto",
+            reinterpret_cast<LPVOID>(HookSendTo32),
+            reinterpret_cast<LPVOID*>(&g_origSendTo32)));
+
+    LogHookInit(L"wsock32", "recvfrom",
+        MH_CreateHookApi(L"wsock32", "recvfrom",
+            reinterpret_cast<LPVOID>(HookRecvFrom32),
+            reinterpret_cast<LPVOID*>(&g_origRecvFrom32)));
+
+    LogHookInit(L"wsock32", "send",
+        MH_CreateHookApi(L"wsock32", "send",
+            reinterpret_cast<LPVOID>(HookSend32),
+            reinterpret_cast<LPVOID*>(&g_origSend32)));
+
+    LogHookInit(L"wsock32", "recv",
+        MH_CreateHookApi(L"wsock32", "recv",
+            reinterpret_cast<LPVOID>(HookRecv32),
+            reinterpret_cast<LPVOID*>(&g_origRecv32)));
+
+    MH_EnableHook(MH_ALL_HOOKS);
 }
 
 void RemoveNetworkHooks()

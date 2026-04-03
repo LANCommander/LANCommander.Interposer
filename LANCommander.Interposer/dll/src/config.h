@@ -2,6 +2,7 @@
 #define WIN32_LEAN_AND_MEAN
 #define NOMINMAX
 #include <windows.h>
+#include <MinHook.h>
 #include <string>
 #include <vector>
 #include <regex>
@@ -56,6 +57,10 @@ void LogFileAccess(const wchar_t* verb, const wchar_t* sourcePath, const wchar_t
 void LogRegistryAccess(const wchar_t* verb, const wchar_t* keyPath, const wchar_t* valueName = nullptr);
 void LogFastDLAccess(const wchar_t* verb, const wchar_t* url, const wchar_t* localPath);
 void LogNetworkAccess(const wchar_t* verb, const wchar_t* address, const wchar_t* info = nullptr);
+
+// Log a MinHook hook installation result. Always written regardless of other logging flags.
+// Pass the MH_STATUS value returned by MH_CreateHookApi.
+void LogHookInit(const wchar_t* module, const char* fn, MH_STATUS status);
 
 // ---------------------------------------------------------------------------
 // Plugin API — exported by name, resolved by plugins via GetProcAddress.

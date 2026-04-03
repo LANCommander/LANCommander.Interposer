@@ -10,5 +10,10 @@
 // No-op if both g_logNetwork and g_fastdlProbeConnections are false.
 void InstallNetworkHooks();
 
+// Called when a DLL is loaded post-startup. Installs and enables any network
+// hooks for moduleName (the DLL's basename, e.g. L"wsock32.dll") that could
+// not be installed at startup because the module was not yet loaded.
+void LateInstallNetworkHooks(const wchar_t* moduleName);
+
 // Clear internal state. Call from RemoveHooks() before MH_DisableHook.
 void RemoveNetworkHooks();

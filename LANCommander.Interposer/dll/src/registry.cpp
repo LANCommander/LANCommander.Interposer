@@ -1634,57 +1634,74 @@ void InstallRegistryHooks()
 
     // Install the 17 advapi32 hooks (no MH_Initialize / MH_EnableHook here —
     // those are owned by dllmain.cpp)
-    MH_CreateHookApi(L"advapi32", "RegOpenKeyExW",
-        reinterpret_cast<LPVOID>(HookRegOpenKeyExW),
-        reinterpret_cast<LPVOID*>(&g_origRegOpenKeyExW));
-    MH_CreateHookApi(L"advapi32", "RegOpenKeyExA",
-        reinterpret_cast<LPVOID>(HookRegOpenKeyExA),
-        reinterpret_cast<LPVOID*>(&g_origRegOpenKeyExA));
-    MH_CreateHookApi(L"advapi32", "RegCreateKeyExW",
-        reinterpret_cast<LPVOID>(HookRegCreateKeyExW),
-        reinterpret_cast<LPVOID*>(&g_origRegCreateKeyExW));
-    MH_CreateHookApi(L"advapi32", "RegCreateKeyExA",
-        reinterpret_cast<LPVOID>(HookRegCreateKeyExA),
-        reinterpret_cast<LPVOID*>(&g_origRegCreateKeyExA));
-    MH_CreateHookApi(L"advapi32", "RegCloseKey",
-        reinterpret_cast<LPVOID>(HookRegCloseKey),
-        reinterpret_cast<LPVOID*>(&g_origRegCloseKey));
-    MH_CreateHookApi(L"advapi32", "RegQueryValueExW",
-        reinterpret_cast<LPVOID>(HookRegQueryValueExW),
-        reinterpret_cast<LPVOID*>(&g_origRegQueryValueExW));
-    MH_CreateHookApi(L"advapi32", "RegQueryValueExA",
-        reinterpret_cast<LPVOID>(HookRegQueryValueExA),
-        reinterpret_cast<LPVOID*>(&g_origRegQueryValueExA));
-    MH_CreateHookApi(L"advapi32", "RegSetValueExW",
-        reinterpret_cast<LPVOID>(HookRegSetValueExW),
-        reinterpret_cast<LPVOID*>(&g_origRegSetValueExW));
-    MH_CreateHookApi(L"advapi32", "RegSetValueExA",
-        reinterpret_cast<LPVOID>(HookRegSetValueExA),
-        reinterpret_cast<LPVOID*>(&g_origRegSetValueExA));
-    MH_CreateHookApi(L"advapi32", "RegDeleteValueW",
-        reinterpret_cast<LPVOID>(HookRegDeleteValueW),
-        reinterpret_cast<LPVOID*>(&g_origRegDeleteValueW));
-    MH_CreateHookApi(L"advapi32", "RegDeleteValueA",
-        reinterpret_cast<LPVOID>(HookRegDeleteValueA),
-        reinterpret_cast<LPVOID*>(&g_origRegDeleteValueA));
-    MH_CreateHookApi(L"advapi32", "RegEnumValueW",
-        reinterpret_cast<LPVOID>(HookRegEnumValueW),
-        reinterpret_cast<LPVOID*>(&g_origRegEnumValueW));
-    MH_CreateHookApi(L"advapi32", "RegEnumValueA",
-        reinterpret_cast<LPVOID>(HookRegEnumValueA),
-        reinterpret_cast<LPVOID*>(&g_origRegEnumValueA));
-    MH_CreateHookApi(L"advapi32", "RegEnumKeyExW",
-        reinterpret_cast<LPVOID>(HookRegEnumKeyExW),
-        reinterpret_cast<LPVOID*>(&g_origRegEnumKeyExW));
-    MH_CreateHookApi(L"advapi32", "RegEnumKeyExA",
-        reinterpret_cast<LPVOID>(HookRegEnumKeyExA),
-        reinterpret_cast<LPVOID*>(&g_origRegEnumKeyExA));
-    MH_CreateHookApi(L"advapi32", "RegQueryInfoKeyW",
-        reinterpret_cast<LPVOID>(HookRegQueryInfoKeyW),
-        reinterpret_cast<LPVOID*>(&g_origRegQueryInfoKeyW));
-    MH_CreateHookApi(L"advapi32", "RegQueryInfoKeyA",
-        reinterpret_cast<LPVOID>(HookRegQueryInfoKeyA),
-        reinterpret_cast<LPVOID*>(&g_origRegQueryInfoKeyA));
+    LogHookInit(L"advapi32", "RegOpenKeyExW",
+        MH_CreateHookApi(L"advapi32", "RegOpenKeyExW",
+            reinterpret_cast<LPVOID>(HookRegOpenKeyExW),
+            reinterpret_cast<LPVOID*>(&g_origRegOpenKeyExW)));
+    LogHookInit(L"advapi32", "RegOpenKeyExA",
+        MH_CreateHookApi(L"advapi32", "RegOpenKeyExA",
+            reinterpret_cast<LPVOID>(HookRegOpenKeyExA),
+            reinterpret_cast<LPVOID*>(&g_origRegOpenKeyExA)));
+    LogHookInit(L"advapi32", "RegCreateKeyExW",
+        MH_CreateHookApi(L"advapi32", "RegCreateKeyExW",
+            reinterpret_cast<LPVOID>(HookRegCreateKeyExW),
+            reinterpret_cast<LPVOID*>(&g_origRegCreateKeyExW)));
+    LogHookInit(L"advapi32", "RegCreateKeyExA",
+        MH_CreateHookApi(L"advapi32", "RegCreateKeyExA",
+            reinterpret_cast<LPVOID>(HookRegCreateKeyExA),
+            reinterpret_cast<LPVOID*>(&g_origRegCreateKeyExA)));
+    LogHookInit(L"advapi32", "RegCloseKey",
+        MH_CreateHookApi(L"advapi32", "RegCloseKey",
+            reinterpret_cast<LPVOID>(HookRegCloseKey),
+            reinterpret_cast<LPVOID*>(&g_origRegCloseKey)));
+    LogHookInit(L"advapi32", "RegQueryValueExW",
+        MH_CreateHookApi(L"advapi32", "RegQueryValueExW",
+            reinterpret_cast<LPVOID>(HookRegQueryValueExW),
+            reinterpret_cast<LPVOID*>(&g_origRegQueryValueExW)));
+    LogHookInit(L"advapi32", "RegQueryValueExA",
+        MH_CreateHookApi(L"advapi32", "RegQueryValueExA",
+            reinterpret_cast<LPVOID>(HookRegQueryValueExA),
+            reinterpret_cast<LPVOID*>(&g_origRegQueryValueExA)));
+    LogHookInit(L"advapi32", "RegSetValueExW",
+        MH_CreateHookApi(L"advapi32", "RegSetValueExW",
+            reinterpret_cast<LPVOID>(HookRegSetValueExW),
+            reinterpret_cast<LPVOID*>(&g_origRegSetValueExW)));
+    LogHookInit(L"advapi32", "RegSetValueExA",
+        MH_CreateHookApi(L"advapi32", "RegSetValueExA",
+            reinterpret_cast<LPVOID>(HookRegSetValueExA),
+            reinterpret_cast<LPVOID*>(&g_origRegSetValueExA)));
+    LogHookInit(L"advapi32", "RegDeleteValueW",
+        MH_CreateHookApi(L"advapi32", "RegDeleteValueW",
+            reinterpret_cast<LPVOID>(HookRegDeleteValueW),
+            reinterpret_cast<LPVOID*>(&g_origRegDeleteValueW)));
+    LogHookInit(L"advapi32", "RegDeleteValueA",
+        MH_CreateHookApi(L"advapi32", "RegDeleteValueA",
+            reinterpret_cast<LPVOID>(HookRegDeleteValueA),
+            reinterpret_cast<LPVOID*>(&g_origRegDeleteValueA)));
+    LogHookInit(L"advapi32", "RegEnumValueW",
+        MH_CreateHookApi(L"advapi32", "RegEnumValueW",
+            reinterpret_cast<LPVOID>(HookRegEnumValueW),
+            reinterpret_cast<LPVOID*>(&g_origRegEnumValueW)));
+    LogHookInit(L"advapi32", "RegEnumValueA",
+        MH_CreateHookApi(L"advapi32", "RegEnumValueA",
+            reinterpret_cast<LPVOID>(HookRegEnumValueA),
+            reinterpret_cast<LPVOID*>(&g_origRegEnumValueA)));
+    LogHookInit(L"advapi32", "RegEnumKeyExW",
+        MH_CreateHookApi(L"advapi32", "RegEnumKeyExW",
+            reinterpret_cast<LPVOID>(HookRegEnumKeyExW),
+            reinterpret_cast<LPVOID*>(&g_origRegEnumKeyExW)));
+    LogHookInit(L"advapi32", "RegEnumKeyExA",
+        MH_CreateHookApi(L"advapi32", "RegEnumKeyExA",
+            reinterpret_cast<LPVOID>(HookRegEnumKeyExA),
+            reinterpret_cast<LPVOID*>(&g_origRegEnumKeyExA)));
+    LogHookInit(L"advapi32", "RegQueryInfoKeyW",
+        MH_CreateHookApi(L"advapi32", "RegQueryInfoKeyW",
+            reinterpret_cast<LPVOID>(HookRegQueryInfoKeyW),
+            reinterpret_cast<LPVOID*>(&g_origRegQueryInfoKeyW)));
+    LogHookInit(L"advapi32", "RegQueryInfoKeyA",
+        MH_CreateHookApi(L"advapi32", "RegQueryInfoKeyA",
+            reinterpret_cast<LPVOID>(HookRegQueryInfoKeyA),
+            reinterpret_cast<LPVOID*>(&g_origRegQueryInfoKeyA)));
 }
 
 void RemoveRegistryHooks()
