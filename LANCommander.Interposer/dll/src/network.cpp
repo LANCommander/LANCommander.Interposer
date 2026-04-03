@@ -20,11 +20,27 @@ using FnGetAddrInfo  = int(WSAAPI*)(PCSTR,  PCSTR,  const ADDRINFOA*,  PADDRINFO
 using FnGetAddrInfoW = int(WSAAPI*)(PCWSTR, PCWSTR, const ADDRINFOW*, PADDRINFOW*);
 using FnConnect      = int(WSAAPI*)(SOCKET, const sockaddr*, int);
 using FnWSAConnect   = int(WSAAPI*)(SOCKET, const sockaddr*, int, LPWSABUF, LPWSABUF, LPQOS, LPQOS);
+using FnSendTo       = int(WSAAPI*)(SOCKET, const char*, int, int, const sockaddr*, int);
+using FnWSASendTo    = int(WSAAPI*)(SOCKET, LPWSABUF, DWORD, LPDWORD, DWORD, const sockaddr*, int, LPWSAOVERLAPPED, LPWSAOVERLAPPED_COMPLETION_ROUTINE);
+using FnRecvFrom     = int(WSAAPI*)(SOCKET, char*, int, int, sockaddr*, int*);
+using FnWSARecvFrom  = int(WSAAPI*)(SOCKET, LPWSABUF, DWORD, LPDWORD, LPDWORD, sockaddr*, LPINT, LPWSAOVERLAPPED, LPWSAOVERLAPPED_COMPLETION_ROUTINE);
+using FnSend         = int(WSAAPI*)(SOCKET, const char*, int, int);
+using FnWSASend      = int(WSAAPI*)(SOCKET, LPWSABUF, DWORD, LPDWORD, DWORD, LPWSAOVERLAPPED, LPWSAOVERLAPPED_COMPLETION_ROUTINE);
+using FnRecv         = int(WSAAPI*)(SOCKET, char*, int, int);
+using FnWSARecv      = int(WSAAPI*)(SOCKET, LPWSABUF, DWORD, LPDWORD, LPDWORD, LPWSAOVERLAPPED, LPWSAOVERLAPPED_COMPLETION_ROUTINE);
 
 static FnGetAddrInfo  g_origGetAddrInfo  = nullptr;
 static FnGetAddrInfoW g_origGetAddrInfoW = nullptr;
 static FnConnect      g_origConnect      = nullptr;
 static FnWSAConnect   g_origWSAConnect   = nullptr;
+static FnSendTo       g_origSendTo       = nullptr;
+static FnWSASendTo    g_origWSASendTo    = nullptr;
+static FnRecvFrom     g_origRecvFrom     = nullptr;
+static FnWSARecvFrom  g_origWSARecvFrom  = nullptr;
+static FnSend         g_origSend         = nullptr;
+static FnWSASend      g_origWSASend      = nullptr;
+static FnRecv         g_origRecv         = nullptr;
+static FnWSARecv      g_origWSARecv      = nullptr;
 
 // ---------------------------------------------------------------------------
 // Deduplication — each unique host is only logged/probed once per session
@@ -221,6 +237,122 @@ static int WSAAPI HookWSAConnect(
     return ret;
 }
 
+// Capture the peer address of a connected socket (TCP send/recv path).
+static void OnSocketActivity(SOCKET s)
+{
+    sockaddr_storage ss{};
+    int sslen = static_cast<int>(sizeof(ss));
+    if (getpeername(s, reinterpret_cast<sockaddr*>(&ss), &sslen) == 0)
+    {
+        const std::wstring host = SockAddrToHost(reinterpret_cast<sockaddr*>(&ss));
+        const int          port = SockAddrToPort(reinterpret_cast<sockaddr*>(&ss));
+        if (!host.empty())
+            OnHostDiscovered(host, port);
+    }
+}
+
+static int WSAAPI HookSendTo(
+    SOCKET s, const char* buf, int len, int flags,
+    const sockaddr* to, int tolen)
+{
+    if (to)
+    {
+        const std::wstring host = SockAddrToHost(to);
+        const int          port = SockAddrToPort(to);
+        if (!host.empty())
+            OnHostDiscovered(host, port);
+    }
+    return g_origSendTo(s, buf, len, flags, to, tolen);
+}
+
+static int WSAAPI HookWSASendTo(
+    SOCKET s, LPWSABUF lpBuffers, DWORD dwBufferCount,
+    LPDWORD lpNumberOfBytesSent, DWORD dwFlags,
+    const sockaddr* lpTo, int iTolen,
+    LPWSAOVERLAPPED lpOverlapped,
+    LPWSAOVERLAPPED_COMPLETION_ROUTINE lpCompletionRoutine)
+{
+    if (lpTo)
+    {
+        const std::wstring host = SockAddrToHost(lpTo);
+        const int          port = SockAddrToPort(lpTo);
+        if (!host.empty())
+            OnHostDiscovered(host, port);
+    }
+    return g_origWSASendTo(s, lpBuffers, dwBufferCount, lpNumberOfBytesSent,
+        dwFlags, lpTo, iTolen, lpOverlapped, lpCompletionRoutine);
+}
+
+static int WSAAPI HookRecvFrom(
+    SOCKET s, char* buf, int len, int flags,
+    sockaddr* from, int* fromlen)
+{
+    const int ret = g_origRecvFrom(s, buf, len, flags, from, fromlen);
+    if (ret != SOCKET_ERROR && from)
+    {
+        const std::wstring host = SockAddrToHost(from);
+        const int          port = SockAddrToPort(from);
+        if (!host.empty())
+            OnHostDiscovered(host, port);
+    }
+    return ret;
+}
+
+static int WSAAPI HookWSARecvFrom(
+    SOCKET s, LPWSABUF lpBuffers, DWORD dwBufferCount,
+    LPDWORD lpNumberOfBytesRecvd, LPDWORD lpFlags,
+    sockaddr* lpFrom, LPINT lpFromlen,
+    LPWSAOVERLAPPED lpOverlapped,
+    LPWSAOVERLAPPED_COMPLETION_ROUTINE lpCompletionRoutine)
+{
+    const int ret = g_origWSARecvFrom(s, lpBuffers, dwBufferCount,
+        lpNumberOfBytesRecvd, lpFlags, lpFrom, lpFromlen,
+        lpOverlapped, lpCompletionRoutine);
+    // ret == 0 means data received synchronously; lpFrom is valid then.
+    if (ret == 0 && lpFrom)
+    {
+        const std::wstring host = SockAddrToHost(lpFrom);
+        const int          port = SockAddrToPort(lpFrom);
+        if (!host.empty())
+            OnHostDiscovered(host, port);
+    }
+    return ret;
+}
+
+static int WSAAPI HookSend(SOCKET s, const char* buf, int len, int flags)
+{
+    OnSocketActivity(s);
+    return g_origSend(s, buf, len, flags);
+}
+
+static int WSAAPI HookWSASend(
+    SOCKET s, LPWSABUF lpBuffers, DWORD dwBufferCount,
+    LPDWORD lpNumberOfBytesSent, DWORD dwFlags,
+    LPWSAOVERLAPPED lpOverlapped,
+    LPWSAOVERLAPPED_COMPLETION_ROUTINE lpCompletionRoutine)
+{
+    OnSocketActivity(s);
+    return g_origWSASend(s, lpBuffers, dwBufferCount, lpNumberOfBytesSent,
+        dwFlags, lpOverlapped, lpCompletionRoutine);
+}
+
+static int WSAAPI HookRecv(SOCKET s, char* buf, int len, int flags)
+{
+    OnSocketActivity(s);
+    return g_origRecv(s, buf, len, flags);
+}
+
+static int WSAAPI HookWSARecv(
+    SOCKET s, LPWSABUF lpBuffers, DWORD dwBufferCount,
+    LPDWORD lpNumberOfBytesRecvd, LPDWORD lpFlags,
+    LPWSAOVERLAPPED lpOverlapped,
+    LPWSAOVERLAPPED_COMPLETION_ROUTINE lpCompletionRoutine)
+{
+    OnSocketActivity(s);
+    return g_origWSARecv(s, lpBuffers, dwBufferCount, lpNumberOfBytesRecvd,
+        lpFlags, lpOverlapped, lpCompletionRoutine);
+}
+
 // ---------------------------------------------------------------------------
 // Public API
 // ---------------------------------------------------------------------------
@@ -244,6 +376,38 @@ void InstallNetworkHooks()
     MH_CreateHookApi(L"ws2_32", "WSAConnect",
         reinterpret_cast<LPVOID>(HookWSAConnect),
         reinterpret_cast<LPVOID*>(&g_origWSAConnect));
+
+    MH_CreateHookApi(L"ws2_32", "sendto",
+        reinterpret_cast<LPVOID>(HookSendTo),
+        reinterpret_cast<LPVOID*>(&g_origSendTo));
+
+    MH_CreateHookApi(L"ws2_32", "WSASendTo",
+        reinterpret_cast<LPVOID>(HookWSASendTo),
+        reinterpret_cast<LPVOID*>(&g_origWSASendTo));
+
+    MH_CreateHookApi(L"ws2_32", "recvfrom",
+        reinterpret_cast<LPVOID>(HookRecvFrom),
+        reinterpret_cast<LPVOID*>(&g_origRecvFrom));
+
+    MH_CreateHookApi(L"ws2_32", "WSARecvFrom",
+        reinterpret_cast<LPVOID>(HookWSARecvFrom),
+        reinterpret_cast<LPVOID*>(&g_origWSARecvFrom));
+
+    MH_CreateHookApi(L"ws2_32", "send",
+        reinterpret_cast<LPVOID>(HookSend),
+        reinterpret_cast<LPVOID*>(&g_origSend));
+
+    MH_CreateHookApi(L"ws2_32", "WSASend",
+        reinterpret_cast<LPVOID>(HookWSASend),
+        reinterpret_cast<LPVOID*>(&g_origWSASend));
+
+    MH_CreateHookApi(L"ws2_32", "recv",
+        reinterpret_cast<LPVOID>(HookRecv),
+        reinterpret_cast<LPVOID*>(&g_origRecv));
+
+    MH_CreateHookApi(L"ws2_32", "WSARecv",
+        reinterpret_cast<LPVOID>(HookWSARecv),
+        reinterpret_cast<LPVOID*>(&g_origWSARecv));
 }
 
 void RemoveNetworkHooks()
