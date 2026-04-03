@@ -16,31 +16,43 @@
 // ---------------------------------------------------------------------------
 // Trampoline pointers
 // ---------------------------------------------------------------------------
-using FnGetAddrInfo  = int(WSAAPI*)(PCSTR,  PCSTR,  const ADDRINFOA*,  PADDRINFOA*);
-using FnGetAddrInfoW = int(WSAAPI*)(PCWSTR, PCWSTR, const ADDRINFOW*, PADDRINFOW*);
-using FnConnect      = int(WSAAPI*)(SOCKET, const sockaddr*, int);
-using FnWSAConnect   = int(WSAAPI*)(SOCKET, const sockaddr*, int, LPWSABUF, LPWSABUF, LPQOS, LPQOS);
-using FnSendTo       = int(WSAAPI*)(SOCKET, const char*, int, int, const sockaddr*, int);
-using FnWSASendTo    = int(WSAAPI*)(SOCKET, LPWSABUF, DWORD, LPDWORD, DWORD, const sockaddr*, int, LPWSAOVERLAPPED, LPWSAOVERLAPPED_COMPLETION_ROUTINE);
-using FnRecvFrom     = int(WSAAPI*)(SOCKET, char*, int, int, sockaddr*, int*);
-using FnWSARecvFrom  = int(WSAAPI*)(SOCKET, LPWSABUF, DWORD, LPDWORD, LPDWORD, sockaddr*, LPINT, LPWSAOVERLAPPED, LPWSAOVERLAPPED_COMPLETION_ROUTINE);
-using FnSend         = int(WSAAPI*)(SOCKET, const char*, int, int);
-using FnWSASend      = int(WSAAPI*)(SOCKET, LPWSABUF, DWORD, LPDWORD, DWORD, LPWSAOVERLAPPED, LPWSAOVERLAPPED_COMPLETION_ROUTINE);
-using FnRecv         = int(WSAAPI*)(SOCKET, char*, int, int);
-using FnWSARecv      = int(WSAAPI*)(SOCKET, LPWSABUF, DWORD, LPDWORD, LPDWORD, LPWSAOVERLAPPED, LPWSAOVERLAPPED_COMPLETION_ROUTINE);
+using FnGetAddrInfo    = int(WSAAPI*)(PCSTR,  PCSTR,  const ADDRINFOA*,  PADDRINFOA*);
+using FnGetAddrInfoW   = int(WSAAPI*)(PCWSTR, PCWSTR, const ADDRINFOW*, PADDRINFOW*);
+using FnGetHostByName  = hostent*(WSAAPI*)(const char*);
+using FnConnect        = int(WSAAPI*)(SOCKET, const sockaddr*, int);
+using FnWSAConnect     = int(WSAAPI*)(SOCKET, const sockaddr*, int, LPWSABUF, LPWSABUF, LPQOS, LPQOS);
+using FnSendTo         = int(WSAAPI*)(SOCKET, const char*, int, int, const sockaddr*, int);
+using FnWSASendTo      = int(WSAAPI*)(SOCKET, LPWSABUF, DWORD, LPDWORD, DWORD, const sockaddr*, int, LPWSAOVERLAPPED, LPWSAOVERLAPPED_COMPLETION_ROUTINE);
+using FnRecvFrom       = int(WSAAPI*)(SOCKET, char*, int, int, sockaddr*, int*);
+using FnWSARecvFrom    = int(WSAAPI*)(SOCKET, LPWSABUF, DWORD, LPDWORD, LPDWORD, sockaddr*, LPINT, LPWSAOVERLAPPED, LPWSAOVERLAPPED_COMPLETION_ROUTINE);
+using FnSend           = int(WSAAPI*)(SOCKET, const char*, int, int);
+using FnWSASend        = int(WSAAPI*)(SOCKET, LPWSABUF, DWORD, LPDWORD, DWORD, LPWSAOVERLAPPED, LPWSAOVERLAPPED_COMPLETION_ROUTINE);
+using FnRecv           = int(WSAAPI*)(SOCKET, char*, int, int);
+using FnWSARecv        = int(WSAAPI*)(SOCKET, LPWSABUF, DWORD, LPDWORD, LPDWORD, LPWSAOVERLAPPED, LPWSAOVERLAPPED_COMPLETION_ROUTINE);
 
-static FnGetAddrInfo  g_origGetAddrInfo  = nullptr;
-static FnGetAddrInfoW g_origGetAddrInfoW = nullptr;
-static FnConnect      g_origConnect      = nullptr;
-static FnWSAConnect   g_origWSAConnect   = nullptr;
-static FnSendTo       g_origSendTo       = nullptr;
-static FnWSASendTo    g_origWSASendTo    = nullptr;
-static FnRecvFrom     g_origRecvFrom     = nullptr;
-static FnWSARecvFrom  g_origWSARecvFrom  = nullptr;
-static FnSend         g_origSend         = nullptr;
-static FnWSASend      g_origWSASend      = nullptr;
-static FnRecv         g_origRecv         = nullptr;
-static FnWSARecv      g_origWSARecv      = nullptr;
+// ws2_32 trampolines
+static FnGetAddrInfo   g_origGetAddrInfo   = nullptr;
+static FnGetAddrInfoW  g_origGetAddrInfoW  = nullptr;
+static FnConnect       g_origConnect       = nullptr;
+static FnWSAConnect    g_origWSAConnect    = nullptr;
+static FnSendTo        g_origSendTo        = nullptr;
+static FnWSASendTo     g_origWSASendTo     = nullptr;
+static FnRecvFrom      g_origRecvFrom      = nullptr;
+static FnWSARecvFrom   g_origWSARecvFrom   = nullptr;
+static FnSend          g_origSend          = nullptr;
+static FnWSASend       g_origWSASend       = nullptr;
+static FnRecv          g_origRecv          = nullptr;
+static FnWSARecv       g_origWSARecv       = nullptr;
+
+// wsock32 trampolines (separate entries; on modern Windows wsock32 forwards to
+// ws2_32 internally, but games linked directly against wsock32 call these
+// exports and MinHook must patch them independently)
+static FnGetHostByName g_origGetHostByName = nullptr;  // wsock32 only
+static FnConnect       g_origConnect32     = nullptr;
+static FnSendTo        g_origSendTo32      = nullptr;
+static FnRecvFrom      g_origRecvFrom32    = nullptr;
+static FnSend          g_origSend32        = nullptr;
+static FnRecv          g_origRecv32        = nullptr;
 
 // ---------------------------------------------------------------------------
 // Deduplication — each unique host is only logged/probed once per session
@@ -354,6 +366,76 @@ static int WSAAPI HookWSARecv(
 }
 
 // ---------------------------------------------------------------------------
+// wsock32 hook implementations
+// ---------------------------------------------------------------------------
+
+// gethostbyname — Winsock 1 DNS resolution (wsock32 only; no ws2_32 equivalent)
+static hostent* WSAAPI HookGetHostByName(const char* name)
+{
+    hostent* ret = g_origGetHostByName(name);
+
+    if (ret && name && name[0] != '\0')
+        OnHostDiscovered(AnsiToWide(name));
+
+    return ret;
+}
+
+// The remaining wsock32 functions share signatures with their ws2_32 counterparts;
+// delegate to the same OnHostDiscovered/OnSocketActivity logic but call the
+// wsock32 trampolines so we don't cross DLL entry points.
+
+static int WSAAPI HookConnect32(SOCKET s, const sockaddr* name, int namelen)
+{
+    const std::wstring host = SockAddrToHost(name);
+    const int          port = SockAddrToPort(name);
+    const int ret = g_origConnect32(s, name, namelen);
+    if (!host.empty())
+        OnHostDiscovered(host, port);
+    return ret;
+}
+
+static int WSAAPI HookSendTo32(
+    SOCKET s, const char* buf, int len, int flags,
+    const sockaddr* to, int tolen)
+{
+    if (to)
+    {
+        const std::wstring host = SockAddrToHost(to);
+        const int          port = SockAddrToPort(to);
+        if (!host.empty())
+            OnHostDiscovered(host, port);
+    }
+    return g_origSendTo32(s, buf, len, flags, to, tolen);
+}
+
+static int WSAAPI HookRecvFrom32(
+    SOCKET s, char* buf, int len, int flags,
+    sockaddr* from, int* fromlen)
+{
+    const int ret = g_origRecvFrom32(s, buf, len, flags, from, fromlen);
+    if (ret != SOCKET_ERROR && from)
+    {
+        const std::wstring host = SockAddrToHost(from);
+        const int          port = SockAddrToPort(from);
+        if (!host.empty())
+            OnHostDiscovered(host, port);
+    }
+    return ret;
+}
+
+static int WSAAPI HookSend32(SOCKET s, const char* buf, int len, int flags)
+{
+    OnSocketActivity(s);
+    return g_origSend32(s, buf, len, flags);
+}
+
+static int WSAAPI HookRecv32(SOCKET s, char* buf, int len, int flags)
+{
+    OnSocketActivity(s);
+    return g_origRecv32(s, buf, len, flags);
+}
+
+// ---------------------------------------------------------------------------
 // Public API
 // ---------------------------------------------------------------------------
 void InstallNetworkHooks()
@@ -408,6 +490,33 @@ void InstallNetworkHooks()
     MH_CreateHookApi(L"ws2_32", "WSARecv",
         reinterpret_cast<LPVOID>(HookWSARecv),
         reinterpret_cast<LPVOID*>(&g_origWSARecv));
+
+    // wsock32 — older games (Winsock 1) link against this DLL directly.
+    // gethostbyname is wsock32-only; connect/send*/recv* share signatures with
+    // ws2_32 but need separate trampolines so MinHook patches the right exports.
+    MH_CreateHookApi(L"wsock32", "gethostbyname",
+        reinterpret_cast<LPVOID>(HookGetHostByName),
+        reinterpret_cast<LPVOID*>(&g_origGetHostByName));
+
+    MH_CreateHookApi(L"wsock32", "connect",
+        reinterpret_cast<LPVOID>(HookConnect32),
+        reinterpret_cast<LPVOID*>(&g_origConnect32));
+
+    MH_CreateHookApi(L"wsock32", "sendto",
+        reinterpret_cast<LPVOID>(HookSendTo32),
+        reinterpret_cast<LPVOID*>(&g_origSendTo32));
+
+    MH_CreateHookApi(L"wsock32", "recvfrom",
+        reinterpret_cast<LPVOID>(HookRecvFrom32),
+        reinterpret_cast<LPVOID*>(&g_origRecvFrom32));
+
+    MH_CreateHookApi(L"wsock32", "send",
+        reinterpret_cast<LPVOID>(HookSend32),
+        reinterpret_cast<LPVOID*>(&g_origSend32));
+
+    MH_CreateHookApi(L"wsock32", "recv",
+        reinterpret_cast<LPVOID>(HookRecv32),
+        reinterpret_cast<LPVOID*>(&g_origRecv32));
 }
 
 void RemoveNetworkHooks()
