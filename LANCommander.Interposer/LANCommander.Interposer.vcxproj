@@ -305,6 +305,7 @@
   </ItemDefinitionGroup>
 
   <ItemGroup>
+    <ClCompile Include="dll\src\borderless.cpp" />
     <ClCompile Include="dll\src\config.cpp" />
     <ClCompile Include="dll\src\proxy.cpp" />
     <ClCompile Include="dll\src\dllmain.cpp" />
@@ -319,6 +320,7 @@
   </ItemGroup>
 
   <ItemGroup>
+    <ClInclude Include="dll\src\borderless.h" />
     <ClInclude Include="dll\src\config.h" />
     <ClInclude Include="dll\src\fastdl.h" />
     <ClInclude Include="dll\src\files.h" />
