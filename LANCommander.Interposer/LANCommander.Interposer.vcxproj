@@ -304,6 +304,19 @@
     </Link>
   </ItemDefinitionGroup>
 
+  <ItemDefinitionGroup>
+    <PreBuildEvent>
+      <Command>powershell -NoProfile -ExecutionPolicy Bypass -File "$(SolutionDir)generate_version.ps1" -Output "$(SolutionDir)version_info.h"</Command>
+    </PreBuildEvent>
+    <ResourceCompile>
+      <AdditionalIncludeDirectories>$(SolutionDir);%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+    </ResourceCompile>
+  </ItemDefinitionGroup>
+
+  <ItemGroup>
+    <ResourceCompile Include="dll\src\resource.rc" />
+  </ItemGroup>
+
   <ItemGroup>
     <ClCompile Include="dll\src\borderless.cpp" />
     <ClCompile Include="dll\src\config.cpp" />
