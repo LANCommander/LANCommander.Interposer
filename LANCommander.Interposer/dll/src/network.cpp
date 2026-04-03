@@ -7,7 +7,7 @@
 #include <mutex>
 #include <set>
 #include <string>
-#include <thread>
+#include <vector>
 
 #include "network.h"
 #include "config.h"
@@ -55,16 +55,15 @@ static FnSend          g_origSend32        = nullptr;
 static FnRecv          g_origRecv32        = nullptr;
 
 // ---------------------------------------------------------------------------
-// Deduplication — each unique host is only logged/probed once per session
+// Address collection — each unique host is logged once; addresses are stored
+// for deferred FastDL probing at download time (not probed immediately).
 // ---------------------------------------------------------------------------
-static std::set<std::wstring> g_seenHosts;
-static std::mutex             g_seenHostsMutex;
+struct DiscoveredAddress { std::wstring host; int gamePort; };
 
-static bool TryMarkSeen(const std::wstring& host)
-{
-    std::lock_guard<std::mutex> lk(g_seenHostsMutex);
-    return g_seenHosts.insert(host).second;
-}
+static std::set<std::wstring>        g_seenHosts;
+static std::vector<DiscoveredAddress> g_discoveredAddresses;
+static size_t                        g_probedCount = 0; // index of next address to probe
+static std::mutex                    g_discoveredMutex;
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -142,19 +141,44 @@ static bool IsSkippableHost(const std::wstring& host)
     return false;
 }
 
+// Returns true if port falls within any configured filtered range (e.g. server
+// browser ports that should not be treated as game server addresses).
+static bool IsPortFiltered(int port)
+{
+    if (port <= 0)
+        return false;
+
+    for (const auto& range : g_fastdlFilteredPorts)
+        if (port >= range.min && port <= range.max)
+            return true;
+
+    return false;
+}
+
 // ---------------------------------------------------------------------------
 // OnHostDiscovered — called once per unique host/address
 //
 // gameServerPort: the port the game connected to (host byte order), or -1 if
 //                 unknown (e.g. from a DNS lookup with no associated connect).
+// Stores the address for deferred FastDL probing; does NOT probe immediately.
 // ---------------------------------------------------------------------------
 static void OnHostDiscovered(const std::wstring& host, int gameServerPort = -1)
 {
     if (IsSkippableHost(host))
         return;
 
-    if (!TryMarkSeen(host))
-        return; // already handled this session
+    // Skip addresses on server browser / non-game-server port ranges
+    if (IsPortFiltered(gameServerPort))
+        return;
+
+    {
+        std::lock_guard<std::mutex> lk(g_discoveredMutex);
+        if (!g_seenHosts.insert(host).second)
+            return; // already recorded this session
+
+        if (g_fastdlProbeConnections && g_fastdlEnabled)
+            g_discoveredAddresses.push_back({ host, gameServerPort });
+    }
 
     if (gameServerPort > 0)
     {
@@ -165,20 +189,6 @@ static void OnHostDiscovered(const std::wstring& host, int gameServerPort = -1)
     else
     {
         LogNetworkAccess(L"CONNECT", host.c_str(), nullptr);
-    }
-
-    if (g_fastdlProbeConnections && g_fastdlEnabled)
-    {
-        // Snapshot config values now — they won't change after LoadConfig,
-        // but we make copies so the lambda doesn't hold references.
-        const int          probePort = g_fastdlProbePort;
-        const int          gamePort  = gameServerPort;
-        const std::wstring h         = host;
-
-        std::thread([h, probePort, gamePort]()
-        {
-            ProbeServerForFastDL(h, probePort, gamePort);
-        }).detach();
     }
 }
 
@@ -582,8 +592,32 @@ void LateInstallNetworkHooks(const wchar_t* moduleName)
     MH_EnableHook(MH_ALL_HOOKS);
 }
 
+void ProbeAllDiscoveredAddresses()
+{
+    if (!g_fastdlProbeConnections || !g_fastdlEnabled)
+        return;
+
+    // Snapshot addresses that have not yet been probed, advancing g_probedCount
+    // atomically so concurrent callers don't double-probe the same entry.
+    std::vector<DiscoveredAddress> toProbe;
+    {
+        std::lock_guard<std::mutex> lk(g_discoveredMutex);
+        const size_t total = g_discoveredAddresses.size();
+        if (g_probedCount >= total)
+            return;
+        toProbe.assign(g_discoveredAddresses.begin() + static_cast<ptrdiff_t>(g_probedCount),
+                        g_discoveredAddresses.end());
+        g_probedCount = total;
+    }
+
+    for (const auto& addr : toProbe)
+        ProbeServerForFastDL(addr.host, g_fastdlProbePort, addr.gamePort);
+}
+
 void RemoveNetworkHooks()
 {
-    std::lock_guard<std::mutex> lk(g_seenHostsMutex);
+    std::lock_guard<std::mutex> lk(g_discoveredMutex);
     g_seenHosts.clear();
+    g_discoveredAddresses.clear();
+    g_probedCount = 0;
 }

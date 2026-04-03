@@ -19,6 +19,9 @@ struct FastDLPath {
     std::wstring remoteSubPath; // URL sub-path under BaseUrl, e.g. baseq3
 };
 
+// An inclusive port range used to filter out server browser / non-game-server ports.
+struct PortRange { int min; int max; };
+
 // Populated by LoadConfig(). Read-only after that.
 extern bool         g_logFiles;         // true = log file I/O operations
 extern bool         g_logRegistry;      // true = log registry operations
@@ -34,9 +37,11 @@ extern std::vector<FastDLPath>   g_fastdlPaths;
 extern bool                      g_fastdlUseDownloadDir;     // true = write to overlay dir (default)
 extern std::wstring              g_fastdlDownloadDir;        // empty = <dlldir>\downloads
 extern bool                      g_fastdlBlockSensitiveFiles; // true = block overwriting sensitive files (default)
-extern bool                      g_fastdlProbeConnections;   // true = probe discovered server addresses for FastDL
+extern bool                      g_fastdlProbeConnections;   // true = collect server addresses and probe at download time
 extern int                       g_fastdlProbePort;          // HTTP port to probe (default 80)
 extern std::wstring              g_fastdlProbePath;          // HTTP path to probe (default "/")
+extern int                       g_fastdlProbeTimeout;       // probe request timeout in ms (default 2000)
+extern std::vector<PortRange>    g_fastdlFilteredPorts;      // port ranges to skip when collecting addresses
 
 extern bool         g_logNetwork;       // true = log connection/DNS events
 

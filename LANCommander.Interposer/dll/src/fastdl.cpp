@@ -9,6 +9,7 @@
 
 #include "fastdl.h"
 #include "config.h"
+#include "network.h"
 
 // Response header that a LANCommander FastDL endpoint must return.
 // Any value is accepted — its mere presence confirms the endpoint is ours.
@@ -166,6 +167,10 @@ static ProbeResult DoProbeRequest(HINTERNET hConnect, LPCWSTR path, DWORD flags,
 
     if (!hReq)
         return ProbeResult::NotFound;
+
+    // Use a short timeout so probing doesn't stall the file-load hook for long.
+    const DWORD timeout = static_cast<DWORD>(g_fastdlProbeTimeout > 0 ? g_fastdlProbeTimeout : 2000);
+    WinHttpSetTimeouts(hReq, timeout, timeout, timeout, timeout);
 
     if (additionalHeaders && additionalHeaders[0] != L'\0')
         WinHttpAddRequestHeaders(hReq, additionalHeaders, static_cast<DWORD>(-1),
@@ -629,8 +634,14 @@ static bool FastDLImpl(const std::wstring& localPath, bool headOnly)
     if (!IsExtensionAllowed(localPath))
         return false;
 
+    // If no base URL is configured, probe any server addresses collected by the
+    // network hooks that haven't been probed yet. This runs synchronously so that
+    // a discovered FastDL endpoint is available immediately for this download.
+    if (g_fastdlBaseUrl.empty())
+        ProbeAllDiscoveredAddresses();
+
     std::wstring url = BuildFastDLUrl(localPath);
-    
+
     if (url.empty())
         return false;
 

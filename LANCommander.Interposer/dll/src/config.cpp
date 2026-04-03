@@ -26,6 +26,8 @@ bool                      g_fastdlBlockSensitiveFiles = true;
 bool                      g_fastdlProbeConnections    = false;
 int                       g_fastdlProbePort           = 80;
 std::wstring              g_fastdlProbePath           = L"/";
+int                       g_fastdlProbeTimeout        = 2000;
+std::vector<PortRange>    g_fastdlFilteredPorts       = {{ 23000, 23009 }};
 
 bool         g_logNetwork = false;
 
@@ -478,6 +480,23 @@ void LoadConfig()
             g_fastdlProbePort = fastDl["ProbePort"].as<int>(80);
         if (fastDl["ProbePath"])
             g_fastdlProbePath = Utf8ToWide(fastDl["ProbePath"].as<std::string>("/"));
+        if (fastDl["ProbeTimeout"])
+            g_fastdlProbeTimeout = fastDl["ProbeTimeout"].as<int>(2000);
+        if (YAML::Node filteredPorts = fastDl["FilteredPorts"])
+        {
+            if (filteredPorts.IsSequence())
+            {
+                g_fastdlFilteredPorts.clear();
+                for (const auto& item : filteredPorts)
+                {
+                    PortRange range{};
+                    range.min = item["Min"] ? item["Min"].as<int>(0) : 0;
+                    range.max = item["Max"] ? item["Max"].as<int>(0) : 0;
+                    if (range.min > 0 && range.max >= range.min)
+                        g_fastdlFilteredPorts.push_back(range);
+                }
+            }
+        }
 
         if (YAML::Node allowedExtensions = fastDl["AllowedExtensions"])
         {
