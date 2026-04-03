@@ -158,6 +158,7 @@ static BOOL WINAPI HookSetWindowPos(
             Rect mon = GetMonitorRect(hMon);
             X = mon.left + (mon.width  - cx) / 2;
             Y = mon.top  + (mon.height - cy) / 2;
+            uFlags &= ~SWP_NOMOVE;  // ensure our recalculated position is applied
         }
         else
         {
