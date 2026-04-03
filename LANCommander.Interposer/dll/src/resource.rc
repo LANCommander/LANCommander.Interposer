@@ -1,13 +1,11 @@
 #include "version_info.h"
 
 #ifdef INTERPOSER_PROXY
-# define VER_FILETYPE         VFT_DLL
-# define VER_ORIGINAL_NAME    "version.dll\0"
-# define VER_DESCRIPTION      "LANCommander Interposer (Proxy)\0"
+# define VER_ORIGINAL_NAME    "version.dll"
+# define VER_DESCRIPTION      "LANCommander Interposer (Proxy)"
 #else
-# define VER_FILETYPE         VFT_DLL
-# define VER_ORIGINAL_NAME    "LANCommander.Interposer.dll\0"
-# define VER_DESCRIPTION      "LANCommander Interposer\0"
+# define VER_ORIGINAL_NAME    "LANCommander.Interposer.dll"
+# define VER_DESCRIPTION      "LANCommander Interposer"
 #endif
 
 VS_VERSION_INFO VERSIONINFO
@@ -15,8 +13,8 @@ VS_VERSION_INFO VERSIONINFO
  PRODUCTVERSION VER_PRODUCTVERSION
  FILEFLAGSMASK  0x3fL
  FILEFLAGS      0x0L
- FILEOS         VOS_NT_WINDOWS32
- FILETYPE       VER_FILETYPE
+ FILEOS         0x00040004L
+ FILETYPE       0x00000002L
  FILESUBTYPE    0x0L
 BEGIN
     BLOCK "StringFileInfo"
