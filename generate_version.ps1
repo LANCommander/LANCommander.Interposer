@@ -44,10 +44,11 @@ $content = @"
 "@
 
 # Only write when content differs to avoid spurious rebuilds.
-$existing = if (Test-Path $Output) { Get-Content $Output -Raw } else { '' }
-$normalized = $content + "`n"
-if ($normalized -ne $existing) {
-    Set-Content -Path $Output -Value $content -NoNewline -Encoding UTF8NoBOM
+# Use .NET directly for UTF-8 without BOM (compatible with PowerShell 5.x and 7+).
+$utf8NoBom = New-Object System.Text.UTF8Encoding $false
+$existing = if (Test-Path $Output) { [System.IO.File]::ReadAllText($Output) } else { '' }
+if ($content -ne $existing) {
+    [System.IO.File]::WriteAllText($Output, $content, $utf8NoBom)
     Write-Host "version_info.h: updated to $major.$minor.$patch"
 } else {
     Write-Host "version_info.h: up to date ($major.$minor.$patch)"
