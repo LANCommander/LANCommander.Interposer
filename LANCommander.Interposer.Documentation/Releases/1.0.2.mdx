@@ -1,0 +1,56 @@
+---
+sidebar_label: 1.0.2
+sidebar_position: 3
+---
+
+import ReleaseDownloads from '@site/src/components/ReleaseDownloads';
+
+# Interposer 1.0.2 Release Notes
+
+## Downloads
+
+<ReleaseDownloads repo="LANCommander/LANCommander.Interposer" release="v1.0.2" />
+
+## What's Changed
+
+### FastDL: Automatic Server Discovery (Endpoint Probing)
+
+FastDL can now discover the server address automatically without a `BaseUrl` in the config. When `ProbeConnections: true`, the interposer intercepts every DNS lookup and connection the game makes and accumulates the addresses. The first time a file download is needed, the accumulated addresses are probed in order with a HEAD request; the first one that returns HTTP 200 is used as the FastDL base URL for the rest of the session.
+
+Probing is deferred until a download is actually required, so there is no extra network overhead on the game's normal connection path.
+
+New config keys under `FastDL`:
+
+| Key | Default | Description |
+|---|---|---|
+| `ProbeConnections` | `false` | Enable automatic server discovery |
+| `ProbePort` | `80` | HTTP port used for probe requests |
+| `ProbePath` | `/` | HTTP path sent in the HEAD probe (must begin with `/`); a 200 response confirms FastDL is available |
+| `ProbeTimeout` | `2000` | Timeout in milliseconds for each probe (name resolution, connect, send, receive) — keep short to avoid stalling file loads when no server is present |
+| `FilteredPorts` | GameSpy range 23000–23009 | Port ranges to skip when collecting addresses. Useful to suppress server browser ports that would otherwise flood the candidate list. Set to `[]` to disable all filtering. |
+
+`BaseUrl` and `ProbeConnections` are complementary: if `BaseUrl` is set it is used directly and probing is skipped. If `BaseUrl` is empty and `ProbeConnections: true`, the server is discovered at runtime.
+
+### Network Hooks
+
+To support endpoint probing, the interposer now hooks `ws2_32.dll` and `wsock32.dll` (for older Winsock 1 games). The following functions are intercepted:
+
+- **ws2_32**: `getaddrinfo`, `GetAddrInfoW`, `connect`, `WSAConnect`, `send`, `WSASend`, `recv`, `WSARecv`, `sendto`, `WSASendTo`, `recvfrom`, `WSARecvFrom`
+- **wsock32**: `gethostbyname`, `connect`, `send`, `recv`, `sendto`, `recvfrom`
+
+Network hooks are skipped entirely when both `Logging.Network` and `FastDL.ProbeConnections` are false — no performance impact when neither feature is in use.
+
+Games that load `wsock32.dll` after injection (rather than at startup) are handled via late hook installation: the interposer monitors DLL loads and patches the wsock32 exports as soon as the module appears.
+
+### Network Logging
+
+A new `Logging.Network` option (default `false`) logs every unique host address the game resolves or connects to. Entries use the `[NET CONNECT]` verb and appear in the session log alongside the other subsystems.
+
+```yaml
+Logging:
+  Network: true   # log addresses the game connects to
+```
+
+### Borderless Fullscreen: Resize Fix
+
+Fixed window repositioning when a game resizes its window after creation. Previously, `SetWindowPos` calls that changed the window size could cause the window to drift off-center. The hook now re-centers the window on its monitor whenever its size changes.
