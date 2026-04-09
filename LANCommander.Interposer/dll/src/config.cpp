@@ -89,6 +89,34 @@ static std::string WideToUtf8(const std::wstring& s)
 // ---------------------------------------------------------------------------
 // ApplyFileRedirects
 // ---------------------------------------------------------------------------
+// Collapse runs of backslashes to a single backslash, preserving
+// a leading \\ for UNC paths and \\?\ extended-length prefixes.
+static std::wstring NormalizeBackslashes(const std::wstring& path)
+{
+    if (path.size() < 2)
+        return path;
+
+    std::wstring out;
+    out.reserve(path.size());
+
+    // Preserve leading \\ (UNC / extended-length prefix)
+    size_t start = 0;
+    if (path[0] == L'\\' && path[1] == L'\\')
+    {
+        out += L"\\\\";
+        start = 2;
+    }
+
+    for (size_t i = start; i < path.size(); ++i)
+    {
+        if (path[i] == L'\\' && !out.empty() && out.back() == L'\\')
+            continue;
+        out += path[i];
+    }
+
+    return out;
+}
+
 std::wstring ApplyFileRedirects(const std::wstring& path)
 {
     if (g_redirects.empty())
@@ -101,7 +129,7 @@ std::wstring ApplyFileRedirects(const std::wstring& path)
             std::regex_constants::format_first_only);
 
         if (result != path)
-            return ExpandEnvVars(result);
+            return NormalizeBackslashes(ExpandEnvVars(result));
     }
 
     return path;

@@ -40,6 +40,38 @@ static FnLoadLibraryExA     g_origLoadLibraryExA     = nullptr;
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
+
+// Recursively create all directories along a file path's parent chain.
+static void EnsureParentDirectoryExists(const std::wstring& filePath)
+{
+    size_t pos = filePath.find_last_of(L"\\/");
+    if (pos == std::wstring::npos || pos == 0)
+        return;
+
+    std::wstring dir = filePath.substr(0, pos);
+
+    // Already exists? Use trampoline to bypass our own hook.
+    auto getAttrs = g_origGetFileAttributesW ? g_origGetFileAttributesW : GetFileAttributesW;
+    DWORD attrs = getAttrs(dir.c_str());
+    if (attrs != INVALID_FILE_ATTRIBUTES && (attrs & FILE_ATTRIBUTE_DIRECTORY))
+        return;
+
+    // Walk forward creating each segment
+    for (size_t i = 0; i < dir.size(); ++i)
+    {
+        if (dir[i] == L'\\' || dir[i] == L'/')
+        {
+            // Skip drive letter root (e.g. "C:\") and UNC prefixes
+            if (i == 0) continue;
+            if (i == 2 && dir[1] == L':') continue;
+
+            std::wstring segment = dir.substr(0, i);
+            CreateDirectoryW(segment.c_str(), nullptr);
+        }
+    }
+    CreateDirectoryW(dir.c_str(), nullptr);
+}
+
 static const wchar_t* AccessVerb(DWORD access)
 {
     bool r = (access & (GENERIC_READ  | FILE_READ_DATA))                    != 0;
@@ -67,7 +99,13 @@ static HANDLE CreateFileWImpl(
     std::wstring redirected = ApplyFileRedirects(path);
 
     if (redirected != path)
+    {
         LogFileAccess(L"FILE REDIRECT", path.c_str(), redirected.c_str());
+
+        // Ensure the destination directory tree exists for write operations
+        if (dwDesiredAccess & (GENERIC_WRITE | FILE_WRITE_DATA | FILE_APPEND_DATA))
+            EnsureParentDirectoryExists(redirected);
+    }
     else
         LogFileAccess(AccessVerb(dwDesiredAccess), path.c_str());
 
