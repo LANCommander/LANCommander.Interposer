@@ -28,41 +28,73 @@ void LoadPlugins()
 
     std::wstring pluginsDir = dllDir + L".interposer\\Plugins\\";
 
-    // Enumerate .dll files
-    for (const wchar_t* ext : { L"*.dll", L"*.asi" })
+    // Recursively enumerate .dll and .asi files in Plugins and all subdirectories
+    std::vector<std::wstring> dirs;
+    dirs.push_back(pluginsDir);
+
+    while (!dirs.empty())
     {
-        std::wstring pattern = pluginsDir + ext;
+        std::wstring dir = std::move(dirs.back());
+        dirs.pop_back();
 
-        WIN32_FIND_DATAW fd{};
-        HANDLE hFind = FindFirstFileW(pattern.c_str(), &fd);
-
-        if (hFind == INVALID_HANDLE_VALUE)
-            continue;
-
-        do
+        // Discover subdirectories
         {
-            if (fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY)
-                continue;
+            std::wstring pattern = dir + L"*";
+            WIN32_FIND_DATAW fd{};
+            HANDLE hFind = FindFirstFileW(pattern.c_str(), &fd);
 
-            std::wstring fullPath = pluginsDir + fd.cFileName;
-            HMODULE hMod = LoadLibraryW(fullPath.c_str());
+            if (hFind != INVALID_HANDLE_VALUE)
+            {
+                do
+                {
+                    if (!(fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY))
+                        continue;
+                    if (wcscmp(fd.cFileName, L".") == 0 || wcscmp(fd.cFileName, L"..") == 0)
+                        continue;
 
-            if (hMod)
-            {
-                g_plugins.push_back(hMod);
-                LogFileAccess(L"PLUGIN LOAD", fullPath.c_str());
-            }
-            else
-            {
-                // Log load failure (error code appended to path)
-                wchar_t errBuf[MAX_PATH + 32];
-                wsprintfW(errBuf, L"%s  (error %u)", fullPath.c_str(), GetLastError());
-                LogFileAccess(L"PLUGIN ERROR", errBuf);
+                    dirs.push_back(dir + fd.cFileName + L"\\");
+                }
+                while (FindNextFileW(hFind, &fd));
+
+                FindClose(hFind);
             }
         }
-        while (FindNextFileW(hFind, &fd));
 
-        FindClose(hFind);
+        // Load plugin files from this directory
+        for (const wchar_t* ext : { L"*.dll", L"*.asi" })
+        {
+            std::wstring pattern = dir + ext;
+
+            WIN32_FIND_DATAW fd{};
+            HANDLE hFind = FindFirstFileW(pattern.c_str(), &fd);
+
+            if (hFind == INVALID_HANDLE_VALUE)
+                continue;
+
+            do
+            {
+                if (fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY)
+                    continue;
+
+                std::wstring fullPath = dir + fd.cFileName;
+                HMODULE hMod = LoadLibraryW(fullPath.c_str());
+
+                if (hMod)
+                {
+                    g_plugins.push_back(hMod);
+                    LogFileAccess(L"PLUGIN LOAD", fullPath.c_str());
+                }
+                else
+                {
+                    wchar_t errBuf[MAX_PATH + 32];
+                    wsprintfW(errBuf, L"%s  (error %u)", fullPath.c_str(), GetLastError());
+                    LogFileAccess(L"PLUGIN ERROR", errBuf);
+                }
+            }
+            while (FindNextFileW(hFind, &fd));
+
+            FindClose(hFind);
+        }
     }
 }
 
