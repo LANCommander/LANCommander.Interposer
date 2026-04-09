@@ -21,6 +21,18 @@ using FnGetFileAttributesW = DWORD(WINAPI*)(LPCWSTR);
 using FnGetFileAttributesA = DWORD(WINAPI*)(LPCSTR);
 using FnFindFirstFileW     = HANDLE(WINAPI*)(LPCWSTR, LPWIN32_FIND_DATAW);
 using FnFindFirstFileA     = HANDLE(WINAPI*)(LPCSTR,  LPWIN32_FIND_DATAA);
+using FnFindFirstFileExW   = HANDLE(WINAPI*)(LPCWSTR, FINDEX_INFO_LEVELS, LPVOID, FINDEX_SEARCH_OPS, LPVOID, DWORD);
+using FnFindFirstFileExA   = HANDLE(WINAPI*)(LPCSTR,  FINDEX_INFO_LEVELS, LPVOID, FINDEX_SEARCH_OPS, LPVOID, DWORD);
+using FnDeleteFileW        = BOOL(WINAPI*)(LPCWSTR);
+using FnDeleteFileA        = BOOL(WINAPI*)(LPCSTR);
+using FnMoveFileW          = BOOL(WINAPI*)(LPCWSTR, LPCWSTR);
+using FnMoveFileA          = BOOL(WINAPI*)(LPCSTR,  LPCSTR);
+using FnMoveFileExW        = BOOL(WINAPI*)(LPCWSTR, LPCWSTR, DWORD);
+using FnMoveFileExA        = BOOL(WINAPI*)(LPCSTR,  LPCSTR,  DWORD);
+using FnCopyFileW          = BOOL(WINAPI*)(LPCWSTR, LPCWSTR, BOOL);
+using FnCopyFileA          = BOOL(WINAPI*)(LPCSTR,  LPCSTR,  BOOL);
+using FnCopyFileExW        = BOOL(WINAPI*)(LPCWSTR, LPCWSTR, LPPROGRESS_ROUTINE, LPVOID, LPBOOL, DWORD);
+using FnCopyFileExA        = BOOL(WINAPI*)(LPCSTR,  LPCSTR,  LPPROGRESS_ROUTINE, LPVOID, LPBOOL, DWORD);
 using FnLoadLibraryW       = HMODULE(WINAPI*)(LPCWSTR);
 using FnLoadLibraryA       = HMODULE(WINAPI*)(LPCSTR);
 using FnLoadLibraryExW     = HMODULE(WINAPI*)(LPCWSTR, HANDLE, DWORD);
@@ -32,10 +44,26 @@ static FnGetFileAttributesW g_origGetFileAttributesW = nullptr;
 static FnGetFileAttributesA g_origGetFileAttributesA = nullptr;
 static FnFindFirstFileW     g_origFindFirstFileW     = nullptr;
 static FnFindFirstFileA     g_origFindFirstFileA     = nullptr;
+static FnFindFirstFileExW   g_origFindFirstFileExW   = nullptr;
+static FnFindFirstFileExA   g_origFindFirstFileExA   = nullptr;
+static FnDeleteFileW        g_origDeleteFileW        = nullptr;
+static FnDeleteFileA        g_origDeleteFileA        = nullptr;
+static FnMoveFileW          g_origMoveFileW          = nullptr;
+static FnMoveFileA          g_origMoveFileA          = nullptr;
+static FnMoveFileExW        g_origMoveFileExW        = nullptr;
+static FnMoveFileExA        g_origMoveFileExA        = nullptr;
+static FnCopyFileW          g_origCopyFileW          = nullptr;
+static FnCopyFileA          g_origCopyFileA          = nullptr;
+static FnCopyFileExW        g_origCopyFileExW        = nullptr;
+static FnCopyFileExA        g_origCopyFileExA        = nullptr;
 static FnLoadLibraryW       g_origLoadLibraryW       = nullptr;
 static FnLoadLibraryA       g_origLoadLibraryA       = nullptr;
 static FnLoadLibraryExW     g_origLoadLibraryExW     = nullptr;
 static FnLoadLibraryExA     g_origLoadLibraryExA     = nullptr;
+
+// Reentrancy guard for file-management hooks (MoveFile/CopyFile call their
+// Ex counterparts internally — prevent double-redirect and double-logging).
+static thread_local bool g_inFileOpHook = false;
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -325,6 +353,399 @@ static HANDLE WINAPI HookFindFirstFileA(LPCSTR lpFileName, LPWIN32_FIND_DATAA lp
 }
 
 // ---------------------------------------------------------------------------
+// Helper — ANSI to wide string conversion
+// ---------------------------------------------------------------------------
+static std::wstring AnsiToWide(LPCSTR str)
+{
+    if (!str || !str[0]) return {};
+    int wlen = MultiByteToWideChar(CP_ACP, 0, str, -1, nullptr, 0);
+    if (wlen <= 1) return {};
+    std::wstring result(wlen - 1, L'\0');
+    MultiByteToWideChar(CP_ACP, 0, str, -1, result.data(), wlen);
+    return result;
+}
+
+// ---------------------------------------------------------------------------
+// Hook implementations — FindFirstFileEx
+// ---------------------------------------------------------------------------
+static HANDLE WINAPI HookFindFirstFileExW(
+    LPCWSTR lpFileName, FINDEX_INFO_LEVELS fInfoLevelId,
+    LPVOID lpFindFileData, FINDEX_SEARCH_OPS fSearchOp,
+    LPVOID lpSearchFilter, DWORD dwAdditionalFlags)
+{
+    if (!lpFileName || g_inFastDLHook)
+        return g_origFindFirstFileExW(lpFileName, fInfoLevelId, lpFindFileData, fSearchOp, lpSearchFilter, dwAdditionalFlags);
+
+    std::wstring path(lpFileName);
+    std::wstring redirected = ApplyFileRedirects(path);
+
+    if (redirected != path)
+    {
+        LogFileAccess(L"FILE REDIRECT", path.c_str(), redirected.c_str());
+        return g_origFindFirstFileExW(redirected.c_str(), fInfoLevelId, lpFindFileData, fSearchOp, lpSearchFilter, dwAdditionalFlags);
+    }
+
+    LogFileAccess(L"FILE FIND", path.c_str());
+    return g_origFindFirstFileExW(lpFileName, fInfoLevelId, lpFindFileData, fSearchOp, lpSearchFilter, dwAdditionalFlags);
+}
+
+static HANDLE WINAPI HookFindFirstFileExA(
+    LPCSTR lpFileName, FINDEX_INFO_LEVELS fInfoLevelId,
+    LPVOID lpFindFileData, FINDEX_SEARCH_OPS fSearchOp,
+    LPVOID lpSearchFilter, DWORD dwAdditionalFlags)
+{
+    if (!lpFileName || g_inFastDLHook)
+        return g_origFindFirstFileExA(lpFileName, fInfoLevelId, lpFindFileData, fSearchOp, lpSearchFilter, dwAdditionalFlags);
+
+    std::wstring wpath = AnsiToWide(lpFileName);
+    if (wpath.empty())
+        return g_origFindFirstFileExA(lpFileName, fInfoLevelId, lpFindFileData, fSearchOp, lpSearchFilter, dwAdditionalFlags);
+
+    std::wstring redirected = ApplyFileRedirects(wpath);
+
+    if (redirected != wpath)
+    {
+        LogFileAccess(L"FILE REDIRECT", wpath.c_str(), redirected.c_str());
+        // Use the W trampoline since we have a wide redirected path; cast the find
+        // data pointer — the caller passed an A-sized buffer but FindFirstFileExW
+        // writes a W-sized structure.  However the caller expects ANSI data, so
+        // we cannot safely call the W version here.  Convert redirected path back
+        // to ANSI instead.
+        int ansiLen = WideCharToMultiByte(CP_ACP, 0, redirected.c_str(), -1, nullptr, 0, nullptr, nullptr);
+        if (ansiLen > 1)
+        {
+            std::string ansiPath(static_cast<size_t>(ansiLen - 1), '\0');
+            WideCharToMultiByte(CP_ACP, 0, redirected.c_str(), -1, ansiPath.data(), ansiLen, nullptr, nullptr);
+            return g_origFindFirstFileExA(ansiPath.c_str(), fInfoLevelId, lpFindFileData, fSearchOp, lpSearchFilter, dwAdditionalFlags);
+        }
+        return g_origFindFirstFileExA(lpFileName, fInfoLevelId, lpFindFileData, fSearchOp, lpSearchFilter, dwAdditionalFlags);
+    }
+
+    LogFileAccess(L"FILE FIND", wpath.c_str());
+    return g_origFindFirstFileExA(lpFileName, fInfoLevelId, lpFindFileData, fSearchOp, lpSearchFilter, dwAdditionalFlags);
+}
+
+// ---------------------------------------------------------------------------
+// Hook implementations — DeleteFile
+// ---------------------------------------------------------------------------
+static BOOL WINAPI HookDeleteFileW(LPCWSTR lpFileName)
+{
+    if (!lpFileName || g_inFastDLHook)
+        return g_origDeleteFileW(lpFileName);
+
+    std::wstring path(lpFileName);
+    std::wstring redirected = ApplyFileRedirects(path);
+
+    if (redirected != path)
+    {
+        LogFileAccess(L"FILE REDIRECT", path.c_str(), redirected.c_str());
+        return g_origDeleteFileW(redirected.c_str());
+    }
+
+    LogFileAccess(L"FILE DELETE", path.c_str());
+    return g_origDeleteFileW(lpFileName);
+}
+
+static BOOL WINAPI HookDeleteFileA(LPCSTR lpFileName)
+{
+    if (!lpFileName || g_inFastDLHook)
+        return g_origDeleteFileA(lpFileName);
+
+    std::wstring wpath = AnsiToWide(lpFileName);
+    if (wpath.empty())
+        return g_origDeleteFileA(lpFileName);
+
+    std::wstring redirected = ApplyFileRedirects(wpath);
+
+    if (redirected != wpath)
+    {
+        LogFileAccess(L"FILE REDIRECT", wpath.c_str(), redirected.c_str());
+        return g_origDeleteFileW(redirected.c_str());
+    }
+
+    LogFileAccess(L"FILE DELETE", wpath.c_str());
+    return g_origDeleteFileA(lpFileName);
+}
+
+// ---------------------------------------------------------------------------
+// Hook implementations — MoveFile / MoveFileEx
+// ---------------------------------------------------------------------------
+static BOOL WINAPI HookMoveFileW(LPCWSTR lpExisting, LPCWSTR lpNew)
+{
+    if (g_inFileOpHook)
+        return g_origMoveFileW(lpExisting, lpNew);
+
+    g_inFileOpHook = true;
+
+    std::wstring src(lpExisting ? lpExisting : L"");
+    std::wstring dst(lpNew ? lpNew : L"");
+    std::wstring rSrc = ApplyFileRedirects(src);
+    std::wstring rDst = ApplyFileRedirects(dst);
+
+    if (rSrc != src)
+        LogFileAccess(L"FILE REDIRECT", src.c_str(), rSrc.c_str());
+    if (rDst != dst)
+    {
+        LogFileAccess(L"FILE REDIRECT", dst.c_str(), rDst.c_str());
+        EnsureParentDirectoryExists(rDst);
+    }
+
+    if (rSrc == src && rDst == dst)
+        LogFileAccess(L"FILE MOVE", src.c_str(), dst.c_str());
+
+    BOOL result = g_origMoveFileW(rSrc.c_str(), rDst.c_str());
+    g_inFileOpHook = false;
+    return result;
+}
+
+static BOOL WINAPI HookMoveFileA(LPCSTR lpExisting, LPCSTR lpNew)
+{
+    if (g_inFileOpHook)
+        return g_origMoveFileA(lpExisting, lpNew);
+
+    g_inFileOpHook = true;
+
+    std::wstring src = AnsiToWide(lpExisting);
+    std::wstring dst = AnsiToWide(lpNew);
+
+    if (src.empty() && dst.empty())
+    {
+        g_inFileOpHook = false;
+        return g_origMoveFileA(lpExisting, lpNew);
+    }
+
+    std::wstring rSrc = ApplyFileRedirects(src);
+    std::wstring rDst = ApplyFileRedirects(dst);
+
+    if (rSrc != src)
+        LogFileAccess(L"FILE REDIRECT", src.c_str(), rSrc.c_str());
+    if (rDst != dst)
+    {
+        LogFileAccess(L"FILE REDIRECT", dst.c_str(), rDst.c_str());
+        EnsureParentDirectoryExists(rDst);
+    }
+
+    if (rSrc == src && rDst == dst)
+    {
+        LogFileAccess(L"FILE MOVE", src.c_str(), dst.c_str());
+        g_inFileOpHook = false;
+        return g_origMoveFileA(lpExisting, lpNew);
+    }
+
+    BOOL result = g_origMoveFileW(rSrc.c_str(), rDst.c_str());
+    g_inFileOpHook = false;
+    return result;
+}
+
+static BOOL WINAPI HookMoveFileExW(LPCWSTR lpExisting, LPCWSTR lpNew, DWORD dwFlags)
+{
+    if (g_inFileOpHook)
+        return g_origMoveFileExW(lpExisting, lpNew, dwFlags);
+
+    g_inFileOpHook = true;
+
+    std::wstring src(lpExisting ? lpExisting : L"");
+    std::wstring dst(lpNew ? lpNew : L"");
+    std::wstring rSrc = ApplyFileRedirects(src);
+    std::wstring rDst = ApplyFileRedirects(dst);
+
+    if (rSrc != src)
+        LogFileAccess(L"FILE REDIRECT", src.c_str(), rSrc.c_str());
+    if (rDst != dst)
+    {
+        LogFileAccess(L"FILE REDIRECT", dst.c_str(), rDst.c_str());
+        EnsureParentDirectoryExists(rDst);
+    }
+
+    if (rSrc == src && rDst == dst)
+        LogFileAccess(L"FILE MOVE", src.c_str(), dst.c_str());
+
+    BOOL result = g_origMoveFileExW(rSrc.c_str(), rDst.c_str(), dwFlags);
+    g_inFileOpHook = false;
+    return result;
+}
+
+static BOOL WINAPI HookMoveFileExA(LPCSTR lpExisting, LPCSTR lpNew, DWORD dwFlags)
+{
+    if (g_inFileOpHook)
+        return g_origMoveFileExA(lpExisting, lpNew, dwFlags);
+
+    g_inFileOpHook = true;
+
+    std::wstring src = AnsiToWide(lpExisting);
+    std::wstring dst = AnsiToWide(lpNew);
+
+    if (src.empty() && dst.empty())
+    {
+        g_inFileOpHook = false;
+        return g_origMoveFileExA(lpExisting, lpNew, dwFlags);
+    }
+
+    std::wstring rSrc = ApplyFileRedirects(src);
+    std::wstring rDst = ApplyFileRedirects(dst);
+
+    if (rSrc != src)
+        LogFileAccess(L"FILE REDIRECT", src.c_str(), rSrc.c_str());
+    if (rDst != dst)
+    {
+        LogFileAccess(L"FILE REDIRECT", dst.c_str(), rDst.c_str());
+        EnsureParentDirectoryExists(rDst);
+    }
+
+    if (rSrc == src && rDst == dst)
+    {
+        LogFileAccess(L"FILE MOVE", src.c_str(), dst.c_str());
+        g_inFileOpHook = false;
+        return g_origMoveFileExA(lpExisting, lpNew, dwFlags);
+    }
+
+    BOOL result = g_origMoveFileExW(rSrc.c_str(), rDst.c_str(), dwFlags);
+    g_inFileOpHook = false;
+    return result;
+}
+
+// ---------------------------------------------------------------------------
+// Hook implementations — CopyFile / CopyFileEx
+// ---------------------------------------------------------------------------
+static BOOL WINAPI HookCopyFileW(LPCWSTR lpExisting, LPCWSTR lpNew, BOOL bFailIfExists)
+{
+    if (g_inFileOpHook)
+        return g_origCopyFileW(lpExisting, lpNew, bFailIfExists);
+
+    g_inFileOpHook = true;
+
+    std::wstring src(lpExisting ? lpExisting : L"");
+    std::wstring dst(lpNew ? lpNew : L"");
+    std::wstring rSrc = ApplyFileRedirects(src);
+    std::wstring rDst = ApplyFileRedirects(dst);
+
+    if (rSrc != src)
+        LogFileAccess(L"FILE REDIRECT", src.c_str(), rSrc.c_str());
+    if (rDst != dst)
+    {
+        LogFileAccess(L"FILE REDIRECT", dst.c_str(), rDst.c_str());
+        EnsureParentDirectoryExists(rDst);
+    }
+
+    if (rSrc == src && rDst == dst)
+        LogFileAccess(L"FILE COPY", src.c_str(), dst.c_str());
+
+    BOOL result = g_origCopyFileW(rSrc.c_str(), rDst.c_str(), bFailIfExists);
+    g_inFileOpHook = false;
+    return result;
+}
+
+static BOOL WINAPI HookCopyFileA(LPCSTR lpExisting, LPCSTR lpNew, BOOL bFailIfExists)
+{
+    if (g_inFileOpHook)
+        return g_origCopyFileA(lpExisting, lpNew, bFailIfExists);
+
+    g_inFileOpHook = true;
+
+    std::wstring src = AnsiToWide(lpExisting);
+    std::wstring dst = AnsiToWide(lpNew);
+
+    if (src.empty() && dst.empty())
+    {
+        g_inFileOpHook = false;
+        return g_origCopyFileA(lpExisting, lpNew, bFailIfExists);
+    }
+
+    std::wstring rSrc = ApplyFileRedirects(src);
+    std::wstring rDst = ApplyFileRedirects(dst);
+
+    if (rSrc != src)
+        LogFileAccess(L"FILE REDIRECT", src.c_str(), rSrc.c_str());
+    if (rDst != dst)
+    {
+        LogFileAccess(L"FILE REDIRECT", dst.c_str(), rDst.c_str());
+        EnsureParentDirectoryExists(rDst);
+    }
+
+    if (rSrc == src && rDst == dst)
+    {
+        LogFileAccess(L"FILE COPY", src.c_str(), dst.c_str());
+        g_inFileOpHook = false;
+        return g_origCopyFileA(lpExisting, lpNew, bFailIfExists);
+    }
+
+    BOOL result = g_origCopyFileW(rSrc.c_str(), rDst.c_str(), bFailIfExists);
+    g_inFileOpHook = false;
+    return result;
+}
+
+static BOOL WINAPI HookCopyFileExW(
+    LPCWSTR lpExisting, LPCWSTR lpNew,
+    LPPROGRESS_ROUTINE lpProgressRoutine, LPVOID lpData, LPBOOL pbCancel, DWORD dwCopyFlags)
+{
+    if (g_inFileOpHook)
+        return g_origCopyFileExW(lpExisting, lpNew, lpProgressRoutine, lpData, pbCancel, dwCopyFlags);
+
+    g_inFileOpHook = true;
+
+    std::wstring src(lpExisting ? lpExisting : L"");
+    std::wstring dst(lpNew ? lpNew : L"");
+    std::wstring rSrc = ApplyFileRedirects(src);
+    std::wstring rDst = ApplyFileRedirects(dst);
+
+    if (rSrc != src)
+        LogFileAccess(L"FILE REDIRECT", src.c_str(), rSrc.c_str());
+    if (rDst != dst)
+    {
+        LogFileAccess(L"FILE REDIRECT", dst.c_str(), rDst.c_str());
+        EnsureParentDirectoryExists(rDst);
+    }
+
+    if (rSrc == src && rDst == dst)
+        LogFileAccess(L"FILE COPY", src.c_str(), dst.c_str());
+
+    BOOL result = g_origCopyFileExW(rSrc.c_str(), rDst.c_str(), lpProgressRoutine, lpData, pbCancel, dwCopyFlags);
+    g_inFileOpHook = false;
+    return result;
+}
+
+static BOOL WINAPI HookCopyFileExA(
+    LPCSTR lpExisting, LPCSTR lpNew,
+    LPPROGRESS_ROUTINE lpProgressRoutine, LPVOID lpData, LPBOOL pbCancel, DWORD dwCopyFlags)
+{
+    if (g_inFileOpHook)
+        return g_origCopyFileExA(lpExisting, lpNew, lpProgressRoutine, lpData, pbCancel, dwCopyFlags);
+
+    g_inFileOpHook = true;
+
+    std::wstring src = AnsiToWide(lpExisting);
+    std::wstring dst = AnsiToWide(lpNew);
+
+    if (src.empty() && dst.empty())
+    {
+        g_inFileOpHook = false;
+        return g_origCopyFileExA(lpExisting, lpNew, lpProgressRoutine, lpData, pbCancel, dwCopyFlags);
+    }
+
+    std::wstring rSrc = ApplyFileRedirects(src);
+    std::wstring rDst = ApplyFileRedirects(dst);
+
+    if (rSrc != src)
+        LogFileAccess(L"FILE REDIRECT", src.c_str(), rSrc.c_str());
+    if (rDst != dst)
+    {
+        LogFileAccess(L"FILE REDIRECT", dst.c_str(), rDst.c_str());
+        EnsureParentDirectoryExists(rDst);
+    }
+
+    if (rSrc == src && rDst == dst)
+    {
+        LogFileAccess(L"FILE COPY", src.c_str(), dst.c_str());
+        g_inFileOpHook = false;
+        return g_origCopyFileExA(lpExisting, lpNew, lpProgressRoutine, lpData, pbCancel, dwCopyFlags);
+    }
+
+    BOOL result = g_origCopyFileExW(rSrc.c_str(), rDst.c_str(), lpProgressRoutine, lpData, pbCancel, dwCopyFlags);
+    g_inFileOpHook = false;
+    return result;
+}
+
+// ---------------------------------------------------------------------------
 // Hook implementations — LoadLibrary
 // ---------------------------------------------------------------------------
 static HMODULE WINAPI HookLoadLibraryW(LPCWSTR lpLibFileName)
@@ -464,6 +885,66 @@ void InstallFileHooks()
         MH_CreateHookApi(L"kernel32", "FindFirstFileA",
             reinterpret_cast<LPVOID>(HookFindFirstFileA),
             reinterpret_cast<LPVOID*>(&g_origFindFirstFileA)));
+
+    LogHookInit(L"kernel32", "FindFirstFileExW",
+        MH_CreateHookApi(L"kernel32", "FindFirstFileExW",
+            reinterpret_cast<LPVOID>(HookFindFirstFileExW),
+            reinterpret_cast<LPVOID*>(&g_origFindFirstFileExW)));
+
+    LogHookInit(L"kernel32", "FindFirstFileExA",
+        MH_CreateHookApi(L"kernel32", "FindFirstFileExA",
+            reinterpret_cast<LPVOID>(HookFindFirstFileExA),
+            reinterpret_cast<LPVOID*>(&g_origFindFirstFileExA)));
+
+    LogHookInit(L"kernel32", "DeleteFileW",
+        MH_CreateHookApi(L"kernel32", "DeleteFileW",
+            reinterpret_cast<LPVOID>(HookDeleteFileW),
+            reinterpret_cast<LPVOID*>(&g_origDeleteFileW)));
+
+    LogHookInit(L"kernel32", "DeleteFileA",
+        MH_CreateHookApi(L"kernel32", "DeleteFileA",
+            reinterpret_cast<LPVOID>(HookDeleteFileA),
+            reinterpret_cast<LPVOID*>(&g_origDeleteFileA)));
+
+    LogHookInit(L"kernel32", "MoveFileW",
+        MH_CreateHookApi(L"kernel32", "MoveFileW",
+            reinterpret_cast<LPVOID>(HookMoveFileW),
+            reinterpret_cast<LPVOID*>(&g_origMoveFileW)));
+
+    LogHookInit(L"kernel32", "MoveFileA",
+        MH_CreateHookApi(L"kernel32", "MoveFileA",
+            reinterpret_cast<LPVOID>(HookMoveFileA),
+            reinterpret_cast<LPVOID*>(&g_origMoveFileA)));
+
+    LogHookInit(L"kernel32", "MoveFileExW",
+        MH_CreateHookApi(L"kernel32", "MoveFileExW",
+            reinterpret_cast<LPVOID>(HookMoveFileExW),
+            reinterpret_cast<LPVOID*>(&g_origMoveFileExW)));
+
+    LogHookInit(L"kernel32", "MoveFileExA",
+        MH_CreateHookApi(L"kernel32", "MoveFileExA",
+            reinterpret_cast<LPVOID>(HookMoveFileExA),
+            reinterpret_cast<LPVOID*>(&g_origMoveFileExA)));
+
+    LogHookInit(L"kernel32", "CopyFileW",
+        MH_CreateHookApi(L"kernel32", "CopyFileW",
+            reinterpret_cast<LPVOID>(HookCopyFileW),
+            reinterpret_cast<LPVOID*>(&g_origCopyFileW)));
+
+    LogHookInit(L"kernel32", "CopyFileA",
+        MH_CreateHookApi(L"kernel32", "CopyFileA",
+            reinterpret_cast<LPVOID>(HookCopyFileA),
+            reinterpret_cast<LPVOID*>(&g_origCopyFileA)));
+
+    LogHookInit(L"kernel32", "CopyFileExW",
+        MH_CreateHookApi(L"kernel32", "CopyFileExW",
+            reinterpret_cast<LPVOID>(HookCopyFileExW),
+            reinterpret_cast<LPVOID*>(&g_origCopyFileExW)));
+
+    LogHookInit(L"kernel32", "CopyFileExA",
+        MH_CreateHookApi(L"kernel32", "CopyFileExA",
+            reinterpret_cast<LPVOID>(HookCopyFileExA),
+            reinterpret_cast<LPVOID*>(&g_origCopyFileExA)));
 
     LogHookInit(L"kernel32", "LoadLibraryW",
         MH_CreateHookApi(L"kernel32", "LoadLibraryW",
