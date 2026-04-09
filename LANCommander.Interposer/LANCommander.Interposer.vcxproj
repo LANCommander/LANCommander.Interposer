@@ -397,6 +397,7 @@
     <ClCompile Include="dll\src\borderless.cpp" />
     <ClCompile Include="dll\src\config.cpp" />
     <ClCompile Include="dll\src\proxy.cpp" />
+    <ClCompile Include="dll\src\proxy_dinput8.cpp" />
     <ClCompile Include="dll\src\dllmain.cpp" />
     <ClCompile Include="dll\src\fastdl.cpp" />
     <ClCompile Include="dll\src\files.cpp" />
@@ -423,6 +424,7 @@
 
   <ItemGroup>
     <None Include="dll\src\proxy.def" />
+    <None Include="dll\src\proxy_dinput8.def" />
   </ItemGroup>
 
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
