@@ -53,6 +53,18 @@ jobs:
           /t:LANCommander_Interposer
           /p:Configuration="Release Proxy" /p:Platform=x86
 
+      - name: Build Release Proxy DInput8 x64
+        run: >
+          msbuild LANCommander.Interposer.slnx
+          /t:LANCommander_Interposer
+          /p:Configuration="Release Proxy DInput8" /p:Platform=x64
+
+      - name: Build Release Proxy DInput8 x86
+        run: >
+          msbuild LANCommander.Interposer.slnx
+          /t:LANCommander_Interposer
+          /p:Configuration="Release Proxy DInput8" /p:Platform=x86
+
       - name: Build Release ASI x64
         run: >
           msbuild LANCommander.Interposer.slnx
@@ -108,6 +120,18 @@ jobs:
           Copy-Item 'Release\Proxy\x86\version.dll' "$d\x86\"
           Copy-Item -Recurse $sampleDir "$d\x86\"
           Compress-Archive -Path "$d\x86\*" -DestinationPath "LANCommander.Interposer.Proxy.$version.x86.zip"
+
+          # Proxy DInput8 (dinput8.dll)
+          $d = 'pkg\proxy-dinput8'
+          New-Item -ItemType Directory -Force "$d\x64" | Out-Null
+          Copy-Item 'Release\ProxyDInput8\x64\dinput8.dll' "$d\x64\"
+          Copy-Item -Recurse $sampleDir "$d\x64\"
+          Compress-Archive -Path "$d\x64\*" -DestinationPath "LANCommander.Interposer.Proxy.DInput8.$version.x64.zip"
+
+          New-Item -ItemType Directory -Force "$d\x86" | Out-Null
+          Copy-Item 'Release\ProxyDInput8\x86\dinput8.dll' "$d\x86\"
+          Copy-Item -Recurse $sampleDir "$d\x86\"
+          Compress-Archive -Path "$d\x86\*" -DestinationPath "LANCommander.Interposer.Proxy.DInput8.$version.x86.zip"
 
           # ASI
           $d = 'pkg\asi'
@@ -186,10 +210,12 @@ jobs:
 
           New-LcxPackage "LANCommander.Interposer.$version.x86.zip"       "LANCommander.Interposer.$version.x86.lcx"
           New-LcxPackage "LANCommander.Interposer.Proxy.$version.x86.zip" "LANCommander.Interposer.Proxy.$version.x86.lcx"
-          New-LcxPackage "LANCommander.Interposer.ASI.$version.x86.zip"   "LANCommander.Interposer.ASI.$version.x86.lcx"
-          New-LcxPackage "LANCommander.Interposer.$version.x64.zip"       "LANCommander.Interposer.$version.x64.lcx"
-          New-LcxPackage "LANCommander.Interposer.Proxy.$version.x64.zip" "LANCommander.Interposer.Proxy.$version.x64.lcx"
-          New-LcxPackage "LANCommander.Interposer.ASI.$version.x64.zip"   "LANCommander.Interposer.ASI.$version.x64.lcx"
+          New-LcxPackage "LANCommander.Interposer.ASI.$version.x86.zip"              "LANCommander.Interposer.ASI.$version.x86.lcx"
+          New-LcxPackage "LANCommander.Interposer.Proxy.DInput8.$version.x86.zip" "LANCommander.Interposer.Proxy.DInput8.$version.x86.lcx"
+          New-LcxPackage "LANCommander.Interposer.$version.x64.zip"               "LANCommander.Interposer.$version.x64.lcx"
+          New-LcxPackage "LANCommander.Interposer.Proxy.$version.x64.zip"         "LANCommander.Interposer.Proxy.$version.x64.lcx"
+          New-LcxPackage "LANCommander.Interposer.ASI.$version.x64.zip"           "LANCommander.Interposer.ASI.$version.x64.lcx"
+          New-LcxPackage "LANCommander.Interposer.Proxy.DInput8.$version.x64.zip" "LANCommander.Interposer.Proxy.DInput8.$version.x64.lcx"
 
       - name: Create GitHub release
         uses: softprops/action-gh-release@v2

@@ -3,6 +3,9 @@
 #ifdef INTERPOSER_PROXY
 # define VER_ORIGINAL_NAME    "version.dll"
 # define VER_DESCRIPTION      "LANCommander Interposer (Proxy)"
+#elif defined(INTERPOSER_PROXY_DINPUT8)
+# define VER_ORIGINAL_NAME    "dinput8.dll"
+# define VER_DESCRIPTION      "LANCommander Interposer (Proxy DInput8)"
 #else
 # define VER_ORIGINAL_NAME    "LANCommander.Interposer.dll"
 # define VER_DESCRIPTION      "LANCommander Interposer"
