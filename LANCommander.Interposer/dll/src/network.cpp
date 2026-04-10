@@ -18,6 +18,8 @@
 // ---------------------------------------------------------------------------
 using FnGetAddrInfo    = int(WSAAPI*)(PCSTR,  PCSTR,  const ADDRINFOA*,  PADDRINFOA*);
 using FnGetAddrInfoW   = int(WSAAPI*)(PCWSTR, PCWSTR, const ADDRINFOW*, PADDRINFOW*);
+using FnGetAddrInfoExW = int(WSAAPI*)(PCWSTR, PCWSTR, DWORD, LPGUID, const ADDRINFOEXW*, PADDRINFOEXW*, struct timeval*, LPOVERLAPPED, LPLOOKUPSERVICE_COMPLETION_ROUTINE, LPHANDLE);
+using FnGetAddrInfoExA = int(WSAAPI*)(PCSTR,  PCSTR,  DWORD, LPGUID, const ADDRINFOEXA*, PADDRINFOEXA*, struct timeval*, LPOVERLAPPED, LPLOOKUPSERVICE_COMPLETION_ROUTINE, LPHANDLE);
 using FnGetHostByName  = hostent*(WSAAPI*)(const char*);
 using FnConnect        = int(WSAAPI*)(SOCKET, const sockaddr*, int);
 using FnWSAConnect     = int(WSAAPI*)(SOCKET, const sockaddr*, int, LPWSABUF, LPWSABUF, LPQOS, LPQOS);
@@ -31,8 +33,11 @@ using FnRecv           = int(WSAAPI*)(SOCKET, char*, int, int);
 using FnWSARecv        = int(WSAAPI*)(SOCKET, LPWSABUF, DWORD, LPDWORD, LPDWORD, LPWSAOVERLAPPED, LPWSAOVERLAPPED_COMPLETION_ROUTINE);
 
 // ws2_32 trampolines
-static FnGetAddrInfo   g_origGetAddrInfo   = nullptr;
-static FnGetAddrInfoW  g_origGetAddrInfoW  = nullptr;
+static FnGetAddrInfo   g_origGetAddrInfo    = nullptr;
+static FnGetAddrInfoW  g_origGetAddrInfoW   = nullptr;
+static FnGetAddrInfoExW g_origGetAddrInfoExW = nullptr;
+static FnGetAddrInfoExA g_origGetAddrInfoExA = nullptr;
+static FnGetHostByName g_origGetHostByName2 = nullptr;  // ws2_32 (separate from wsock32 export)
 static FnConnect       g_origConnect       = nullptr;
 static FnWSAConnect    g_origWSAConnect    = nullptr;
 static FnSendTo        g_origSendTo        = nullptr;
@@ -76,6 +81,37 @@ static std::wstring AnsiToWide(const char* s)
     std::wstring out(static_cast<size_t>(len - 1), L'\0');
     MultiByteToWideChar(CP_ACP, 0, s, -1, out.data(), len);
     return out;
+}
+
+static std::string WideToAnsi(const std::wstring& s)
+{
+    if (s.empty()) return {};
+    int len = WideCharToMultiByte(CP_ACP, 0, s.c_str(), -1, nullptr, 0, nullptr, nullptr);
+    if (len <= 1) return {};
+    std::string out(static_cast<size_t>(len - 1), '\0');
+    WideCharToMultiByte(CP_ACP, 0, s.c_str(), -1, out.data(), len, nullptr, nullptr);
+    return out;
+}
+
+// Pool a substituted DNS name so that the returned pointer remains valid for
+// the lifetime of the process. Required by GetAddrInfoExW/A whose `pName`
+// argument may be retained until an asynchronous lookup completes — passing a
+// stack-local string would dangle. std::set guarantees pointer/iterator
+// stability across insertions, so existing entries are never invalidated.
+static const wchar_t* StableWide(std::wstring s)
+{
+    static std::mutex                  mtx;
+    static std::set<std::wstring>      pool;
+    std::lock_guard<std::mutex> lk(mtx);
+    return pool.insert(std::move(s)).first->c_str();
+}
+
+static const char* StableAnsi(std::string s)
+{
+    static std::mutex                  mtx;
+    static std::set<std::string>       pool;
+    std::lock_guard<std::mutex> lk(mtx);
+    return pool.insert(std::move(s)).first->c_str();
 }
 
 // Format a sockaddr as a host string (IPv4 dotted-decimal or compact IPv6 hex).
@@ -201,6 +237,25 @@ static int WSAAPI HookGetAddrInfo(
     const ADDRINFOA* hints,
     PADDRINFOA*      result)
 {
+    if (nodename && nodename[0] != '\0' && !g_dnsRedirects.empty())
+    {
+        const std::wstring wname      = AnsiToWide(nodename);
+        const std::wstring redirected = ApplyDnsRedirect(wname);
+
+        if (redirected != wname)
+        {
+            LogNetworkAccess(L"DNS REDIRECT", wname.c_str(), redirected.c_str());
+
+            const std::string ansi = WideToAnsi(redirected);
+            const int ret = g_origGetAddrInfo(ansi.c_str(), servname, hints, result);
+
+            if (ret == 0)
+                OnHostDiscovered(redirected);
+
+            return ret;
+        }
+    }
+
     const int ret = g_origGetAddrInfo(nodename, servname, hints, result);
 
     // Only capture on success and non-empty hostname
@@ -216,6 +271,24 @@ static int WSAAPI HookGetAddrInfoW(
     const ADDRINFOW* hints,
     PADDRINFOW*      result)
 {
+    if (nodename && nodename[0] != L'\0' && !g_dnsRedirects.empty())
+    {
+        const std::wstring wname(nodename);
+        const std::wstring redirected = ApplyDnsRedirect(wname);
+
+        if (redirected != wname)
+        {
+            LogNetworkAccess(L"DNS REDIRECT", wname.c_str(), redirected.c_str());
+
+            const int ret = g_origGetAddrInfoW(redirected.c_str(), servname, hints, result);
+
+            if (ret == 0)
+                OnHostDiscovered(redirected);
+
+            return ret;
+        }
+    }
+
     const int ret = g_origGetAddrInfoW(nodename, servname, hints, result);
 
     if (ret == 0 && nodename && nodename[0] != L'\0')
@@ -379,9 +452,154 @@ static int WSAAPI HookWSARecv(
 // wsock32 hook implementations
 // ---------------------------------------------------------------------------
 
+// ws2_32!gethostbyname — modern apps that link directly against ws2_32 use
+// this entry point. The wsock32 export of the same name forwards here on
+// modern Windows, so when both hooks are installed the wsock32 path will
+// re-enter through this hook on its way down. That double-invocation is
+// harmless: by the time the inner call runs the name has already been
+// substituted, so ApplyDnsRedirect returns it unchanged.
+static hostent* WSAAPI HookGetHostByName2(const char* name)
+{
+    if (name && name[0] != '\0' && !g_dnsRedirects.empty())
+    {
+        const std::wstring wname      = AnsiToWide(name);
+        const std::wstring redirected = ApplyDnsRedirect(wname);
+
+        if (redirected != wname)
+        {
+            LogNetworkAccess(L"DNS REDIRECT", wname.c_str(), redirected.c_str());
+
+            const std::string ansi = WideToAnsi(redirected);
+            hostent* ret = g_origGetHostByName2(ansi.c_str());
+
+            if (ret)
+                OnHostDiscovered(redirected);
+
+            return ret;
+        }
+    }
+
+    hostent* ret = g_origGetHostByName2(name);
+
+    if (ret && name && name[0] != '\0')
+        OnHostDiscovered(AnsiToWide(name));
+
+    return ret;
+}
+
+// GetAddrInfoExW — async-capable wide resolver. When `lpOverlapped` is non-
+// null the OS may keep `pName` referenced until the operation completes, so a
+// substituted name must come from the StableWide pool rather than the stack.
+static int WSAAPI HookGetAddrInfoExW(
+    PCWSTR             pName,
+    PCWSTR             pServiceName,
+    DWORD              dwNameSpace,
+    LPGUID             lpNspId,
+    const ADDRINFOEXW* hints,
+    PADDRINFOEXW*      ppResult,
+    struct timeval*    timeout,
+    LPOVERLAPPED       lpOverlapped,
+    LPLOOKUPSERVICE_COMPLETION_ROUTINE lpCompletionRoutine,
+    LPHANDLE           lpHandle)
+{
+    if (pName && pName[0] != L'\0' && !g_dnsRedirects.empty())
+    {
+        const std::wstring wname(pName);
+        const std::wstring redirected = ApplyDnsRedirect(wname);
+
+        if (redirected != wname)
+        {
+            LogNetworkAccess(L"DNS REDIRECT", wname.c_str(), redirected.c_str());
+
+            const wchar_t* stableName = StableWide(redirected);
+            const int ret = g_origGetAddrInfoExW(
+                stableName, pServiceName, dwNameSpace, lpNspId, hints, ppResult,
+                timeout, lpOverlapped, lpCompletionRoutine, lpHandle);
+
+            if (ret == 0 || ret == WSA_IO_PENDING)
+                OnHostDiscovered(redirected);
+
+            return ret;
+        }
+    }
+
+    const int ret = g_origGetAddrInfoExW(
+        pName, pServiceName, dwNameSpace, lpNspId, hints, ppResult,
+        timeout, lpOverlapped, lpCompletionRoutine, lpHandle);
+
+    if ((ret == 0 || ret == WSA_IO_PENDING) && pName && pName[0] != L'\0')
+        OnHostDiscovered(std::wstring(pName));
+
+    return ret;
+}
+
+// GetAddrInfoExA — ANSI counterpart of GetAddrInfoExW. Same async caveat
+// applies, hence the StableAnsi pool for the substituted name.
+static int WSAAPI HookGetAddrInfoExA(
+    PCSTR              pName,
+    PCSTR              pServiceName,
+    DWORD              dwNameSpace,
+    LPGUID             lpNspId,
+    const ADDRINFOEXA* hints,
+    PADDRINFOEXA*      ppResult,
+    struct timeval*    timeout,
+    LPOVERLAPPED       lpOverlapped,
+    LPLOOKUPSERVICE_COMPLETION_ROUTINE lpCompletionRoutine,
+    LPHANDLE           lpHandle)
+{
+    if (pName && pName[0] != '\0' && !g_dnsRedirects.empty())
+    {
+        const std::wstring wname      = AnsiToWide(pName);
+        const std::wstring redirected = ApplyDnsRedirect(wname);
+
+        if (redirected != wname)
+        {
+            LogNetworkAccess(L"DNS REDIRECT", wname.c_str(), redirected.c_str());
+
+            const char* stableName = StableAnsi(WideToAnsi(redirected));
+            const int ret = g_origGetAddrInfoExA(
+                stableName, pServiceName, dwNameSpace, lpNspId, hints, ppResult,
+                timeout, lpOverlapped, lpCompletionRoutine, lpHandle);
+
+            if (ret == 0 || ret == WSA_IO_PENDING)
+                OnHostDiscovered(redirected);
+
+            return ret;
+        }
+    }
+
+    const int ret = g_origGetAddrInfoExA(
+        pName, pServiceName, dwNameSpace, lpNspId, hints, ppResult,
+        timeout, lpOverlapped, lpCompletionRoutine, lpHandle);
+
+    if ((ret == 0 || ret == WSA_IO_PENDING) && pName && pName[0] != '\0')
+        OnHostDiscovered(AnsiToWide(pName));
+
+    return ret;
+}
+
 // gethostbyname — Winsock 1 DNS resolution (wsock32 only; no ws2_32 equivalent)
 static hostent* WSAAPI HookGetHostByName(const char* name)
 {
+    if (name && name[0] != '\0' && !g_dnsRedirects.empty())
+    {
+        const std::wstring wname      = AnsiToWide(name);
+        const std::wstring redirected = ApplyDnsRedirect(wname);
+
+        if (redirected != wname)
+        {
+            LogNetworkAccess(L"DNS REDIRECT", wname.c_str(), redirected.c_str());
+
+            const std::string ansi = WideToAnsi(redirected);
+            hostent* ret = g_origGetHostByName(ansi.c_str());
+
+            if (ret)
+                OnHostDiscovered(redirected);
+
+            return ret;
+        }
+    }
+
     hostent* ret = g_origGetHostByName(name);
 
     if (ret && name && name[0] != '\0')
@@ -450,9 +668,9 @@ static int WSAAPI HookRecv32(SOCKET s, char* buf, int len, int flags)
 // ---------------------------------------------------------------------------
 void InstallNetworkHooks()
 {
-    if (!g_logNetwork && !g_fastdlProbeConnections)
+    if (!g_logNetwork && !g_fastdlProbeConnections && g_dnsRedirects.empty())
     {
-        InterposerLog(L"HOOK INIT", L"network hooks skipped (Network.Log and FastDL.ProbeConnections both false)");
+        InterposerLog(L"HOOK INIT", L"network hooks skipped (Logging.Network, FastDL.ProbeConnections, DnsRedirects all unset)");
         return;
     }
 
@@ -465,6 +683,21 @@ void InstallNetworkHooks()
         MH_CreateHookApi(L"ws2_32", "GetAddrInfoW",
             reinterpret_cast<LPVOID>(HookGetAddrInfoW),
             reinterpret_cast<LPVOID*>(&g_origGetAddrInfoW)));
+
+    LogHookInit(L"ws2_32", "GetAddrInfoExW",
+        MH_CreateHookApi(L"ws2_32", "GetAddrInfoExW",
+            reinterpret_cast<LPVOID>(HookGetAddrInfoExW),
+            reinterpret_cast<LPVOID*>(&g_origGetAddrInfoExW)));
+
+    LogHookInit(L"ws2_32", "GetAddrInfoExA",
+        MH_CreateHookApi(L"ws2_32", "GetAddrInfoExA",
+            reinterpret_cast<LPVOID>(HookGetAddrInfoExA),
+            reinterpret_cast<LPVOID*>(&g_origGetAddrInfoExA)));
+
+    LogHookInit(L"ws2_32", "gethostbyname",
+        MH_CreateHookApi(L"ws2_32", "gethostbyname",
+            reinterpret_cast<LPVOID>(HookGetHostByName2),
+            reinterpret_cast<LPVOID*>(&g_origGetHostByName2)));
 
     LogHookInit(L"ws2_32", "connect",
         MH_CreateHookApi(L"ws2_32", "connect",
@@ -553,7 +786,7 @@ void InstallNetworkHooks()
 
 void LateInstallNetworkHooks(const wchar_t* moduleName)
 {
-    if (!g_logNetwork && !g_fastdlProbeConnections)
+    if (!g_logNetwork && !g_fastdlProbeConnections && g_dnsRedirects.empty())
         return;
 
     if (_wcsicmp(moduleName, L"wsock32.dll") != 0)

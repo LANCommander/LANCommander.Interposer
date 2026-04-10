@@ -22,6 +22,13 @@ struct FastDLPath {
 // An inclusive port range used to filter out server browser / non-game-server ports.
 struct PortRange { int min; int max; };
 
+// A DNS redirect rule: when the game asks the resolver for a hostname matching
+// `pattern`, the hook substitutes the regex result (with $1..$9 capture groups)
+// before calling the real getaddrinfo / gethostbyname / GetAddrInfoEx.
+struct DnsRedirect {
+    std::wregex  pattern;     // ECMAScript regex, case-insensitive
+    std::wstring replacement; // ECMAScript format string (supports $1..$9)
+};
 // Populated by LoadConfig(). Read-only after that.
 extern bool         g_logFiles;         // true = log file I/O operations
 extern bool         g_logRegistry;      // true = log registry operations
@@ -45,6 +52,8 @@ extern std::vector<PortRange>    g_fastdlFilteredPorts;      // port ranges to s
 
 extern bool         g_logNetwork;       // true = log connection/DNS events
 
+extern std::vector<DnsRedirect> g_dnsRedirects; // DNS hostname redirects (case-insensitive)
+
 // Parse <dlldir>\.interposer\Config.yml and open <dlldir>\.interposer\Logs\<timestamp>.log. Call before MH_EnableHook.
 void LoadConfig();
 
@@ -57,6 +66,10 @@ std::wstring ExpandEnvVars(const std::wstring& input);
 // Return the redirected path if any rule matches, otherwise return path unchanged.
 std::wstring ApplyFileRedirects(const std::wstring& path);
 
+// Return the redirected hostname if the first DnsRedirects rule matches `host`
+// (ECMAScript regex, case-insensitive, partial match — anchor with ^ $ for
+// exact match). Otherwise return `host` unchanged.
+std::wstring ApplyDnsRedirect(const std::wstring& host);
 // Thread-safe log writers. No-op when the respective flag is false or no log file is open.
 void LogFileAccess(const wchar_t* verb, const wchar_t* sourcePath, const wchar_t* redirectionPath = nullptr);
 void LogRegistryAccess(const wchar_t* verb, const wchar_t* keyPath, const wchar_t* valueName = nullptr);

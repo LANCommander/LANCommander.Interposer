@@ -31,6 +31,8 @@ std::vector<PortRange>    g_fastdlFilteredPorts       = {{ 23000, 23009 }};
 
 bool         g_logNetwork = false;
 
+std::vector<DnsRedirect> g_dnsRedirects;
+
 static std::vector<FileRedirect> g_redirects;
 static HANDLE                    g_logHandle = INVALID_HANDLE_VALUE;
 static std::mutex                g_logMutex;
@@ -133,6 +135,27 @@ std::wstring ApplyFileRedirects(const std::wstring& path)
     }
 
     return path;
+}
+
+// ---------------------------------------------------------------------------
+// ApplyDnsRedirect
+// ---------------------------------------------------------------------------
+std::wstring ApplyDnsRedirect(const std::wstring& host)
+{
+    if (g_dnsRedirects.empty() || host.empty())
+        return host;
+
+    for (const auto& rule : g_dnsRedirects)
+    {
+        std::wstring result = std::regex_replace(
+            host, rule.pattern, rule.replacement,
+            std::regex_constants::format_first_only);
+
+        if (result != host)
+            return result;
+    }
+
+    return host;
 }
 
 // ---------------------------------------------------------------------------
@@ -480,6 +503,32 @@ void LoadConfig()
                     redirect.pattern     = std::wregex(Utf8ToWide(pattern),
                         std::regex_constants::ECMAScript | std::regex_constants::icase);
                     g_redirects.push_back(std::move(redirect));
+                }
+                catch (const std::regex_error&) { /* skip malformed patterns */ }
+            }
+        }
+    }
+
+    // ── DnsRedirects ──────────────────────────────────────────────────────────
+    if (YAML::Node dns = root["DnsRedirects"])
+    {
+        if (dns.IsSequence())
+        {
+            for (const auto& item : dns)
+            {
+                std::string pattern     = item["Pattern"]     ? item["Pattern"].as<std::string>("")     : "";
+                std::string replacement = item["Replacement"] ? item["Replacement"].as<std::string>("") : "";
+
+                if (pattern.empty())
+                    continue;
+
+                try
+                {
+                    DnsRedirect rule;
+                    rule.replacement = Utf8ToWide(replacement);
+                    rule.pattern     = std::wregex(Utf8ToWide(pattern),
+                        std::regex_constants::ECMAScript | std::regex_constants::icase);
+                    g_dnsRedirects.push_back(std::move(rule));
                 }
                 catch (const std::regex_error&) { /* skip malformed patterns */ }
             }

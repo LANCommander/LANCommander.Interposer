@@ -83,6 +83,50 @@ Redirects: []
 #     Replacement: '%APPDATA%\MyGame\Saves\$1'
 
 # ---------------------------------------------------------------------------
+# DnsRedirects
+#
+# Redirect DNS lookups at the resolver level.  Hooks getaddrinfo,
+# GetAddrInfoW, GetAddrInfoExW/A, and gethostbyname (both ws2_32 and
+# wsock32).  When the game asks the resolver for a hostname matching a
+# Pattern below, the hook substitutes the Replacement before invoking the
+# real Winsock function.
+#
+#   Pattern     : ECMAScript regular expression matched against the
+#                 hostname (case-insensitive).  The first matching rule
+#                 wins.  Use single-quoted YAML strings so backslashes are
+#                 literal (no YAML escaping needed).
+#
+#                 Partial matches are allowed — anchor with ^ and $ if you
+#                 want exact-host matching.  IP literals passed to the
+#                 resolver are matched the same way as hostnames; if you
+#                 want to skip them, anchor your pattern accordingly.
+#
+#   Replacement : Hostname or IP literal passed to the real resolver.
+#                 Supports $1..$9 capture groups from the Pattern.
+#                 - A hostname is resolved normally
+#                 - An IPv4 / IPv6 literal is returned directly without DNS
+#
+# Useful for pointing a game at a private master server, redirecting a
+# dead service to a community replacement, or forcing all lookups for a
+# given host to a LAN address.
+#
+# Examples:
+#
+#   Exact host → IP literal:
+#   - Pattern: '^master\.example\.com$'
+#     Replacement: '10.0.0.5'
+#
+#   Whole subdomain → community-revival domain (capture group):
+#   - Pattern: '^(.+)\.deadgame\.net$'
+#     Replacement: '$1.community-revival.org'
+#
+#   Any *.gamespy.com → master.local:
+#   - Pattern: '\.gamespy\.com$'
+#     Replacement: 'master.local'
+# ---------------------------------------------------------------------------
+DnsRedirects: []
+
+# ---------------------------------------------------------------------------
 # FastDL
 #
 #   Enabled              - true to enable FastDL downloads, false to disable (default).
