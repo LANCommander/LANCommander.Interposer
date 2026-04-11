@@ -15,6 +15,7 @@ Logging:
   Files: true
   Registry: true
   Downloads: true
+  Network: false
 ```
 
 | Key | Type | Default | Description |
@@ -22,6 +23,7 @@ Logging:
 | `Files` | bool | `false` | Log file open and attribute operations. |
 | `Registry` | bool | `false` | Log registry open, read, write, and delete operations. |
 | `Downloads` | bool | `true` | Log file downloads from FastDL |
+| `Network` | bool | `false` | Log socket connections and DNS lookups, including DNS redirects. |
 
 Logs are written automatically to `.interposer\Logs\<timestamp>.log` — one file per session, no path configuration required. Each session log begins with a header:
 
@@ -59,6 +61,13 @@ The `->` portion only appears when a path was changed — for example, when a fi
 | Verb | Meaning |
 |---|---|
 | `[FASTDL]` | A file was checked against or downloaded from the FastDL server. The path shows the URL and the local destination separated by `->`. |
+
+### Network Operations
+
+| Verb | Meaning |
+|---|---|
+| `[CONNECT]` | A socket connected to a remote host. The line shows the host (or IP literal) and the port. |
+| `[DNS REDIRECT]` | A `DnsRedirects` rule matched a hostname lookup and substituted a replacement. The line shows the original and substituted hostnames separated by `->`. |
 
 ### Registry Operations
 

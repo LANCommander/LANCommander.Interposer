@@ -7,6 +7,7 @@ sidebar_position: 1
 The LANCommander Interposer is a set of Windows API hooks designed to make games easier to run on modern platforms. The current version of the interposer adds the following functionality to almost any game:
 
 - File path redirection
+- DNS redirection
 - Registry emulation
 - FastDL support
 - Borderless fullscreen windows
@@ -33,6 +34,7 @@ Configuration and use of the Interposer is broken down on this site under the fo
 - [Getting Started](/Interposer/GettingStarted)
 - [Logging](/Interposer/Logging)
 - [File Redirection](/Interposer/FileRedirection)
+- [DNS Redirection](/Interposer/DnsRedirection)
 - [Registry Emulation](/Interposer/RegistryEmulation)
 - [FastDL](/Interposer/FastDL)
 - [Borderless Fullscreen](/Interposer/BorderlessFullscreen)
