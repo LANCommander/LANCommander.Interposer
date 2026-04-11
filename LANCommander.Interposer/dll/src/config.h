@@ -7,7 +7,7 @@
 #include <vector>
 #include <regex>
 
-// A compiled file-redirect rule loaded from fileRedirects in interposer.yaml.
+// A compiled file-redirect rule loaded from FileRedirects in Config.yml.
 struct FileRedirect {
     std::wregex  pattern;     // ECMAScript regex, case-insensitive
     std::wstring replacement; // ECMAScript format string; %ENVVAR% expanded after substitution

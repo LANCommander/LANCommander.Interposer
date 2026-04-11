@@ -18,13 +18,17 @@ Common use cases:
 
 ## Configuring Redirects
 
-Redirects are defined as a list in `.interposer/Config.yml` under the `Redirects` key. Each entry has a `Pattern` (regex) and a `Replacement`:
+Redirects are defined as a list in `.interposer/Config.yml` under the `FileRedirects` key. Each entry has a `Pattern` (regex) and a `Replacement`:
 
 ```yaml
-Redirects:
+FileRedirects:
   - Pattern: 'C:\\Games\\MyGame\\Saves\\(.+)'
     Replacement: '%USERPROFILE%\Saved Games\My Game\$1'
 ```
+
+:::note Backwards compatibility
+The legacy key name `Redirects` is still accepted and behaves identically. It is read only when `FileRedirects` is not present, so prefer `FileRedirects` for new configs.
+:::
 
 :::tip Use single-quoted strings for patterns
 YAML single-quoted strings pass backslashes through literally — no extra escaping needed when writing Windows paths as regex patterns. Double-quoted strings interpret YAML escape sequences and should be avoided here.
@@ -74,7 +78,7 @@ Environment variable expansion happens after capture group substitution, so a ca
 ### Redirect a save directory
 
 ```yaml
-Redirects:
+FileRedirects:
   - Pattern: 'C:\\Games\\Quake\\id1\\save\\(.+)'
     Replacement: '%APPDATA%\Quake\save\$1'
 ```
@@ -82,7 +86,7 @@ Redirects:
 ### Redirect an absolute config path to the game directory
 
 ```yaml
-Redirects:
+FileRedirects:
   - Pattern: 'C:\\Program Files.*\\MyGame\\config\.cfg'
     Replacement: '%GAMEDIR%\config.cfg'
 ```
@@ -100,7 +104,7 @@ FileRedirects:
 ### Multiple rules — first match wins
 
 ```yaml
-Redirects:
+FileRedirects:
   - Pattern: 'C:\\Games\\MyGame\\Saves\\current\\(.+)'
     Replacement: '%USERPROFILE%\Saved Games\My Game\slot1\$1'
   - Pattern: 'C:\\Games\\MyGame\\Saves\\(.+)'

@@ -53,7 +53,7 @@ Logging:
   Network: false
 
 # ---------------------------------------------------------------------------
-# Redirects
+# FileRedirects
 #
 # Redirect file paths at the CreateFile / GetFileAttributes level.
 # Each entry has two keys:
@@ -76,9 +76,12 @@ Logging:
 #   Redirect a hard-coded config path to a portable location:
 #   - Pattern: 'C:\\Program Files.*\\MyGame\\config\.ini'
 #     Replacement: '%APPDATA%\MyGame\config.ini'
+#
+# The legacy key name "Redirects" is still accepted for backwards
+# compatibility but "FileRedirects" is preferred.
 # ---------------------------------------------------------------------------
-Redirects: []
-# Redirects:
+FileRedirects: []
+# FileRedirects:
 #   - Pattern: 'C:\\Games\\MyGame\\Saves\\(.+)'
 #     Replacement: '%APPDATA%\MyGame\Saves\$1'
 
