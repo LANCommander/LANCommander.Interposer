@@ -11,10 +11,10 @@ DNS redirection intercepts hostname lookups before they reach the operating syst
 
 Common use cases:
 
-- **Reviving dead online services** — point a game's hard-coded master server hostname at a community-run replacement
-- **LAN play** — force every lookup of a remote game service at a local replacement on your LAN
-- **Pointing at private master servers** — redirect a public service hostname to a server you host yourself
-- **Testing** — temporarily redirect a production endpoint to a staging host without touching DNS or `hosts`
+- **Reviving dead online services**: point a game's hard-coded master server hostname at a community-run replacement
+- **LAN play**: force every lookup of a remote game service at a local replacement on your LAN
+- **Pointing at private master servers**: redirect a public service hostname to a server you host yourself
+- **Testing**: temporarily redirect a production endpoint to a staging host without touching DNS or `hosts`
 
 Because the substitution happens inside the game process, it does not require administrator privileges, does not require editing system files, and does not affect any other application running on the machine.
 
@@ -28,7 +28,7 @@ DnsRedirects:
     Replacement: '$1.openspy.net'
 ```
 
-This single rule transparently redirects every `*.gamespy.com` lookup the game performs to the corresponding `*.openspy.net` host — enough to make many GameSpy-era titles work against [OpenSpy](https://openspy.net/) without editing the game's binaries.
+This single rule transparently redirects every `*.gamespy.com` lookup the game performs to the corresponding `*.openspy.net` host. This is enough to make many GameSpy-era titles work against [OpenSpy](https://openspy.net/) without editing the game's binaries.
 
 :::tip Use single-quoted strings for patterns
 YAML single-quoted strings pass backslashes through literally — no extra escaping needed when writing regex patterns. Double-quoted strings interpret YAML escape sequences and should be avoided here.
@@ -49,6 +49,8 @@ DnsRedirects:
 ```
 
 IP literals (e.g. `192.0.2.10`) are passed through the same matching pipeline as hostnames. If you want to skip them, anchor your pattern so it cannot match a numeric address.
+
+Note that this happens at the API level with no binary patching required, which also opens up the opportunity to redirect to hostnames of any length.
 
 ### Capture Groups
 
@@ -72,7 +74,7 @@ Up to nine capture groups (`$1` through `$9`) are supported.
 |---|---|
 | `$1` – `$9` | Replaced with the corresponding capture group from the pattern match. |
 
-The replacement may be a hostname (which is then resolved normally by the OS) or an IPv4 / IPv6 literal (which is returned directly without going through DNS). Environment variable expansion is **not** applied to DNS replacements — only file redirects expand `%VARNAME%`.
+The replacement may be a hostname (which is then resolved normally by the OS) or an IPv4 / IPv6 literal (which is returned directly without going through DNS).
 
 ## Examples
 
@@ -84,7 +86,7 @@ DnsRedirects:
     Replacement: '$1.openspy.net'
 ```
 
-This is the headline use case. Many late-1990s and early-2000s multiplayer titles hard-code one or more `*.gamespy.com` hostnames into the executable. The OpenSpy revival project hosts drop-in replacements at the matching `*.openspy.net` names, so a single regex rule is enough to bring the game's online features back to life — no executable patching, no `hosts` file editing.
+This is the headline use case. Many late-1990s and early-2000s multiplayer titles hard-code one or more `*.gamespy.com` hostnames into the executable. The OpenSpy revival project hosts drop-in replacements at the matching `*.openspy.net` names, so a single regex rule is enough to bring the game's online features back to life with no executable patching and no `hosts` file editing.
 
 ### Pin an exact host to a LAN IP address
 
@@ -145,4 +147,4 @@ DNS redirection applies to the following Winsock resolver functions in both `ws2
 | `gethostbyname` (`ws2_32`) | Legacy Winsock 2 entry point. |
 | `gethostbyname` (`wsock32`) | Legacy Winsock 1 entry point used by older titles that link `wsock32.dll` directly. |
 
-The substitution happens before the call reaches the operating system, so the OS resolver, the `hosts` file, and any DNS server on the network see only the replacement hostname — never the original.
+The substitution happens before the call reaches the operating system, so the OS resolver, the `hosts` file, and any DNS server on the network see only the replacement hostname.

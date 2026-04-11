@@ -31,10 +31,10 @@ The legacy key name `Redirects` is still accepted and behaves identically. It is
 :::
 
 :::tip Use single-quoted strings for patterns
-YAML single-quoted strings pass backslashes through literally — no extra escaping needed when writing Windows paths as regex patterns. Double-quoted strings interpret YAML escape sequences and should be avoided here.
+YAML single-quoted strings pass backslashes through literally. No extra escaping is needed when writing Windows paths as regex patterns. Double-quoted strings interpret YAML escape sequences and should be avoided here.
 :::
 
-Rules are evaluated in order. **The first matching rule wins** — subsequent rules are not checked once a match is found.
+Rules are evaluated in order. **The first matching rule wins**. Subsequent rules are not checked once a match is found.
 
 ## Pattern Syntax
 

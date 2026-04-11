@@ -1,0 +1,95 @@
+---
+sidebar_label: 1.0.3
+sidebar_position: 4
+---
+
+import ReleaseDownloads from '@site/src/components/ReleaseDownloads';
+
+# Interposer 1.0.3 Release Notes
+
+## Downloads
+
+<ReleaseDownloads repo="LANCommander/LANCommander.Interposer" release="v1.0.3" />
+
+## What's Changed
+
+### DNS Redirection
+
+DNS redirection intercepts hostname lookups before they reach the operating system's resolver and substitutes one hostname (or IP literal) for another. The game opens a socket to a different server than the one it was hard-coded to use, with no patching, no `hosts` file editing, and no administrator privileges required.
+
+It was common for games to hard code hostnames into the executable for query/master servers. By crafting a simple regex rule, you can redirect all hostname lookups to a different service. For example, this can be used to adapt a game to use the fantastic [OpenSpy](https://openspy.net) service using the following redirect rule:
+
+```yaml
+DnsRedirects:
+  - Pattern: '(.+)\.gamespy\.com'
+    Replacement: '$1.openspy.net'
+```
+
+Note that this happens at the API level with no binary patching required, which also opens up the opportunity to redirect to hostnames of any length.
+
+Rules are ECMAScript regex (case-insensitive) and support up to nine capture groups (`$1` – `$9`). Replacements may be hostnames (resolved normally afterwards) or IPv4 / IPv6 literals (returned directly without DNS). The first matching rule wins.
+
+DNS redirection applies to the following Winsock resolver functions across both `ws2_32.dll` and `wsock32.dll`:
+
+- `getaddrinfo`, `GetAddrInfoW`
+- `GetAddrInfoExW`, `GetAddrInfoExA`
+- `gethostbyname` (both Winsock 2 and Winsock 1 entry points)
+
+When `Logging.Network` is enabled, every triggered redirect is recorded in the session log as `[DNS REDIRECT]` showing both the original and substituted hostnames. See the [DNS Redirection](../DnsRedirection) page for full pattern syntax and examples.
+
+### Expanded File Hook Coverage
+
+File redirection and logging now cover the full set of file-management APIs in `kernel32.dll`, not just opens and attribute queries. Newly hooked functions:
+
+| Function | Variants | Behaviour |
+|---|---|---|
+| `FindFirstFileEx` | W, A | Logged as `[FILE FIND]`; redirected before the search begins |
+| `DeleteFile` | W, A | Logged as `[FILE DELETE]`; redirected before the delete |
+| `MoveFile` | W, A | Logged as `[FILE MOVE]`; both source and destination paths are redirected independently |
+| `MoveFileEx` | W, A | As above, with `dwFlags` preserved |
+| `CopyFile` | W, A | Logged as `[FILE COPY]`; both source and destination paths are redirected independently |
+| `CopyFileEx` | W, A | As above, with progress callback and cancel pointer preserved |
+
+Games that probe their install directory with `FindFirstFileEx` (instead of the older `FindFirstFile`) are now visible to the file logger, and games that delete, move, or copy save data through any of these APIs will have those operations transparently routed by `FileRedirects` rules. ANSI variants convert to wide strings and delegate to the wide implementation, so a single rule covers both code paths. A thread-local reentrancy guard prevents `MoveFile` and `CopyFile` from being double-logged when their internal implementations call through to their `Ex` counterparts. This should result in better compatiblity across the board.
+
+### File Redirects: Auto-create Parent Directories on Write
+
+When a `FileRedirects` rule rewrites a path that the game is opening for write (`GENERIC_WRITE`, `FILE_WRITE_DATA`, or `FILE_APPEND_DATA`), the redirect target's parent directory tree is now created automatically before the underlying `CreateFile` call. Games that hard-code save paths into a fixed install directory and assume the directory already exists will no longer fail when those writes are redirected to a fresh `%APPDATA%` or `%USERPROFILE%` location that has not yet been created.
+
+Directory creation is silent — already-present directories are detected via the original `GetFileAttributesW` trampoline and skipped, and each segment is created with `CreateDirectoryW` so existing directories simply return `ERROR_ALREADY_EXISTS` and are ignored.
+
+### File Redirects: Backslash Normalization
+
+Replacement strings produced by `FileRedirects` rules are now normalized to collapse runs of consecutive backslashes down to a single backslash. Capture groups that include a leading slash, or replacement templates that accidentally double-up separators (a common copy/paste mistake), no longer produce paths like `C:\Users\Player\\Saved Games\\My Game\save.dat` that some games and APIs reject.
+
+UNC prefixes (`\\server\share`) and extended-length prefixes (`\\?\`) are preserved.
+
+### Plugins: Recursive Subdirectory Loading
+
+`.interposer\Plugins\` is now scanned recursively. Every `.dll` and `.asi` file under the Plugins directory and any of its subdirectories is loaded on startup, with no maximum depth. This makes it practical to ship multi-file plugins (a plugin DLL plus its own dependencies, configuration, or assets) in their own subfolder without needing all the plugin files flattened into a single directory:
+
+```
+.interposer\
+  Plugins\
+    CDKey\
+      LANCommander.Interposer.Plugin.CDKey.dll
+    OtherPlugin\
+      OtherPlugin.dll
+      OtherPlugin.dependency.dll
+```
+
+Each loaded plugin is recorded in the session log as `[PLUGIN LOAD]` with its full path, so the source subdirectory of every loaded module is visible at a glance.
+
+### Config: `Redirects` → `FileRedirects`
+
+The configuration key for file redirect rules has been renamed from `Redirects` to `FileRedirects`. The new name better distinguishes file redirects from the new `DnsRedirects` and from any future redirect categories.
+
+```yaml
+FileRedirects:
+  - Pattern: 'C:\\Games\\MyGame\\Saves\\(.+)'
+    Replacement: '%APPDATA%\MyGame\Saves\$1'
+```
+
+:::note Backwards compatibility
+The legacy key name `Redirects` is still accepted and behaves identically. It is read only when `FileRedirects` is not present, so existing configs continue to work unchanged. New configs should use `FileRedirects`.
+:::
