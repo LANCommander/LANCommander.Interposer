@@ -49,6 +49,11 @@ This is the easiest deployment method for manual use. Copy the correct architect
 Some games ship their own `version.dll`. If the game directory already contains `version.dll`, use the Standard or ASI variant instead.
 :::
 
+## Proxy (dinput8)
+** Files:** `dinput8.dll`
+
+This is another version of the proxy DLL that hooks using `dinput8.dll` instead of `version.dll`. This is also the easiest method, but is provided as an alternative as most hook-based game patchers already use `dinput8.dll` for injection.
+
 ## ASI
 
 **Files:** `LANCommander.Interposer.asi`
