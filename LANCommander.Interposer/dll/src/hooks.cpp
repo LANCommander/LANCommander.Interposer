@@ -1,5 +1,4 @@
 #include "hooks.h"
-#include "borderless.h"
 #include "config.h"
 #include "fastdl.h"
 #include "files.h"
@@ -23,9 +22,6 @@ void InstallHooks()
     InitFastDL();
     InstallNetworkHooks();
     InstallIdentityHooks();
-
-    if (g_borderlessEnabled)
-        InstallBorderlessHooks();
 
     MH_EnableHook(MH_ALL_HOOKS);
 

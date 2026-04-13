@@ -11,7 +11,6 @@
 // ---------------------------------------------------------------------------
 bool         g_logFiles         = false;
 bool         g_logRegistry      = false;
-bool         g_borderlessEnabled = false;
 std::wstring g_username;
 std::wstring g_computername;
 
@@ -630,13 +629,6 @@ void LoadConfig()
                 }
             }
         }
-    }
-
-    // ── window ────────────────────────────────────────────────────────────────
-    if (YAML::Node window = root["Window"])
-    {
-        if (window["Borderless"])
-            g_borderlessEnabled = window["Borderless"].as<bool>(false);
     }
 
     // ── player ────────────────────────────────────────────────────────────────

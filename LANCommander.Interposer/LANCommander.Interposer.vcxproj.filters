@@ -24,18 +24,12 @@
     <ClCompile Include="dll\src\registry.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
-    <ClCompile Include="dll\src\window.cpp">
-      <Filter>Source Files</Filter>
-    </ClCompile>
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="dll\src\hooks.h">
       <Filter>Header Files</Filter>
     </ClInclude>
     <ClInclude Include="dll\src\registry.h">
-      <Filter>Header Files</Filter>
-    </ClInclude>
-    <ClInclude Include="dll\src\window.h">
       <Filter>Header Files</Filter>
     </ClInclude>
   </ItemGroup>

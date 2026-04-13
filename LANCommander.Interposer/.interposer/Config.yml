@@ -22,16 +22,6 @@ Player:
   ComputerName: ''
 
 # ---------------------------------------------------------------------------
-# Window
-#
-#   Borderless - true to strip border styles from the game window and center
-#                it on its monitor (borderless fullscreen).  false to leave
-#                the game window untouched (default).
-# ---------------------------------------------------------------------------
-Window:
-  Borderless: false
-
-# ---------------------------------------------------------------------------
 # Logging
 #
 #   Files     - true to log file open/attribute operations, false to disable.

@@ -18,9 +18,6 @@ Logging:
 Player:
   Username: ''
 
-Window:
-  Borderless: false
-
 FastDL:
   Enabled: false
   BaseUrl: ''

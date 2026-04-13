@@ -317,7 +317,7 @@
       <SubSystem>Windows</SubSystem>
       <GenerateDebugInformation>true</GenerateDebugInformation>
       <AdditionalLibraryDirectories>$(SolutionDir)vcpkg_installed_x86\x86-windows-static-md\lib;%(AdditionalLibraryDirectories)</AdditionalLibraryDirectories>
-      <AdditionalDependencies>yaml-cpp.lib;minhook.x32.lib;winhttp.lib;ws2_32.lib;version.lib;dwmapi.lib;%(AdditionalDependencies)</AdditionalDependencies>
+      <AdditionalDependencies>yaml-cpp.lib;minhook.x32.lib;winhttp.lib;ws2_32.lib;version.lib;%(AdditionalDependencies)</AdditionalDependencies>
       <ModuleDefinitionFile>dll\src\proxy_dinput8.def</ModuleDefinitionFile>
     </Link>
   </ItemDefinitionGroup>
@@ -337,7 +337,7 @@
       <SubSystem>Windows</SubSystem>
       <GenerateDebugInformation>true</GenerateDebugInformation>
       <AdditionalLibraryDirectories>$(SolutionDir)vcpkg_installed\x64-windows-static-md\lib;%(AdditionalLibraryDirectories)</AdditionalLibraryDirectories>
-      <AdditionalDependencies>yaml-cpp.lib;minhook.x64.lib;winhttp.lib;ws2_32.lib;version.lib;dwmapi.lib;%(AdditionalDependencies)</AdditionalDependencies>
+      <AdditionalDependencies>yaml-cpp.lib;minhook.x64.lib;winhttp.lib;ws2_32.lib;version.lib;%(AdditionalDependencies)</AdditionalDependencies>
       <ModuleDefinitionFile>dll\src\proxy_dinput8.def</ModuleDefinitionFile>
     </Link>
   </ItemDefinitionGroup>
@@ -394,7 +394,6 @@
   </ItemGroup>
 
   <ItemGroup>
-    <ClCompile Include="dll\src\borderless.cpp" />
     <ClCompile Include="dll\src\config.cpp" />
     <ClCompile Include="dll\src\proxy.cpp" />
     <ClCompile Include="dll\src\proxy_dinput8.cpp" />
@@ -406,11 +405,9 @@
     <ClCompile Include="dll\src\network.cpp" />
     <ClCompile Include="dll\src\plugins.cpp" />
     <ClCompile Include="dll\src\registry.cpp" />
-    <ClCompile Include="dll\src\window.cpp" />
   </ItemGroup>
 
   <ItemGroup>
-    <ClInclude Include="dll\src\borderless.h" />
     <ClInclude Include="dll\src\config.h" />
     <ClInclude Include="dll\src\fastdl.h" />
     <ClInclude Include="dll\src\files.h" />
@@ -419,7 +416,6 @@
     <ClInclude Include="dll\src\network.h" />
     <ClInclude Include="dll\src\plugins.h" />
     <ClInclude Include="dll\src\registry.h" />
-    <ClInclude Include="dll\src\window.h" />
   </ItemGroup>
 
   <ItemGroup>

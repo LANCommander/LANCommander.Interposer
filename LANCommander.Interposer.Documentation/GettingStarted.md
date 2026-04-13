@@ -89,7 +89,7 @@ Logging:
   Registry: true
 ```
 
-This enables access logging and leaves all other features at their defaults (file redirects disabled, FastDL disabled, borderless window always active). Logs are written automatically to `.interposer\Logs\<timestamp>.log` — no path configuration is needed.
+This enables access logging and leaves all other features at their defaults (file redirects disabled, FastDL disabled). Logs are written automatically to `.interposer\Logs\<timestamp>.log` — no path configuration is needed.
 
 ## Diagnostic Log
 

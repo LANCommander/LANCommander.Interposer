@@ -29,10 +29,10 @@ struct DnsRedirect {
     std::wregex  pattern;     // ECMAScript regex, case-insensitive
     std::wstring replacement; // ECMAScript format string (supports $1..$9)
 };
+
 // Populated by LoadConfig(). Read-only after that.
-extern bool         g_logFiles;         // true = log file I/O operations
-extern bool         g_logRegistry;      // true = log registry operations
-extern bool         g_borderlessEnabled; // true = apply borderless fullscreen to game windows
+extern bool         g_logFiles;          // true = log file I/O operations
+extern bool         g_logRegistry;       // true = log registry operations
 extern std::wstring g_username;          // non-empty = override GetUserNameW/A return value
 extern std::wstring g_computername;      // non-empty = override GetComputerNameW/A return value
 
