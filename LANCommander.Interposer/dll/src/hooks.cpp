@@ -6,6 +6,7 @@
 #include "network.h"
 #include "plugins.h"
 #include "registry.h"
+#include "richpresence.h"
 
 #include <MinHook.h>
 
@@ -14,6 +15,14 @@
 // ---------------------------------------------------------------------------
 void InstallHooks()
 {
+#ifdef _DEBUG
+    // Spin until a debugger attaches, then break.
+    // Attach to this process in VS (Debug → Attach to Process) while it waits.
+    while (!IsDebuggerPresent())
+        Sleep(100);
+    __debugbreak();
+#endif
+
     MH_Initialize();
 
     LoadConfig();
@@ -24,6 +33,8 @@ void InstallHooks()
     InstallIdentityHooks();
 
     MH_EnableHook(MH_ALL_HOOKS);
+
+    InitRichPresence();
 
     LoadPlugins();
 }
@@ -44,6 +55,7 @@ void OnLibraryLoaded(HMODULE hModule)
 void RemoveHooks()
 {
     UnloadPlugins();
+    ShutdownRichPresence();
     RemoveRegistryHooks();
     RemoveNetworkHooks();
     ShutdownFastDL();

@@ -54,6 +54,24 @@ extern bool         g_logNetwork;       // true = log connection/DNS events
 
 extern std::vector<DnsRedirect> g_dnsRedirects; // DNS hostname redirects (case-insensitive)
 
+// Rich presence config — read by richpresence.cpp after LoadConfig().
+extern bool        g_rpDiscordEnabled;
+extern std::string g_rpDiscordAppId;
+extern int         g_rpDefaultType;
+extern std::string g_rpDefaultName;
+extern std::string g_rpDefaultDetails;
+extern std::string g_rpDefaultDetailsUrl;
+extern std::string g_rpDefaultState;
+extern std::string g_rpDefaultStateUrl;
+extern std::string g_rpDefaultLargeImageKey;
+extern std::string g_rpDefaultLargeImageText;
+extern std::string g_rpDefaultSmallImageKey;
+extern std::string g_rpDefaultSmallImageText;
+extern std::string g_rpDefaultButton1Text;
+extern std::string g_rpDefaultButton1Url;
+extern std::string g_rpDefaultButton2Text;
+extern std::string g_rpDefaultButton2Url;
+
 // Parse <dlldir>\.interposer\Config.yml and open <dlldir>\.interposer\Logs\<timestamp>.log. Call before MH_EnableHook.
 void LoadConfig();
 
@@ -70,11 +88,17 @@ std::wstring ApplyFileRedirects(const std::wstring& path);
 // (ECMAScript regex, case-insensitive, partial match — anchor with ^ $ for
 // exact match). Otherwise return `host` unchanged.
 std::wstring ApplyDnsRedirect(const std::wstring& host);
+
 // Thread-safe log writers. No-op when the respective flag is false or no log file is open.
 void LogFileAccess(const wchar_t* verb, const wchar_t* sourcePath, const wchar_t* redirectionPath = nullptr);
 void LogRegistryAccess(const wchar_t* verb, const wchar_t* keyPath, const wchar_t* valueName = nullptr);
 void LogFastDLAccess(const wchar_t* verb, const wchar_t* url, const wchar_t* localPath);
 void LogNetworkAccess(const wchar_t* verb, const wchar_t* address, const wchar_t* info = nullptr);
+
+// Log a DNS redirect. Always written when a DnsRedirects rule matches,
+// regardless of Logging.Network — the redirect is a deliberate user-configured
+// action and there is no value in silently swapping hostnames under the game.
+void LogDnsRedirect(const wchar_t* fromHost, const wchar_t* toHost);
 
 // Log a MinHook hook installation result. Always written regardless of other logging flags.
 // Pass the MH_STATUS value returned by MH_CreateHookApi.

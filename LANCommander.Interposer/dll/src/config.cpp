@@ -32,6 +32,24 @@ bool         g_logNetwork = false;
 
 std::vector<DnsRedirect> g_dnsRedirects;
 
+// Rich presence
+bool        g_rpDiscordEnabled         = false;
+std::string g_rpDiscordAppId;
+int         g_rpDefaultType            = 0;
+std::string g_rpDefaultName;
+std::string g_rpDefaultDetails;
+std::string g_rpDefaultDetailsUrl;
+std::string g_rpDefaultState;
+std::string g_rpDefaultStateUrl;
+std::string g_rpDefaultLargeImageKey;
+std::string g_rpDefaultLargeImageText;
+std::string g_rpDefaultSmallImageKey;
+std::string g_rpDefaultSmallImageText;
+std::string g_rpDefaultButton1Text;
+std::string g_rpDefaultButton1Url;
+std::string g_rpDefaultButton2Text;
+std::string g_rpDefaultButton2Url;
+
 static std::vector<FileRedirect> g_redirects;
 static HANDLE                    g_logHandle = INVALID_HANDLE_VALUE;
 static std::mutex                g_logMutex;
@@ -482,8 +500,11 @@ void LoadConfig()
             g_logNetwork = logging["Network"].as<bool>(false);
     }
 
-    // ── fileRedirects ─────────────────────────────────────────────────────────
-    if (YAML::Node redirects = root["Redirects"])
+    // ── FileRedirects (legacy: "Redirects") ──────────────────────────────────
+    YAML::Node redirects = root["FileRedirects"];
+    if (!redirects)
+        redirects = root["Redirects"];
+    if (redirects)
     {
         if (redirects.IsSequence())
         {
@@ -638,6 +659,48 @@ void LoadConfig()
             g_username = Utf8ToWide(player["Username"].as<std::string>(""));
         if (player["ComputerName"])
             g_computername = Utf8ToWide(player["ComputerName"].as<std::string>(""));
+    }
+
+    // ── RichPresence ────────────────────────────────────────────────────────
+    if (YAML::Node rp = root["RichPresence"])
+    {
+        if (YAML::Node discord = rp["Discord"])
+        {
+            if (discord["Enabled"])
+                g_rpDiscordEnabled = discord["Enabled"].as<bool>(false);
+            if (discord["ApplicationId"])
+                g_rpDiscordAppId = discord["ApplicationId"].as<std::string>("");
+        }
+
+        // Default presence values (apply to all backends)
+        if (rp["Type"])
+            g_rpDefaultType = rp["Type"].as<int>(0);
+        if (rp["Name"])
+            g_rpDefaultName = rp["Name"].as<std::string>("");
+        if (rp["Details"])
+            g_rpDefaultDetails = rp["Details"].as<std::string>("");
+        if (rp["DetailsUrl"])
+            g_rpDefaultDetailsUrl = rp["DetailsUrl"].as<std::string>("");
+        if (rp["State"])
+            g_rpDefaultState = rp["State"].as<std::string>("");
+        if (rp["StateUrl"])
+            g_rpDefaultStateUrl = rp["StateUrl"].as<std::string>("");
+        if (rp["LargeImage"])
+            g_rpDefaultLargeImageKey = rp["LargeImage"].as<std::string>("");
+        if (rp["LargeImageText"])
+            g_rpDefaultLargeImageText = rp["LargeImageText"].as<std::string>("");
+        if (rp["SmallImage"])
+            g_rpDefaultSmallImageKey = rp["SmallImage"].as<std::string>("");
+        if (rp["SmallImageText"])
+            g_rpDefaultSmallImageText = rp["SmallImageText"].as<std::string>("");
+        if (rp["Button1Text"])
+            g_rpDefaultButton1Text = rp["Button1Text"].as<std::string>("");
+        if (rp["Button1Url"])
+            g_rpDefaultButton1Url = rp["Button1Url"].as<std::string>("");
+        if (rp["Button2Text"])
+            g_rpDefaultButton2Text = rp["Button2Text"].as<std::string>("");
+        if (rp["Button2Url"])
+            g_rpDefaultButton2Url = rp["Button2Url"].as<std::string>("");
     }
 
     // ── Open log at .interposer\Logs\<timestamp>.log ──────────────────────────

@@ -405,6 +405,8 @@
     <ClCompile Include="dll\src\network.cpp" />
     <ClCompile Include="dll\src\plugins.cpp" />
     <ClCompile Include="dll\src\registry.cpp" />
+    <ClCompile Include="dll\src\richpresence.cpp" />
+    <ClCompile Include="dll\src\discord_ipc.cpp" />
   </ItemGroup>
 
   <ItemGroup>
@@ -416,6 +418,8 @@
     <ClInclude Include="dll\src\network.h" />
     <ClInclude Include="dll\src\plugins.h" />
     <ClInclude Include="dll\src\registry.h" />
+    <ClInclude Include="dll\src\richpresence.h" />
+    <ClInclude Include="dll\src\discord_ipc.h" />
   </ItemGroup>
 
   <ItemGroup>
