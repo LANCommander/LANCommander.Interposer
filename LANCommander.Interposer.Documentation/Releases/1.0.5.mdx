@@ -1,0 +1,71 @@
+---
+sidebar_label: 1.0.5
+sidebar_position: 6
+---
+
+import ReleaseDownloads from '@site/src/components/ReleaseDownloads';
+
+# Interposer 1.0.5 Release Notes
+
+## Downloads
+
+<ReleaseDownloads repo="LANCommander/LANCommander.Interposer" release="v1.0.5" />
+
+## What's Changed
+
+### Rich Presence
+
+Rich presence lets games display detailed status information in Discord — showing the current game, activity details, images, party info, and clickable buttons — all configured through `Config.yml` with no code changes to the game itself.
+
+The implementation communicates directly with the Discord client over local named pipes (`\\.\pipe\discord-ipc-N`) using length-prefixed JSON frames. There are no external SDK dependencies — the entire IPC protocol (handshake, `SET_ACTIVITY`, close) is handled internally.
+
+#### Configuration
+
+Add a `RichPresence` section to `.interposer\Config.yml`:
+
+```yaml
+RichPresence:
+  Discord:
+    Enabled: true
+    ApplicationId: "123456789012345678"
+  Name: "My Game"
+  Details: "In Menu"
+  State: "Idle"
+  LargeImage: "logo"
+  LargeImageText: "My Game v1.0"
+```
+
+You'll need a Discord Application ID from the [Discord Developer Portal](https://discord.com/developers/applications) — no bot token is required. All default activity fields (Type, Name, Details, State, images, buttons) are optional and define the presence shown immediately when the game starts. See the [Rich Presence](../RichPresence) documentation page for the full configuration reference.
+
+#### Behavior
+
+- Rich presence is initialized after all hooks are installed and enabled, so it doesn't interfere with the hook setup sequence.
+- If Discord is not running, a `[RICH PRESENCE]` log entry is written and the game continues normally — presence never blocks startup.
+- If Discord restarts while the game is running, the next presence update from a plugin will automatically reconnect.
+- On DLL detach, presence is cleared and the pipe is closed gracefully.
+
+#### Backend Architecture
+
+The system is built around an abstract `IRichPresenceBackend` interface (`Connect`, `Disconnect`, `IsConnected`, `UpdatePresence`, `ClearPresence`). Discord is the first backend, but the interface is designed so that additional presence services (e.g. a LANCommander-native presence system) can be added in the future. All backends receive the same `PresenceData` — plugins don't need to know which backends are active.
+
+### Rich Presence Plugin API
+
+Plugins can update presence at runtime to show dynamic information like the current map, score, or match progress. The API exposes 11 C-callable functions resolved via `GetProcAddress`:
+
+| Function | Description |
+|---|---|
+| `InterposerSetPresenceDetails` | Set the first detail line |
+| `InterposerSetPresenceState` | Set the second detail line |
+| `InterposerSetPresenceTimestamps` | Set start/end epoch timestamps |
+| `InterposerSetPresenceLargeImage` | Set large image key and tooltip |
+| `InterposerSetPresenceSmallImage` | Set small image key and tooltip |
+| `InterposerSetPresenceParty` | Set party ID, current size, and max |
+| `InterposerSetPresenceButton` | Set button text and URL (index 0 or 1) |
+| `InterposerSetPresenceType` | Set activity type (Playing, Streaming, etc.) |
+| `InterposerSetPresenceName` | Set the display name |
+| `InterposerUpdatePresence` | Push accumulated changes to all backends |
+| `InterposerClearPresence` | Reset to config defaults and clear all backends |
+
+The pattern is: call one or more setters to stage changes, then call `InterposerUpdatePresence` to push them. All functions are thread-safe (guarded by a mutex). `InterposerClearPresence` resets to the default values from `Config.yml` rather than blanking everything.
+
+See the [Rich Presence Plugin API](../Plugins/RichPresence) documentation for the full reference, including C/C++ type definitions and usage examples.

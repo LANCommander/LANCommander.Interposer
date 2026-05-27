@@ -1,0 +1,27 @@
+---
+sidebar_label: 1.0.4
+sidebar_position: 5
+---
+
+import ReleaseDownloads from '@site/src/components/ReleaseDownloads';
+
+# Interposer 1.0.4 Release Notes
+
+## Downloads
+
+<ReleaseDownloads repo="LANCommander/LANCommander.Interposer" release="v1.0.4" />
+
+## What's Changed
+
+### Removed: Borderless Window Mode
+
+The borderless window functionality (`Window.Borderless` config option) has been removed entirely. This feature intercepted `CreateWindowExW/A`, `SetWindowPos`, and `SetWindowLongW/A` to strip border styles from the game window and center it on its monitor. While functional, it duplicated what existing, well-maintained tools like [dgVoodoo2](http://dege.freeweb.hu/dgVoodoo2/) already do — and do better, with broader compatibility across rendering backends.
+
+The following have been removed:
+
+- `borderless.cpp` / `borderless.h` — all five user32 hooks (`CreateWindowExW/A`, `SetWindowPos`, `SetWindowLongW/A`) and the `ApplyBorderless` helper.
+- `window.cpp` / `window.h` — the `Rect` helper and `GetMonitorRect` utility used exclusively by the borderless hooks.
+- The `Window.Borderless` configuration key in `Config.yml`.
+- The `BorderlessFullscreen.md` documentation page.
+
+If you are using `Window.Borderless: true` in an existing config, the key is now silently ignored — no errors will occur, but the behavior will no longer be applied. Use dgVoodoo2 or a similar tool for borderless fullscreen going forward.
