@@ -52,6 +52,7 @@ extern std::vector<PortRange>    g_fastdlFilteredPorts;      // port ranges to s
 
 extern bool         g_logPlugins;       // true = log plugin load/unload/config events
 extern bool         g_logIdentity;     // true = log identity override operations
+extern bool         g_logRichPresence;  // true = log rich presence updates
 extern bool         g_logDnsRedirects;  // true = log DNS redirect matches
 extern bool         g_logNetwork;       // true = log connection/DNS events
 
@@ -98,6 +99,7 @@ void LogRegistryAccess(const wchar_t* verb, const wchar_t* keyPath, const wchar_
 void LogFastDLAccess(const wchar_t* verb, const wchar_t* url, const wchar_t* localPath);
 void LogPluginEvent(const wchar_t* verb, const wchar_t* info);
 void LogIdentityAccess(const wchar_t* verb, const wchar_t* info);
+void LogRichPresence(const wchar_t* verb, const wchar_t* info);
 void LogNetworkAccess(const wchar_t* verb, const wchar_t* address, const wchar_t* info = nullptr);
 
 // Log a DNS redirect. Always written when a DnsRedirects rule matches,
