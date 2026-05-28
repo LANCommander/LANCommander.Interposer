@@ -6,12 +6,15 @@
 
 static std::vector<HMODULE> g_plugins;
 
+// Signature for the optional plugin init callback.
+using FnInterposerPluginInit = void (WINAPI*)(HMODULE hInterposer);
+
 // ---------------------------------------------------------------------------
 // LoadPlugins
 // ---------------------------------------------------------------------------
 void LoadPlugins()
 {
-    // Locate <dlldir>\.interposer\Plugins
+    // Locate <dlldir>\.interposer\Plugins and our own HMODULE (passed to plugins).
     HMODULE hSelf = nullptr;
     GetModuleHandleExW(
         GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
@@ -82,13 +85,22 @@ void LoadPlugins()
                 if (hMod)
                 {
                     g_plugins.push_back(hMod);
-                    LogFileAccess(L"PLUGIN LOAD", fullPath.c_str());
+                    LogPluginEvent(L"PLUGIN LOAD", fullPath.c_str());
+
+                    // If the plugin exports InterposerPluginInit, call it with
+                    // our own HMODULE so it can resolve exports without guessing
+                    // the DLL name (which varies by deployment: .dll, version.dll,
+                    // dinput8.dll, .asi).
+                    auto pfnInit = reinterpret_cast<FnInterposerPluginInit>(
+                        GetProcAddress(hMod, "InterposerPluginInit"));
+                    if (pfnInit)
+                        pfnInit(hSelf);
                 }
                 else
                 {
                     wchar_t errBuf[MAX_PATH + 32];
                     wsprintfW(errBuf, L"%s  (error %u)", fullPath.c_str(), GetLastError());
-                    LogFileAccess(L"PLUGIN ERROR", errBuf);
+                    LogPluginEvent(L"PLUGIN ERROR", errBuf);
                 }
             }
             while (FindNextFileW(hFind, &fd));
