@@ -102,9 +102,7 @@ void LogIdentityAccess(const wchar_t* verb, const wchar_t* info);
 void LogRichPresence(const wchar_t* verb, const wchar_t* info);
 void LogNetworkAccess(const wchar_t* verb, const wchar_t* address, const wchar_t* info = nullptr);
 
-// Log a DNS redirect. Always written when a DnsRedirects rule matches,
-// regardless of Logging.Network — the redirect is a deliberate user-configured
-// action and there is no value in silently swapping hostnames under the game.
+// Log a DNS redirect. Gated by the Logging.DnsRedirects flag (default true).
 void LogDnsRedirect(const wchar_t* fromHost, const wchar_t* toHost);
 
 // Log a MinHook hook installation result. Always written regardless of other logging flags.
