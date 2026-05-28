@@ -38,11 +38,13 @@ using FnInterposerLog                      = void  (WINAPI*)(const wchar_t* verb
 using FnInterposerGetConfigString          = BOOL  (WINAPI*)(const wchar_t* dotPath, wchar_t* buf, DWORD bufSize);
 using FnInterposerGetUsername              = BOOL  (WINAPI*)(wchar_t* buf, DWORD bufSize);
 using FnInterposerSetRegistryValueBySuffix = DWORD (WINAPI*)(const wchar_t* keySuffix, const wchar_t* valueName, const wchar_t* value);
+using FnInterposerRegisterPluginConfig     = BOOL  (WINAPI*)(const wchar_t* pluginName, const wchar_t* yamlDefaults);
 
 static FnInterposerLog                      pfnLog          = nullptr;
 static FnInterposerGetConfigString          pfnGetConfig    = nullptr;
 static FnInterposerGetUsername              pfnGetUser      = nullptr;
 static FnInterposerSetRegistryValueBySuffix pfnSetRegSuffix = nullptr;
+static FnInterposerRegisterPluginConfig     pfnRegConfig    = nullptr;
 
 static constexpr const wchar_t* kVerb = L"CDKEY";
 
@@ -88,21 +90,8 @@ static std::wstring GenerateKey(const std::wstring& username, const std::wstring
 }
 
 // ─── Resolve interposer exports ───────────────────────────────────────────────
-static bool ResolveAPI()
+static bool ResolveAPI(HMODULE hInterposer)
 {
-    // The interposer DLL may be loaded under its standard name or as version.dll / .asi.
-    static const wchar_t* kCandidates[] = {
-        L"LANCommander.Interposer.dll",
-        L"version.dll",
-    };
-
-    HMODULE hInterposer = nullptr;
-    for (const wchar_t* name : kCandidates)
-    {
-        hInterposer = GetModuleHandleW(name);
-        if (hInterposer) break;
-    }
-
     if (!hInterposer)
         return false;
 
@@ -110,15 +99,27 @@ static bool ResolveAPI()
     pfnGetConfig    = reinterpret_cast<FnInterposerGetConfigString>(          GetProcAddress(hInterposer, "InterposerGetConfigString"));
     pfnGetUser      = reinterpret_cast<FnInterposerGetUsername>(              GetProcAddress(hInterposer, "InterposerGetUsername"));
     pfnSetRegSuffix = reinterpret_cast<FnInterposerSetRegistryValueBySuffix>(GetProcAddress(hInterposer, "InterposerSetRegistryValueBySuffix"));
+    pfnRegConfig    = reinterpret_cast<FnInterposerRegisterPluginConfig>(    GetProcAddress(hInterposer, "InterposerRegisterPluginConfig"));
 
     return pfnLog && pfnGetConfig && pfnGetUser && pfnSetRegSuffix;
 }
 
-// ─── DLL initialisation ───────────────────────────────────────────────────────
-static void Initialize()
+// ─── Plugin entry point ───────────────────────────────────────────────────────
+// Called by the Interposer after LoadLibrary with its own HMODULE, so the plugin
+// can resolve exports without guessing the DLL name.
+extern "C" __declspec(dllexport) void WINAPI InterposerPluginInit(HMODULE hInterposer)
 {
-    if (!ResolveAPI())
-        return; // interposer not present; nothing to do
+    if (!ResolveAPI(hInterposer))
+        return; // exports not available; nothing to do
+
+    // Register default config — written to Config.yml on first run only.
+    if (pfnRegConfig)
+    {
+        pfnRegConfig(L"CDKey",
+            L"Mask: '****-**********-*******-****'\n"
+            L"KeyPath: ''\n"
+            L"ValueName: '@'");
+    }
 
     // ── Read configuration ───────────────────────────────────────────────────
     wchar_t mask[256]     = {};
@@ -178,7 +179,6 @@ static void Initialize()
 
 BOOL APIENTRY DllMain(HMODULE /*hModule*/, DWORD fdwReason, LPVOID /*lpReserved*/)
 {
-    if (fdwReason == DLL_PROCESS_ATTACH)
-        Initialize();
+    (void)fdwReason;
     return TRUE;
 }
