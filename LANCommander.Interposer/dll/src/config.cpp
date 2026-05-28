@@ -30,6 +30,7 @@ std::vector<PortRange>    g_fastdlFilteredPorts       = {{ 23000, 23009 }};
 
 bool         g_logNetwork = false;
 bool         g_logPlugins       = false;
+bool         g_logIdentity     = false;
 
 std::vector<DnsRedirect> g_dnsRedirects;
 
@@ -296,6 +297,14 @@ void LogFastDLAccess(const wchar_t* verb, const wchar_t* url, const wchar_t* loc
 void LogPluginEvent(const wchar_t* verb, const wchar_t* info)
 {
     if (!g_logPlugins)
+        return;
+
+    WriteLogLine(verb, info, nullptr);
+}
+
+void LogIdentityAccess(const wchar_t* verb, const wchar_t* info)
+{
+    if (!g_logIdentity)
         return;
 
     WriteLogLine(verb, info, nullptr);

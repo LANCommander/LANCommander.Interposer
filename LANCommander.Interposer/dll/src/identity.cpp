@@ -79,7 +79,9 @@ static BOOL WINAPI HookGetUserNameW(LPWSTR lpBuffer, LPDWORD pcbBuffer)
 
     wmemcpy(lpBuffer, g_username.c_str(), needed);
     *pcbBuffer = needed;
-    
+
+    LogIdentityAccess(L"IDENTITY", (L"GetUserNameW -> " + g_username).c_str());
+
     return TRUE;
 }
 
@@ -110,7 +112,9 @@ static BOOL WINAPI HookGetUserNameA(LPSTR lpBuffer, LPDWORD pcbBuffer)
     WideCharToMultiByte(CP_ACP, 0, g_username.c_str(), -1,
         lpBuffer, static_cast<int>(*pcbBuffer), nullptr, nullptr);
     *pcbBuffer = needed;
-    
+
+    LogIdentityAccess(L"IDENTITY", (L"GetUserNameA -> " + g_username).c_str());
+
     return TRUE;
 }
 
@@ -144,7 +148,9 @@ static BOOL WINAPI HookGetComputerNameW(LPWSTR lpBuffer, LPDWORD nSize)
 
     wmemcpy(lpBuffer, g_computername.c_str(), needed);
     *nSize = nameLength; // success: count without null terminator
-    
+
+    LogIdentityAccess(L"IDENTITY", (L"GetComputerNameW -> " + g_computername).c_str());
+
     return TRUE;
 }
 
@@ -176,7 +182,9 @@ static BOOL WINAPI HookGetComputerNameA(LPSTR lpBuffer, LPDWORD nSize)
     WideCharToMultiByte(CP_ACP, 0, g_computername.c_str(), -1,
         lpBuffer, static_cast<int>(*nSize), nullptr, nullptr);
     *nSize = nameLength; // success: count without null terminator
-    
+
+    LogIdentityAccess(L"IDENTITY", (L"GetComputerNameA -> " + g_computername).c_str());
+
     return TRUE;
 }
 
@@ -208,6 +216,8 @@ void InstallIdentityHooks()
 
     if (!g_username.empty())
     {
+        LogIdentityAccess(L"IDENTITY", (L"Username override: " + g_username).c_str());
+
         LogHookInit(L"advapi32", "GetUserNameW",
             MH_CreateHookApi(L"advapi32", "GetUserNameW",
                 reinterpret_cast<LPVOID>(HookGetUserNameW),
@@ -221,6 +231,8 @@ void InstallIdentityHooks()
 
     if (!g_computername.empty())
     {
+        LogIdentityAccess(L"IDENTITY", (L"ComputerName override: " + g_computername).c_str());
+
         LogHookInit(L"kernel32", "GetComputerNameW",
             MH_CreateHookApi(L"kernel32", "GetComputerNameW",
                 reinterpret_cast<LPVOID>(HookGetComputerNameW),

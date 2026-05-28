@@ -51,6 +51,7 @@ extern int                       g_fastdlProbeTimeout;       // probe request ti
 extern std::vector<PortRange>    g_fastdlFilteredPorts;      // port ranges to skip when collecting addresses
 
 extern bool         g_logPlugins;       // true = log plugin load/unload/config events
+extern bool         g_logIdentity;     // true = log identity override operations
 extern bool         g_logNetwork;       // true = log connection/DNS events
 
 extern std::vector<DnsRedirect> g_dnsRedirects; // DNS hostname redirects (case-insensitive)
@@ -95,6 +96,7 @@ void LogFileAccess(const wchar_t* verb, const wchar_t* sourcePath, const wchar_t
 void LogRegistryAccess(const wchar_t* verb, const wchar_t* keyPath, const wchar_t* valueName = nullptr);
 void LogFastDLAccess(const wchar_t* verb, const wchar_t* url, const wchar_t* localPath);
 void LogPluginEvent(const wchar_t* verb, const wchar_t* info);
+void LogIdentityAccess(const wchar_t* verb, const wchar_t* info);
 void LogNetworkAccess(const wchar_t* verb, const wchar_t* address, const wchar_t* info = nullptr);
 
 // Log a DNS redirect. Always written when a DnsRedirects rule matches,
