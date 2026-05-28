@@ -1,7 +1,7 @@
 # LANCommander Interposer Configuration
 # Place this directory (.interposer/) in the same directory as LANCommander.Interposer.dll
 #
-# Single-quoted strings pass backslashes literally — safe for Windows paths
+# Single-quoted strings pass backslashes literally - safe for Windows paths
 # and ECMAScript regex patterns.  Double-quoted strings process YAML escapes
 # (\n, \t, etc.) and should be avoided for paths.
 
@@ -30,6 +30,19 @@ Player:
 #
 #   Downloads - true to log FastDL downloads, false to disable.
 #
+#   Plugins   - true to log plugin load/unload/config registration events,
+#               false to disable (default).
+#
+#   Identity  - true to log identity override operations (GetUserName,
+#               GetComputerName hook invocations), false to disable (default).
+#
+#   RichPresence - true to log rich presence updates (field changes, pushes to
+#                  Discord, clears), false to disable (default).
+#
+#   DnsRedirects - true (default) to log DNS redirect matches. These are
+#                  logged separately from general network events because DNS
+#                  redirects are a deliberate user-configured action.
+#
 #   Network   - true to log server connection/DNS events (addresses the game
 #               connects to), false to disable (default).
 #
@@ -37,10 +50,13 @@ Player:
 # the DLL.  A new file is created each session.
 # ---------------------------------------------------------------------------
 Logging:
-  Files: true
-  Registry: true
+  Files: false
+  Registry: false
   Downloads: true
   Plugins: true
+  Identity: false
+  RichPresence: false
+  DnsRedirects: true
   Network: false
 
 # ---------------------------------------------------------------------------
@@ -90,7 +106,7 @@ FileRedirects: []
 #                 wins.  Use single-quoted YAML strings so backslashes are
 #                 literal (no YAML escaping needed).
 #
-#                 Partial matches are allowed — anchor with ^ and $ if you
+#                 Partial matches are allowed - anchor with ^ and $ if you
 #                 want exact-host matching.  IP literals passed to the
 #                 resolver are matched the same way as hostnames; if you
 #                 want to skip them, anchor your pattern accordingly.
@@ -106,15 +122,15 @@ FileRedirects: []
 #
 # Examples:
 #
-#   Exact host → IP literal:
+#   Exact host -> IP literal:
 #   - Pattern: '^master\.example\.com$'
 #     Replacement: '10.0.0.5'
 #
-#   Whole subdomain → community-revival domain (capture group):
+#   Whole subdomain -> community-revival domain (capture group):
 #   - Pattern: '^(.+)\.deadgame\.net$'
 #     Replacement: '$1.community-revival.org'
 #
-#   Any *.gamespy.com → master.local:
+#   Any *.gamespy.com -> master.local:
 #   - Pattern: '\.gamespy\.com$'
 #     Replacement: 'master.local'
 # ---------------------------------------------------------------------------
@@ -217,3 +233,90 @@ FastDL:
 # Paths:
 #   - Local: 'C:\Games\Quake3\baseq3'
 #     Remote: baseq3
+
+# ---------------------------------------------------------------------------
+# RichPresence
+#
+# Display game activity on Discord (and potentially other services in the
+# future). The Interposer connects to Discord's local IPC pipe and pushes
+# presence updates automatically.
+#
+# Top-level fields set the default presence shown as soon as the Interposer
+# loads. Plugins can override individual fields at runtime via the exported
+# InterposerSetPresence* functions.
+#
+#   Type           - Activity type integer:
+#                    0 = Playing (default), 1 = Streaming, 2 = Listening,
+#                    3 = Watching, 5 = Competing.
+#
+#   Name           - Display name shown after the activity verb
+#                    (e.g. "Playing <Name>").
+#
+#   Details        - First detail line displayed under the activity name.
+#
+#   DetailsUrl     - URL associated with the details line (backend-dependent).
+#
+#   State          - Second detail line (e.g. "In a match" or "Idle").
+#
+#   StateUrl       - URL associated with the state line (backend-dependent).
+#
+#   LargeImage     - Asset key or URL for the large image.
+#
+#   LargeImageText - Tooltip shown when hovering over the large image.
+#
+#   SmallImage     - Asset key or URL for the small image.
+#
+#   SmallImageText - Tooltip shown when hovering over the small image.
+#
+#   Button1Text    - Label for the first button (max 32 characters on Discord).
+#   Button1Url     - URL opened when the first button is clicked.
+#
+#   Button2Text    - Label for the second button (max 32 characters on Discord).
+#   Button2Url     - URL opened when the second button is clicked.
+#
+# Discord backend:
+#
+#   Discord.Enabled       - true to connect to Discord, false to skip (default).
+#
+#   Discord.ApplicationId - Your Discord application ID (from the Discord
+#                           Developer Portal). Required for rich presence to
+#                           work — Discord uses this to look up asset keys
+#                           and the application name.
+# ---------------------------------------------------------------------------
+RichPresence:
+  Type: 0                    # 0=Playing, 1=Streaming, 2=Listening, 3=Watching, 5=Competing
+  Name: ''
+  Details: ''
+  DetailsUrl: ''
+  State: ''
+  StateUrl: ''
+  LargeImage: ''
+  LargeImageText: ''
+  SmallImage: ''
+  SmallImageText: ''
+  Button1Text: ''
+  Button1Url: ''
+  Button2Text: ''
+  Button2Url: ''
+
+  Discord:
+    Enabled: false
+    ApplicationId: ''
+
+# ---------------------------------------------------------------------------
+# Plugins
+#
+# Arbitrary key-value configuration for Interposer plugins. Each plugin
+# defines its own sub-key under Plugins and documents the settings it
+# expects. Plugins read these values at runtime via the exported
+# InterposerGetConfigString function using dot-separated paths
+# (e.g. "Plugins.CDKey.Mask").
+#
+# Example (CDKey plugin):
+#
+#   CDKey:
+#     Mask: '****-**********-*******-****'
+#     KeyPath: 'Battlefield 1942\ergc'
+#     ValueName: '@'
+# ---------------------------------------------------------------------------
+Plugins: {}
