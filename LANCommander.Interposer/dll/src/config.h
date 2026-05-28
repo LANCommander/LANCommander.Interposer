@@ -125,3 +125,16 @@ extern "C" __declspec(dllexport) void InterposerLog(const wchar_t* verb, const w
 // Returns TRUE on success; FALSE if the key is missing, not scalar, or buffer too small.
 // Example: InterposerGetConfigString(L"Plugins.MyPlugin.Setting", buf, ARRAYSIZE(buf))
 extern "C" __declspec(dllexport) BOOL InterposerGetConfigString(const wchar_t* dotPath, wchar_t* buffer, DWORD bufferSize);
+
+// Register default configuration for a plugin. pluginName is the key under
+// Plugins: in Config.yml (e.g. L"CDKey"). yamlDefaults is a YAML map body
+// defining the default keys and values (e.g. L"Mask: '****'\nKeyPath: ''").
+//
+// If a Plugins.<pluginName> section already exists in Config.yml, the defaults
+// are NOT written — the user's existing configuration is preserved. Otherwise
+// the defaults are merged into the in-memory config (immediately available via
+// InterposerGetConfigString) and appended to Config.yml on disk.
+//
+// Returns TRUE if the section already existed or defaults were written
+// successfully. Returns FALSE on error (bad YAML, file write failure).
+extern "C" __declspec(dllexport) BOOL InterposerRegisterPluginConfig(const wchar_t* pluginName, const wchar_t* yamlDefaults);

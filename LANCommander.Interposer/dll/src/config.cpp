@@ -28,9 +28,11 @@ std::wstring              g_fastdlProbePath           = L"/";
 int                       g_fastdlProbeTimeout        = 2000;
 std::vector<PortRange>    g_fastdlFilteredPorts       = {{ 23000, 23009 }};
 
-bool         g_logNetwork = false;
 bool         g_logPlugins       = false;
 bool         g_logIdentity     = false;
+bool         g_logRichPresence  = false;
+bool         g_logDnsRedirects = true;
+bool         g_logNetwork      = false;
 
 std::vector<DnsRedirect> g_dnsRedirects;
 
@@ -55,6 +57,7 @@ std::string g_rpDefaultButton2Url;
 static std::vector<FileRedirect> g_redirects;
 static HANDLE                    g_logHandle = INVALID_HANDLE_VALUE;
 static std::mutex                g_logMutex;
+static std::wstring              g_configFilePath; // set by LoadConfig(), used by InterposerRegisterPluginConfig
 
 // Persisted YAML root for plugin config queries (read-only after LoadConfig).
 static YAML::Node        g_configRoot;
@@ -309,6 +312,15 @@ void LogIdentityAccess(const wchar_t* verb, const wchar_t* info)
 
     WriteLogLine(verb, info, nullptr);
 }
+
+void LogRichPresence(const wchar_t* verb, const wchar_t* info)
+{
+    if (!g_logRichPresence)
+        return;
+
+    WriteLogLine(verb, info, nullptr);
+}
+
 void LogNetworkAccess(const wchar_t* verb, const wchar_t* address, const wchar_t* info)
 {
     if (!g_logNetwork)
@@ -435,6 +447,268 @@ BOOL InterposerGetConfigString(const wchar_t* dotPath, wchar_t* buffer, DWORD bu
 }
 
 // ---------------------------------------------------------------------------
+// InterposerRegisterPluginConfig
+// ---------------------------------------------------------------------------
+
+// Read the entire file at g_configFilePath into a UTF-8 string.
+// Returns empty string on failure.
+static std::string ReadConfigFileUtf8()
+{
+    HANDLE fh = CreateFileW(g_configFilePath.c_str(), GENERIC_READ, FILE_SHARE_READ,
+        nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+
+    if (fh == INVALID_HANDLE_VALUE)
+        return {};
+
+    LARGE_INTEGER sz{};
+    GetFileSizeEx(fh, &sz);
+    if (sz.QuadPart == 0 || sz.QuadPart > 4 * 1024 * 1024)
+    {
+        CloseHandle(fh);
+        return {};
+    }
+
+    std::vector<BYTE> raw(static_cast<size_t>(sz.QuadPart));
+    DWORD bytesRead = 0;
+    ReadFile(fh, raw.data(), static_cast<DWORD>(raw.size()), &bytesRead, nullptr);
+    CloseHandle(fh);
+
+    // Decode to UTF-8 (handle BOM variants)
+    if (raw.size() >= 2 && raw[0] == 0xFF && raw[1] == 0xFE)
+    {
+        size_t charCount = (raw.size() - 2) / 2;
+        const wchar_t* wptr = reinterpret_cast<const wchar_t*>(raw.data() + 2);
+        int utf8len = WideCharToMultiByte(CP_UTF8, 0, wptr, static_cast<int>(charCount),
+            nullptr, 0, nullptr, nullptr);
+        if (utf8len <= 0) return {};
+        std::string s(utf8len, '\0');
+        WideCharToMultiByte(CP_UTF8, 0, wptr, static_cast<int>(charCount),
+            s.data(), utf8len, nullptr, nullptr);
+        return s;
+    }
+
+    int offset = (raw.size() >= 3 && raw[0] == 0xEF && raw[1] == 0xBB && raw[2] == 0xBF) ? 3 : 0;
+    return std::string(reinterpret_cast<const char*>(raw.data()) + offset, raw.size() - offset);
+}
+
+// Write a UTF-8 string to g_configFilePath (overwrites existing content).
+static bool WriteConfigFileUtf8(const std::string& content)
+{
+    HANDLE fh = CreateFileW(g_configFilePath.c_str(), GENERIC_WRITE, 0,
+        nullptr, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
+
+    if (fh == INVALID_HANDLE_VALUE)
+        return false;
+
+    DWORD written = 0;
+    BOOL ok = WriteFile(fh, content.c_str(), static_cast<DWORD>(content.size()), &written, nullptr);
+    CloseHandle(fh);
+    return ok && written == content.size();
+}
+
+// Emit a YAML::Node map as block-style lines, each indented by `indent` spaces.
+static std::string EmitPluginYaml(const YAML::Node& node, int indent)
+{
+    std::string result;
+    std::string pad(indent, ' ');
+
+    for (auto it = node.begin(); it != node.end(); ++it)
+    {
+        std::string key = it->first.as<std::string>();
+        YAML::Node  val = it->second;
+
+        if (val.IsScalar())
+        {
+            YAML::Emitter em;
+            em << val;
+            result += pad + key + ": " + em.c_str() + "\n";
+        }
+        else if (val.IsSequence())
+        {
+            YAML::Emitter em;
+            em << YAML::Flow << val;
+            result += pad + key + ": " + em.c_str() + "\n";
+        }
+        else if (val.IsMap())
+        {
+            result += pad + key + ":\n";
+            result += EmitPluginYaml(val, indent + 2);
+        }
+    }
+
+    return result;
+}
+
+extern "C" __declspec(dllexport)
+BOOL InterposerRegisterPluginConfig(const wchar_t* pluginName, const wchar_t* yamlDefaults)
+{
+    if (!pluginName || !yamlDefaults || pluginName[0] == L'\0')
+        return FALSE;
+
+    std::string nameUtf8     = WideToUtf8(std::wstring(pluginName));
+    std::string defaultsUtf8 = WideToUtf8(std::wstring(yamlDefaults));
+
+    if (nameUtf8.empty())
+        return FALSE;
+
+    // Parse the defaults YAML
+    YAML::Node defaults;
+    try { defaults = YAML::Load(defaultsUtf8); }
+    catch (const YAML::Exception&)
+    {
+        LogPluginEvent(L"PLUGIN CONFIG", Utf8ToWide("Failed to parse defaults for " + nameUtf8).c_str());
+        return FALSE;
+    }
+
+    if (!defaults.IsMap())
+    {
+        LogPluginEvent(L"PLUGIN CONFIG", Utf8ToWide("Defaults for " + nameUtf8 + " must be a YAML map").c_str());
+        return FALSE;
+    }
+
+    std::unique_lock lk(g_configMutex);
+
+    // If the plugin section already exists, do nothing — user config takes priority.
+    YAML::Node plugins = g_configRoot["Plugins"];
+    if (plugins && plugins.IsMap() && plugins[nameUtf8] && plugins[nameUtf8].IsDefined())
+    {
+        LogPluginEvent(L"PLUGIN CONFIG", Utf8ToWide(nameUtf8 + " already configured").c_str());
+        return TRUE;
+    }
+
+    // Merge defaults into in-memory config
+    if (!plugins || !plugins.IsMap())
+        g_configRoot["Plugins"] = YAML::Node(YAML::NodeType::Map);
+
+    g_configRoot["Plugins"][nameUtf8] = defaults;
+
+    // Build the text block to append/insert into Config.yml on disk
+    std::string pluginBlock;
+    pluginBlock += "  " + nameUtf8 + ":\n";
+    pluginBlock += EmitPluginYaml(defaults, 4);
+
+    // Read, patch, and write back the config file
+    std::string fileContent = ReadConfigFileUtf8();
+    if (fileContent.empty())
+    {
+        // No config file exists or is empty — create one with just the Plugins section
+        fileContent = "Plugins:\n" + pluginBlock;
+        WriteConfigFileUtf8(fileContent);
+        LogPluginEvent(L"PLUGIN CONFIG", Utf8ToWide("Created config with defaults for " + nameUtf8).c_str());
+        return TRUE;
+    }
+
+    // Ensure file ends with a newline for clean appending
+    if (!fileContent.empty() && fileContent.back() != '\n')
+        fileContent += '\n';
+
+    // Find the Plugins: line and determine what form it takes
+    // Look for "Plugins:" at the start of a line (possibly with trailing whitespace or {})
+    size_t pluginsLineStart = std::string::npos;
+    bool   isEmptyMap = false;
+
+    size_t searchPos = 0;
+    while (searchPos < fileContent.size())
+    {
+        size_t pos = fileContent.find("Plugins:", searchPos);
+        if (pos == std::string::npos)
+            break;
+
+        // Must be at start of line (pos==0 or preceded by \n)
+        if (pos == 0 || fileContent[pos - 1] == '\n')
+        {
+            pluginsLineStart = pos;
+
+            // Check if this is "Plugins: {}" or "Plugins:{}"
+            size_t afterColon = pos + 8; // length of "Plugins:"
+            size_t lineEnd = fileContent.find('\n', afterColon);
+            if (lineEnd == std::string::npos) lineEnd = fileContent.size();
+            std::string rest = fileContent.substr(afterColon, lineEnd - afterColon);
+
+            // Trim whitespace
+            size_t first = rest.find_first_not_of(" \t\r");
+            if (first != std::string::npos)
+            {
+                std::string trimmed = rest.substr(first);
+                // Remove trailing whitespace
+                size_t last = trimmed.find_last_not_of(" \t\r");
+                if (last != std::string::npos)
+                    trimmed.resize(last + 1);
+                isEmptyMap = (trimmed == "{}" || trimmed == "{ }");
+            }
+            else
+            {
+                isEmptyMap = false; // "Plugins:" with nothing after = map with sub-keys below
+            }
+            break;
+        }
+        searchPos = pos + 1;
+    }
+
+    if (pluginsLineStart != std::string::npos && isEmptyMap)
+    {
+        // Replace "Plugins: {}" line with "Plugins:\n" + plugin block
+        size_t lineEnd = fileContent.find('\n', pluginsLineStart);
+        if (lineEnd == std::string::npos) lineEnd = fileContent.size();
+        else lineEnd += 1; // include the \n
+
+        fileContent.replace(pluginsLineStart, lineEnd - pluginsLineStart,
+            "Plugins:\n" + pluginBlock);
+    }
+    else if (pluginsLineStart != std::string::npos)
+    {
+        // "Plugins:" exists with content — find the end of its block
+        // (next line with indent 0 that isn't blank/comment, or EOF)
+        size_t lineEnd = fileContent.find('\n', pluginsLineStart);
+        if (lineEnd == std::string::npos) lineEnd = fileContent.size();
+        else lineEnd += 1;
+
+        size_t insertPos = lineEnd;
+        while (insertPos < fileContent.size())
+        {
+            size_t nextLineEnd = fileContent.find('\n', insertPos);
+            if (nextLineEnd == std::string::npos) nextLineEnd = fileContent.size();
+
+            std::string line = fileContent.substr(insertPos, nextLineEnd - insertPos);
+
+            // Skip blank lines and comment lines within the block
+            size_t firstNonSpace = line.find_first_not_of(" \t\r");
+            if (firstNonSpace == std::string::npos || line[firstNonSpace] == '#')
+            {
+                insertPos = nextLineEnd + 1;
+                continue;
+            }
+
+            // If the line has indent >= 1 space, it belongs to the Plugins block
+            if (firstNonSpace >= 1)
+            {
+                insertPos = nextLineEnd + 1;
+                continue;
+            }
+
+            // Line at indent 0 = new top-level key; stop here
+            break;
+        }
+
+        fileContent.insert(insertPos, pluginBlock);
+    }
+    else
+    {
+        // No Plugins: key found — append to end
+        fileContent += "\nPlugins:\n" + pluginBlock;
+    }
+
+    if (!WriteConfigFileUtf8(fileContent))
+    {
+        LogPluginEvent(L"PLUGIN CONFIG", Utf8ToWide("Failed to write defaults for " + nameUtf8).c_str());
+        return FALSE;
+    }
+
+    LogPluginEvent(L"PLUGIN CONFIG", Utf8ToWide("Registered defaults for " + nameUtf8).c_str());
+    return TRUE;
+}
+
+// ---------------------------------------------------------------------------
 // LoadConfig
 // ---------------------------------------------------------------------------
 void LoadConfig()
@@ -458,6 +732,8 @@ void LoadConfig()
 
     std::wstring interposerDir = dllDirectory + L".interposer\\";
     std::wstring yamlPath      = interposerDir + L"Config.yml";
+
+    g_configFilePath = yamlPath;
 
     HANDLE fileHandle = CreateFileW(yamlPath.c_str(), GENERIC_READ, FILE_SHARE_READ,
         nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
@@ -521,6 +797,14 @@ void LoadConfig()
             g_logRegistry = logging["Registry"].as<bool>(false);
         if (logging["Downloads"])
             g_logFastDL = logging["Downloads"].as<bool>(true);
+        if (logging["Plugins"])
+            g_logPlugins = logging["Plugins"].as<bool>(false);
+        if (logging["Identity"])
+            g_logIdentity = logging["Identity"].as<bool>(false);
+        if (logging["RichPresence"])
+            g_logRichPresence = logging["RichPresence"].as<bool>(false);
+        if (logging["DnsRedirects"])
+            g_logDnsRedirects = logging["DnsRedirects"].as<bool>(true);
         if (logging["Network"])
             g_logNetwork = logging["Network"].as<bool>(false);
     }
