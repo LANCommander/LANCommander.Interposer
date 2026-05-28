@@ -244,7 +244,7 @@ static int WSAAPI HookGetAddrInfo(
 
         if (redirected != wname)
         {
-            LogNetworkAccess(L"DNS REDIRECT", wname.c_str(), redirected.c_str());
+            LogDnsRedirect( wname.c_str(), redirected.c_str());
 
             const std::string ansi = WideToAnsi(redirected);
             const int ret = g_origGetAddrInfo(ansi.c_str(), servname, hints, result);
@@ -278,7 +278,7 @@ static int WSAAPI HookGetAddrInfoW(
 
         if (redirected != wname)
         {
-            LogNetworkAccess(L"DNS REDIRECT", wname.c_str(), redirected.c_str());
+            LogDnsRedirect( wname.c_str(), redirected.c_str());
 
             const int ret = g_origGetAddrInfoW(redirected.c_str(), servname, hints, result);
 
@@ -467,7 +467,7 @@ static hostent* WSAAPI HookGetHostByName2(const char* name)
 
         if (redirected != wname)
         {
-            LogNetworkAccess(L"DNS REDIRECT", wname.c_str(), redirected.c_str());
+            LogDnsRedirect( wname.c_str(), redirected.c_str());
 
             const std::string ansi = WideToAnsi(redirected);
             hostent* ret = g_origGetHostByName2(ansi.c_str());
@@ -509,7 +509,7 @@ static int WSAAPI HookGetAddrInfoExW(
 
         if (redirected != wname)
         {
-            LogNetworkAccess(L"DNS REDIRECT", wname.c_str(), redirected.c_str());
+            LogDnsRedirect( wname.c_str(), redirected.c_str());
 
             const wchar_t* stableName = StableWide(redirected);
             const int ret = g_origGetAddrInfoExW(
@@ -554,7 +554,7 @@ static int WSAAPI HookGetAddrInfoExA(
 
         if (redirected != wname)
         {
-            LogNetworkAccess(L"DNS REDIRECT", wname.c_str(), redirected.c_str());
+            LogDnsRedirect( wname.c_str(), redirected.c_str());
 
             const char* stableName = StableAnsi(WideToAnsi(redirected));
             const int ret = g_origGetAddrInfoExA(
@@ -588,7 +588,7 @@ static hostent* WSAAPI HookGetHostByName(const char* name)
 
         if (redirected != wname)
         {
-            LogNetworkAccess(L"DNS REDIRECT", wname.c_str(), redirected.c_str());
+            LogDnsRedirect( wname.c_str(), redirected.c_str());
 
             const std::string ansi = WideToAnsi(redirected);
             hostent* ret = g_origGetHostByName(ansi.c_str());

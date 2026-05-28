@@ -317,6 +317,14 @@ void LogNetworkAccess(const wchar_t* verb, const wchar_t* address, const wchar_t
     WriteLogLine(verb, address, info);
 }
 
+void LogDnsRedirect(const wchar_t* fromHost, const wchar_t* toHost)
+{
+    if (!g_logDnsRedirects)
+        return;
+
+    WriteLogLine(L"DNS REDIRECT", fromHost, toHost);
+}
+
 void LogHookInit(const wchar_t* module, const char* fn, MH_STATUS status)
 {
     if (status == MH_ERROR_ALREADY_CREATED)

@@ -52,6 +52,7 @@ extern std::vector<PortRange>    g_fastdlFilteredPorts;      // port ranges to s
 
 extern bool         g_logPlugins;       // true = log plugin load/unload/config events
 extern bool         g_logIdentity;     // true = log identity override operations
+extern bool         g_logDnsRedirects;  // true = log DNS redirect matches
 extern bool         g_logNetwork;       // true = log connection/DNS events
 
 extern std::vector<DnsRedirect> g_dnsRedirects; // DNS hostname redirects (case-insensitive)
