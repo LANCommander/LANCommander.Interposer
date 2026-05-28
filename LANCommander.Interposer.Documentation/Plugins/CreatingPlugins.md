@@ -11,46 +11,43 @@ A plugin is a standard Windows DLL (`.dll`) or ASI file (`.asi`) placed in `.int
 
 Create a new DLL project targeting the same architecture as the game (x86 for 32-bit games, x64 for 64-bit games). No additional libraries or headers are required beyond the Windows SDK.
 
-The only entry point needed is `DllMain`:
+## Plugin Entry Point
+
+The Interposer calls an optional exported function on each plugin immediately after `LoadLibrary`:
 
 ```cpp
-BOOL APIENTRY DllMain(HMODULE /*hModule*/, DWORD fdwReason, LPVOID /*lpReserved*/)
+extern "C" __declspec(dllexport) void WINAPI InterposerPluginInit(HMODULE hInterposer);
+```
+
+The `hInterposer` parameter is the Interposer's own module handle. Use it for all `GetProcAddress` calls — this works regardless of whether the Interposer was deployed as `LANCommander.Interposer.dll`, `version.dll`, `dinput8.dll`, or an `.asi` file.
+
+Keep `DllMain` minimal — heavy initialization belongs in `InterposerPluginInit` where the full Interposer API is available:
+
+```cpp
+BOOL APIENTRY DllMain(HMODULE /*hModule*/, DWORD /*fdwReason*/, LPVOID /*lpReserved*/)
 {
-    if (fdwReason == DLL_PROCESS_ATTACH)
-        Initialize();
     return TRUE;
 }
 ```
 
 ## Resolving the API
 
-Declare function pointer types for the Interposer exports you need and resolve them with `GetProcAddress`. The Interposer may be loaded under different filenames depending on the deployment variant, so check the known names in order:
+Declare function pointer types for the Interposer exports you need and resolve them with `GetProcAddress` using the `hInterposer` handle:
 
 ```cpp
-using FnInterposerLog             = void (WINAPI*)(const wchar_t* verb, const wchar_t* message);
-using FnInterposerGetConfigString = BOOL (WINAPI*)(const wchar_t* dotPath, wchar_t* buf, DWORD bufSize);
+using FnInterposerLog                  = void (WINAPI*)(const wchar_t* verb, const wchar_t* message);
+using FnInterposerGetConfigString      = BOOL (WINAPI*)(const wchar_t* dotPath, wchar_t* buf, DWORD bufSize);
+using FnInterposerRegisterPluginConfig = BOOL (WINAPI*)(const wchar_t* pluginName, const wchar_t* yamlDefaults);
 
-static FnInterposerLog             pfnLog       = nullptr;
-static FnInterposerGetConfigString pfnGetConfig = nullptr;
+static FnInterposerLog                  pfnLog       = nullptr;
+static FnInterposerGetConfigString      pfnGetConfig = nullptr;
+static FnInterposerRegisterPluginConfig pfnRegConfig = nullptr;
 
-static bool ResolveAPI()
+static bool ResolveAPI(HMODULE hInterposer)
 {
-    static const wchar_t* kCandidates[] = {
-        L"LANCommander.Interposer.dll",
-        L"version.dll",   // proxy variant
-    };
-
-    HMODULE hInterposer = nullptr;
-    for (const wchar_t* name : kCandidates)
-    {
-        hInterposer = GetModuleHandleW(name);
-        if (hInterposer) break;
-    }
-
-    if (!hInterposer) return false;
-
-    pfnLog       = (FnInterposerLog)            GetProcAddress(hInterposer, "InterposerLog");
-    pfnGetConfig = (FnInterposerGetConfigString)GetProcAddress(hInterposer, "InterposerGetConfigString");
+    pfnLog       = (FnInterposerLog)                 GetProcAddress(hInterposer, "InterposerLog");
+    pfnGetConfig = (FnInterposerGetConfigString)     GetProcAddress(hInterposer, "InterposerGetConfigString");
+    pfnRegConfig = (FnInterposerRegisterPluginConfig)GetProcAddress(hInterposer, "InterposerRegisterPluginConfig");
 
     return pfnLog && pfnGetConfig;
 }
@@ -59,6 +56,44 @@ static bool ResolveAPI()
 ## API Reference
 
 All exported functions use the `WINAPI` (`__stdcall`) calling convention and undecorated `extern "C"` names.
+
+### `InterposerRegisterPluginConfig`
+
+```cpp
+BOOL InterposerRegisterPluginConfig(const wchar_t* pluginName, const wchar_t* yamlDefaults);
+```
+
+Register default configuration for the plugin. `pluginName` is the key under `Plugins:` in `Config.yml` (e.g. `L"MyPlugin"`). `yamlDefaults` is a YAML map body defining default keys and values.
+
+If a `Plugins.<pluginName>` section already exists in `Config.yml`, the call is a no-op — user configuration is never overwritten. Otherwise the defaults are merged into the in-memory config (immediately queryable via `InterposerGetConfigString`) and appended to `Config.yml` on disk.
+
+```cpp
+if (pfnRegConfig)
+{
+    pfnRegConfig(L"MyPlugin",
+        L"Greeting: 'Hello!'\n"
+        L"Count: 42\n"
+        L"Enabled: true");
+}
+```
+
+After this call, `pfnGetConfig(L"Plugins.MyPlugin.Greeting", ...)` returns `"Hello!"` even if the user has never touched `Config.yml`. On the first run, `Config.yml` is updated to include:
+
+```yaml
+Plugins:
+  MyPlugin:
+    Greeting: Hello!
+    Count: 42
+    Enabled: true
+```
+
+Returns `TRUE` on success (or if the section already exists). Returns `FALSE` on error (bad YAML, file write failure).
+
+:::tip
+Call `InterposerRegisterPluginConfig` before reading any config values — it ensures defaults are always available.
+:::
+
+---
 
 ### `InterposerLog`
 
@@ -168,39 +203,42 @@ pfnSetBySuffix(L"Battlefield 1942\\ergc", L"@", generatedKey);
 #include <windows.h>
 #include <string>
 
-using FnInterposerLog             = void (WINAPI*)(const wchar_t*, const wchar_t*);
-using FnInterposerGetConfigString = BOOL (WINAPI*)(const wchar_t*, wchar_t*, DWORD);
+using FnInterposerLog                  = void (WINAPI*)(const wchar_t*, const wchar_t*);
+using FnInterposerGetConfigString      = BOOL (WINAPI*)(const wchar_t*, wchar_t*, DWORD);
+using FnInterposerRegisterPluginConfig = BOOL (WINAPI*)(const wchar_t*, const wchar_t*);
 
-static FnInterposerLog             pfnLog       = nullptr;
-static FnInterposerGetConfigString pfnGetConfig = nullptr;
+static FnInterposerLog                  pfnLog       = nullptr;
+static FnInterposerGetConfigString      pfnGetConfig = nullptr;
+static FnInterposerRegisterPluginConfig pfnRegConfig = nullptr;
 
-static void Initialize()
+extern "C" __declspec(dllexport) void WINAPI InterposerPluginInit(HMODULE hInterposer)
 {
-    HMODULE h = GetModuleHandleW(L"LANCommander.Interposer.dll");
-    if (!h) h = GetModuleHandleW(L"version.dll");
-    if (!h) return;
+    pfnLog       = (FnInterposerLog)                 GetProcAddress(hInterposer, "InterposerLog");
+    pfnGetConfig = (FnInterposerGetConfigString)     GetProcAddress(hInterposer, "InterposerGetConfigString");
+    pfnRegConfig = (FnInterposerRegisterPluginConfig)GetProcAddress(hInterposer, "InterposerRegisterPluginConfig");
 
-    pfnLog       = (FnInterposerLog)            GetProcAddress(h, "InterposerLog");
-    pfnGetConfig = (FnInterposerGetConfigString)GetProcAddress(h, "InterposerGetConfigString");
     if (!pfnLog || !pfnGetConfig) return;
 
-    wchar_t greeting[256] = L"hello";
+    // Register defaults — written to Config.yml on first run only.
+    if (pfnRegConfig)
+        pfnRegConfig(L"MyPlugin", L"Greeting: 'Plugin loaded successfully'");
+
+    // Read config (defaults are immediately available after registration).
+    wchar_t greeting[256] = {};
     pfnGetConfig(L"Plugins.MyPlugin.Greeting", greeting, ARRAYSIZE(greeting));
 
     pfnLog(L"MYPLUGIN", greeting);
 }
 
-BOOL APIENTRY DllMain(HMODULE, DWORD reason, LPVOID)
+BOOL APIENTRY DllMain(HMODULE, DWORD, LPVOID)
 {
-    if (reason == DLL_PROCESS_ATTACH)
-        Initialize();
     return TRUE;
 }
 ```
 
 ```yaml
-# .interposer\Config.yml
+# After first run, Config.yml automatically contains:
 Plugins:
   MyPlugin:
-    Greeting: "Plugin loaded successfully"
+    Greeting: Plugin loaded successfully
 ```

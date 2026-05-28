@@ -69,3 +69,58 @@ Plugins can update presence at runtime to show dynamic information like the curr
 The pattern is: call one or more setters to stage changes, then call `InterposerUpdatePresence` to push them. All functions are thread-safe (guarded by a mutex). `InterposerClearPresence` resets to the default values from `Config.yml` rather than blanking everything.
 
 See the [Rich Presence Plugin API](../Plugins/RichPresence) documentation for the full reference, including C/C++ type definitions and usage examples.
+
+### Plugin Init Entry Point
+
+Plugins no longer need to guess the Interposer's DLL name (which varies between `LANCommander.Interposer.dll`, `version.dll`, `dinput8.dll`, and `.asi` depending on the deployment variant). Instead, the Interposer calls an optional exported function on each plugin immediately after loading it:
+
+```cpp
+extern "C" __declspec(dllexport) void WINAPI InterposerPluginInit(HMODULE hInterposer);
+```
+
+The Interposer passes its own `HMODULE`, which the plugin uses for all `GetProcAddress` calls. This eliminates the name-guessing problem entirely and is now the recommended way to initialize a plugin. The old `DllMain` + `GetModuleHandle` approach still works for backwards compatibility.
+
+See the updated [Creating a Plugin](../Plugins/CreatingPlugins) guide for the full pattern.
+
+### Plugin Config Registration
+
+Plugins can now declare their default configuration at init time. The new `InterposerRegisterPluginConfig` export accepts a plugin name and a YAML string of default key-value pairs:
+
+```cpp
+using FnRegConfig = BOOL (WINAPI*)(const wchar_t* pluginName, const wchar_t* yamlDefaults);
+auto pfnRegConfig = (FnRegConfig)GetProcAddress(hInterposer, "InterposerRegisterPluginConfig");
+
+pfnRegConfig(L"MyPlugin", L"Setting: 'default'\nCount: 42");
+```
+
+On first run, the defaults are merged into the in-memory config and appended to `Config.yml` under `Plugins.<name>`. On subsequent runs, the user's existing configuration is preserved — registration is a no-op if the section already exists.
+
+This means plugin authors no longer need to document "add these lines to Config.yml" — the plugin populates its own defaults automatically, and users only need to edit the values they want to change.
+
+See the updated [Creating a Plugin](../Plugins/CreatingPlugins) guide and the [Plugin API reference](../Plugins/CreatingPlugins#interposerregisterpluginconfig) for details.
+
+### Expanded Logging
+
+Four new logging categories have been added:
+
+| Key | Default | Description |
+|---|---|---|
+| `Plugins` | `false` | Log plugin load, unload, error, and config registration events. |
+| `Identity` | `false` | Log identity override operations — when `GetUserNameW/A` or `GetComputerNameW/A` hooks return the configured override value. |
+| `RichPresence` | `false` | Log rich presence field changes, update pushes, and clear operations. |
+| `DnsRedirects` | `true` | Log DNS redirect matches. Enabled by default because DNS redirects are deliberate user-configured actions. Has its own toggle separate from `Network`. |
+
+Previously, plugin load/error events were gated behind `Logging.Files`, which was misleading — they now have their own dedicated `Logging.Plugins` toggle. DNS redirect logging was previously gated behind `Logging.Network` and now has its own dedicated flag.
+
+See the updated [Logging](../Logging) documentation for the full verb reference.
+
+### Example Plugin
+
+A new `LANCommander.Interposer.Plugin.Example` project is included in the solution as a minimal, well-commented reference for plugin authors. It demonstrates:
+
+- The `InterposerPluginInit` entry point pattern
+- Resolving API exports from the provided `HMODULE`
+- Registering default config with `InterposerRegisterPluginConfig`
+- Reading config values and logging
+
+The example project includes a ready-to-build `.vcxproj` and can be used as a starting point for new plugins.

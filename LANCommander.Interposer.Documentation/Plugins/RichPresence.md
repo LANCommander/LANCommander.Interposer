@@ -11,6 +11,8 @@ All exported functions use the C calling convention and UTF-8 strings. Resolve t
 
 ## Resolving the API
 
+Resolve the function pointers from the `HMODULE` passed to your `InterposerPluginInit` entry point:
+
 ```cpp
 using FnSetDetails     = void (*)(const char* details);
 using FnSetState       = void (*)(const char* state);
@@ -36,19 +38,19 @@ static FnSetName       pfnSetName       = nullptr;
 static FnUpdate        pfnUpdate        = nullptr;
 static FnClear         pfnClear         = nullptr;
 
-static bool ResolvePresenceAPI(HMODULE h)
+static bool ResolvePresenceAPI(HMODULE hInterposer)
 {
-    pfnSetDetails    = (FnSetDetails)   GetProcAddress(h, "InterposerSetPresenceDetails");
-    pfnSetState      = (FnSetState)     GetProcAddress(h, "InterposerSetPresenceState");
-    pfnSetTimestamps = (FnSetTimestamps)GetProcAddress(h, "InterposerSetPresenceTimestamps");
-    pfnSetLargeImage = (FnSetLargeImage)GetProcAddress(h, "InterposerSetPresenceLargeImage");
-    pfnSetSmallImage = (FnSetSmallImage)GetProcAddress(h, "InterposerSetPresenceSmallImage");
-    pfnSetParty      = (FnSetParty)     GetProcAddress(h, "InterposerSetPresenceParty");
-    pfnSetButton     = (FnSetButton)    GetProcAddress(h, "InterposerSetPresenceButton");
-    pfnSetType       = (FnSetType)      GetProcAddress(h, "InterposerSetPresenceType");
-    pfnSetName       = (FnSetName)      GetProcAddress(h, "InterposerSetPresenceName");
-    pfnUpdate        = (FnUpdate)       GetProcAddress(h, "InterposerUpdatePresence");
-    pfnClear         = (FnClear)        GetProcAddress(h, "InterposerClearPresence");
+    pfnSetDetails    = (FnSetDetails)   GetProcAddress(hInterposer, "InterposerSetPresenceDetails");
+    pfnSetState      = (FnSetState)     GetProcAddress(hInterposer, "InterposerSetPresenceState");
+    pfnSetTimestamps = (FnSetTimestamps)GetProcAddress(hInterposer, "InterposerSetPresenceTimestamps");
+    pfnSetLargeImage = (FnSetLargeImage)GetProcAddress(hInterposer, "InterposerSetPresenceLargeImage");
+    pfnSetSmallImage = (FnSetSmallImage)GetProcAddress(hInterposer, "InterposerSetPresenceSmallImage");
+    pfnSetParty      = (FnSetParty)     GetProcAddress(hInterposer, "InterposerSetPresenceParty");
+    pfnSetButton     = (FnSetButton)    GetProcAddress(hInterposer, "InterposerSetPresenceButton");
+    pfnSetType       = (FnSetType)      GetProcAddress(hInterposer, "InterposerSetPresenceType");
+    pfnSetName       = (FnSetName)      GetProcAddress(hInterposer, "InterposerSetPresenceName");
+    pfnUpdate        = (FnUpdate)       GetProcAddress(hInterposer, "InterposerUpdatePresence");
+    pfnClear         = (FnClear)        GetProcAddress(hInterposer, "InterposerClearPresence");
     return pfnUpdate && pfnClear;
 }
 ```
@@ -221,18 +223,14 @@ static FnSetParty      pfnSetParty      = nullptr;
 static FnUpdate        pfnUpdate        = nullptr;
 static FnClear         pfnClear         = nullptr;
 
-static void Initialize()
+extern "C" __declspec(dllexport) void WINAPI InterposerPluginInit(HMODULE hInterposer)
 {
-    HMODULE h = GetModuleHandleW(L"LANCommander.Interposer.dll");
-    if (!h) h = GetModuleHandleW(L"version.dll");
-    if (!h) return;
-
-    pfnSetDetails    = (FnSetDetails)   GetProcAddress(h, "InterposerSetPresenceDetails");
-    pfnSetState      = (FnSetState)     GetProcAddress(h, "InterposerSetPresenceState");
-    pfnSetTimestamps = (FnSetTimestamps)GetProcAddress(h, "InterposerSetPresenceTimestamps");
-    pfnSetParty      = (FnSetParty)     GetProcAddress(h, "InterposerSetPresenceParty");
-    pfnUpdate        = (FnUpdate)       GetProcAddress(h, "InterposerUpdatePresence");
-    pfnClear         = (FnClear)        GetProcAddress(h, "InterposerClearPresence");
+    pfnSetDetails    = (FnSetDetails)   GetProcAddress(hInterposer, "InterposerSetPresenceDetails");
+    pfnSetState      = (FnSetState)     GetProcAddress(hInterposer, "InterposerSetPresenceState");
+    pfnSetTimestamps = (FnSetTimestamps)GetProcAddress(hInterposer, "InterposerSetPresenceTimestamps");
+    pfnSetParty      = (FnSetParty)     GetProcAddress(hInterposer, "InterposerSetPresenceParty");
+    pfnUpdate        = (FnUpdate)       GetProcAddress(hInterposer, "InterposerUpdatePresence");
+    pfnClear         = (FnClear)        GetProcAddress(hInterposer, "InterposerClearPresence");
 
     if (!pfnUpdate) return;
 
@@ -257,12 +255,8 @@ void OnMapLoaded(const char* mapName, int playerCount, int maxPlayers)
     pfnUpdate();
 }
 
-BOOL APIENTRY DllMain(HMODULE, DWORD reason, LPVOID)
+BOOL APIENTRY DllMain(HMODULE, DWORD, LPVOID)
 {
-    if (reason == DLL_PROCESS_ATTACH)
-        Initialize();
-    if (reason == DLL_PROCESS_DETACH && pfnClear)
-        pfnClear();
     return TRUE;
 }
 ```
