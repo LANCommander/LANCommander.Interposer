@@ -155,6 +155,7 @@ namespace LANCommander.Interposer
 
         private NamedPipeServerStream _eventPipe;
         private CancellationTokenSource _eventCts;
+        private Task _eventPipeTask;
 
         private bool _disposed;
 
@@ -639,8 +640,8 @@ namespace LANCommander.Interposer
                 _computerNameMmf = CreateUtf8Mmf($"Local\\InterposerComputerName_{pid}", ComputerName, 512);
 
             // Create a named pipe for the injected DLL to send events back.
-            // The pipe must exist before the DLL is injected so it can connect
-            // during DLL_PROCESS_ATTACH.
+            // The pipe must be in a listening state before the DLL is injected
+            // so it can connect during DLL_PROCESS_ATTACH.
             var pipeName = $"InterposerEvents_{pid}";
             _eventPipe = new NamedPipeServerStream(
                 pipeName,
@@ -650,7 +651,11 @@ namespace LANCommander.Interposer
                 PipeOptions.Asynchronous);
 
             _eventCts = new CancellationTokenSource();
-            Task.Run(() => ReadEventPipeAsync(_eventCts.Token));
+
+            // Start WaitForConnectionAsync BEFORE returning so the pipe is in
+            // listening state when InjectDll triggers DllMain → ConnectEventPipe.
+            // The task continues reading in the background once a client connects.
+            _eventPipeTask = ReadEventPipeAsync(_eventCts.Token);
         }
 
         private static IntPtr CreateUtf8Mmf(string name, string value, uint size)
@@ -754,11 +759,19 @@ namespace LANCommander.Interposer
         // Private - named pipe event reader
         // =================================================================
 
+        /// <summary>
+        /// Fires when the pipe reader encounters a diagnostic condition (connection, disconnect, error).
+        /// Subscribe before calling <see cref="Start"/> to observe pipe lifecycle.
+        /// </summary>
+        public event EventHandler<string> PipeDiagnostic;
+
         private async Task ReadEventPipeAsync(CancellationToken ct)
         {
             try
             {
+                PipeDiagnostic?.Invoke(this, "Pipe: waiting for connection...");
                 await _eventPipe.WaitForConnectionAsync(ct).ConfigureAwait(false);
+                PipeDiagnostic?.Invoke(this, "Pipe: client connected.");
 
                 // Buffer for reading from the pipe. Messages are variable-length
                 // binary: int32 eventType, then 3x (int32 len + wchar[len]), then int32.
@@ -783,9 +796,18 @@ namespace LANCommander.Interposer
                     DispatchPipeEvent(eventType, field1, field2, field3, intField);
                 }
             }
-            catch (OperationCanceledException) { }
-            catch (IOException) { }
-            catch (ObjectDisposedException) { }
+            catch (OperationCanceledException)
+            {
+                PipeDiagnostic?.Invoke(this, "Pipe: cancelled.");
+            }
+            catch (IOException ex)
+            {
+                PipeDiagnostic?.Invoke(this, $"Pipe: IO error - {ex.Message}");
+            }
+            catch (ObjectDisposedException)
+            {
+                PipeDiagnostic?.Invoke(this, "Pipe: disposed.");
+            }
         }
 
         private static async Task<string> ReadPipeStringAsync(
