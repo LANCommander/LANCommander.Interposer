@@ -81,14 +81,8 @@ jobs:
 
       - name: Push to NuGet.org
         shell: pwsh
-        run: |
-          Get-ChildItem nupkg\*.nupkg | ForEach-Object {
-            dotnet nuget push $_.FullName --api-key ${{ secrets.NUGET_API_KEY }} --source https://api.nuget.org/v3/index.json --skip-duplicate
-          }
+        run: dotnet nuget push "nupkg\LANCommander.Interposer.${{ steps.version.outputs.version }}.nupkg" --api-key ${{ secrets.NUGET_API_KEY }} --source https://api.nuget.org/v3/index.json --skip-duplicate
 
       # - name: Push to GitHub Packages
       #   shell: pwsh
-      #   run: |
-      #     Get-ChildItem nupkg\*.nupkg | ForEach-Object {
-      #       dotnet nuget push $_.FullName --api-key ${{ secrets.GITHUB_TOKEN }} --source https://nuget.pkg.github.com/${{ github.repository_owner }}/index.json --skip-duplicate
-      #     }
+      #   run: dotnet nuget push "nupkg\LANCommander.Interposer.${{ steps.version.outputs.version }}.nupkg" --api-key ${{ secrets.GITHUB_TOKEN }} --source https://nuget.pkg.github.com/${{ github.repository_owner }}/index.json --skip-duplicate
