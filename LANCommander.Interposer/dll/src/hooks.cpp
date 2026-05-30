@@ -4,6 +4,7 @@
 #include "files.h"
 #include "identity.h"
 #include "network.h"
+#include "pipe_events.h"
 #include "plugins.h"
 #include "registry.h"
 #include "richpresence.h"
@@ -34,6 +35,8 @@ void InstallHooks()
 
     MH_EnableHook(MH_ALL_HOOKS);
 
+    ConnectEventPipe();
+
     InitRichPresence();
 
     LoadPlugins();
@@ -54,6 +57,7 @@ void OnLibraryLoaded(HMODULE hModule)
 
 void RemoveHooks()
 {
+    DisconnectEventPipe();
     UnloadPlugins();
     ShutdownRichPresence();
     RemoveRegistryHooks();

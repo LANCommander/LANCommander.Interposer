@@ -2,8 +2,11 @@ using System;
 using System.ComponentModel;
 using System.Diagnostics;
 using System.IO;
+using System.IO.Pipes;
 using System.Runtime.InteropServices;
 using System.Text;
+using System.Threading;
+using System.Threading.Tasks;
 using LANCommander.Interposer.Events;
 
 namespace LANCommander.Interposer
@@ -150,6 +153,9 @@ namespace LANCommander.Interposer
         private IntPtr _usernameMmf;
         private IntPtr _computerNameMmf;
 
+        private NamedPipeServerStream _eventPipe;
+        private CancellationTokenSource _eventCts;
+
         private bool _disposed;
 
         // =================================================================
@@ -181,33 +187,38 @@ namespace LANCommander.Interposer
         /// <summary>
         /// Fires on file operations: CreateFile, GetFileAttributes, FindFirstFile,
         /// Delete, Move, Copy, LoadLibrary.
-        /// Requires <see cref="EnableEvents"/> (in-process only).
+        /// Works cross-process via named pipe when using <see cref="Inject"/> or
+        /// <see cref="Start"/>, and in-process via <see cref="EnableEvents"/>.
         /// </summary>
         public event EventHandler<FileEventArgs> FileAccessed;
 
         /// <summary>
         /// Fires on registry operations: Open, Create, Query, Set, Delete, Enum.
-        /// Requires <see cref="EnableEvents"/> (in-process only).
+        /// Works cross-process via named pipe when using <see cref="Inject"/> or
+        /// <see cref="Start"/>, and in-process via <see cref="EnableEvents"/>.
         /// </summary>
         public event EventHandler<RegistryEventArgs> RegistryAccessed;
 
         /// <summary>
         /// Fires on DNS redirect events (when a hostname lookup matches a DnsRedirects rule).
-        /// Requires <see cref="EnableEvents"/> (in-process only).
+        /// Works cross-process via named pipe when using <see cref="Inject"/> or
+        /// <see cref="Start"/>, and in-process via <see cref="EnableEvents"/>.
         /// </summary>
         public event EventHandler<DnsEventArgs> DnsResolved;
 
         /// <summary>
         /// Fires when a new network address is discovered (connect, send/recv).
         /// Each unique address fires only once per session.
-        /// Requires <see cref="EnableEvents"/> (in-process only).
+        /// Works cross-process via named pipe when using <see cref="Inject"/> or
+        /// <see cref="Start"/>, and in-process via <see cref="EnableEvents"/>.
         /// </summary>
         public event EventHandler<NetworkEventArgs> NetworkConnection;
 
         /// <summary>
         /// Fires when GetUserName or GetComputerName is called and an identity
         /// override is active.
-        /// Requires <see cref="EnableEvents"/> (in-process only).
+        /// Works cross-process via named pipe when using <see cref="Inject"/> or
+        /// <see cref="Start"/>, and in-process via <see cref="EnableEvents"/>.
         /// </summary>
         public event EventHandler<IdentityEventArgs> IdentityQueried;
 
@@ -455,6 +466,19 @@ namespace LANCommander.Interposer
             if (_eventsEnabled)
                 DisableEvents();
 
+            if (_eventCts != null)
+            {
+                _eventCts.Cancel();
+                _eventCts.Dispose();
+                _eventCts = null;
+            }
+
+            if (_eventPipe != null)
+            {
+                _eventPipe.Dispose();
+                _eventPipe = null;
+            }
+
             CloseMmf(ref _fastDlMmf);
             CloseMmf(ref _usernameMmf);
             CloseMmf(ref _computerNameMmf);
@@ -613,6 +637,20 @@ namespace LANCommander.Interposer
 
             if (!string.IsNullOrEmpty(ComputerName))
                 _computerNameMmf = CreateUtf8Mmf($"Local\\InterposerComputerName_{pid}", ComputerName, 512);
+
+            // Create a named pipe for the injected DLL to send events back.
+            // The pipe must exist before the DLL is injected so it can connect
+            // during DLL_PROCESS_ATTACH.
+            var pipeName = $"InterposerEvents_{pid}";
+            _eventPipe = new NamedPipeServerStream(
+                pipeName,
+                PipeDirection.In,
+                1,
+                PipeTransmissionMode.Byte,
+                PipeOptions.Asynchronous);
+
+            _eventCts = new CancellationTokenSource();
+            Task.Run(() => ReadEventPipeAsync(_eventCts.Token));
         }
 
         private static IntPtr CreateUtf8Mmf(string name, string value, uint size)
@@ -709,6 +747,104 @@ namespace LANCommander.Interposer
             {
                 NativeMethods.CloseHandle(handle);
                 handle = IntPtr.Zero;
+            }
+        }
+
+        // =================================================================
+        // Private - named pipe event reader
+        // =================================================================
+
+        private async Task ReadEventPipeAsync(CancellationToken ct)
+        {
+            try
+            {
+                await _eventPipe.WaitForConnectionAsync(ct).ConfigureAwait(false);
+
+                // Buffer for reading from the pipe. Messages are variable-length
+                // binary: int32 eventType, then 3x (int32 len + wchar[len]), then int32.
+                var intBuf = new byte[4];
+
+                while (!ct.IsCancellationRequested && _eventPipe.IsConnected)
+                {
+                    if (!await ReadExactAsync(_eventPipe, intBuf, ct).ConfigureAwait(false))
+                        break;
+
+                    int eventType = BitConverter.ToInt32(intBuf, 0);
+
+                    string field1 = await ReadPipeStringAsync(_eventPipe, intBuf, ct).ConfigureAwait(false);
+                    string field2 = await ReadPipeStringAsync(_eventPipe, intBuf, ct).ConfigureAwait(false);
+                    string field3 = await ReadPipeStringAsync(_eventPipe, intBuf, ct).ConfigureAwait(false);
+
+                    if (!await ReadExactAsync(_eventPipe, intBuf, ct).ConfigureAwait(false))
+                        break;
+
+                    int intField = BitConverter.ToInt32(intBuf, 0);
+
+                    DispatchPipeEvent(eventType, field1, field2, field3, intField);
+                }
+            }
+            catch (OperationCanceledException) { }
+            catch (IOException) { }
+            catch (ObjectDisposedException) { }
+        }
+
+        private static async Task<string> ReadPipeStringAsync(
+            NamedPipeServerStream pipe, byte[] intBuf, CancellationToken ct)
+        {
+            if (!await ReadExactAsync(pipe, intBuf, ct).ConfigureAwait(false))
+                return null;
+
+            int charCount = BitConverter.ToInt32(intBuf, 0);
+
+            if (charCount <= 0)
+                return null;
+
+            var strBuf = new byte[charCount * 2]; // wchar_t = 2 bytes
+
+            if (!await ReadExactAsync(pipe, strBuf, ct).ConfigureAwait(false))
+                return null;
+
+            return Encoding.Unicode.GetString(strBuf);
+        }
+
+        private static async Task<bool> ReadExactAsync(
+            NamedPipeServerStream pipe, byte[] buffer, CancellationToken ct)
+        {
+            int offset = 0;
+
+            while (offset < buffer.Length)
+            {
+                int read = await pipe.ReadAsync(buffer, offset, buffer.Length - offset, ct)
+                    .ConfigureAwait(false);
+
+                if (read == 0)
+                    return false; // pipe closed
+
+                offset += read;
+            }
+
+            return true;
+        }
+
+        private void DispatchPipeEvent(int eventType, string field1, string field2, string field3, int intField)
+        {
+            switch (eventType)
+            {
+                case 1: // FILE
+                    FileAccessed?.Invoke(this, new FileEventArgs(field1, field2, field3));
+                    break;
+                case 2: // REGISTRY
+                    RegistryAccessed?.Invoke(this, new RegistryEventArgs(field1, field2, field3));
+                    break;
+                case 3: // DNS
+                    DnsResolved?.Invoke(this, new DnsEventArgs(field1, field2));
+                    break;
+                case 4: // NETWORK
+                    NetworkConnection?.Invoke(this, new NetworkEventArgs(field1, intField));
+                    break;
+                case 5: // IDENTITY
+                    IdentityQueried?.Invoke(this, new IdentityEventArgs(field1, field2));
+                    break;
             }
         }
 

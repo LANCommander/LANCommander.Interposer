@@ -1,4 +1,5 @@
 #include "callbacks.h"
+#include "pipe_events.h"
 #include <atomic>
 
 // ---------------------------------------------------------------------------
@@ -47,28 +48,33 @@ void FireFileCallback(const wchar_t* verb, const wchar_t* path, const wchar_t* s
 {
     auto cb = g_fileCallback.load(std::memory_order_acquire);
     if (cb) cb(verb, path, secondaryPath);
+    SendPipeEvent(PIPE_EVENT_FILE, verb, path, secondaryPath);
 }
 
 void FireRegistryCallback(const wchar_t* verb, const wchar_t* keyPath, const wchar_t* valueName)
 {
     auto cb = g_registryCallback.load(std::memory_order_acquire);
     if (cb) cb(verb, keyPath, valueName);
+    SendPipeEvent(PIPE_EVENT_REGISTRY, verb, keyPath, valueName);
 }
 
 void FireDnsCallback(const wchar_t* hostname, const wchar_t* redirectedHostname)
 {
     auto cb = g_dnsCallback.load(std::memory_order_acquire);
     if (cb) cb(hostname, redirectedHostname);
+    SendPipeEvent(PIPE_EVENT_DNS, hostname, redirectedHostname);
 }
 
 void FireNetworkCallback(const wchar_t* address, int port)
 {
     auto cb = g_networkCallback.load(std::memory_order_acquire);
     if (cb) cb(address, port);
+    SendPipeEvent(PIPE_EVENT_NETWORK, address, nullptr, nullptr, port);
 }
 
 void FireIdentityCallback(const wchar_t* type, const wchar_t* value)
 {
     auto cb = g_identityCallback.load(std::memory_order_acquire);
     if (cb) cb(type, value);
+    SendPipeEvent(PIPE_EVENT_IDENTITY, type, value);
 }
