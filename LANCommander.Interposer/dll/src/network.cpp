@@ -10,6 +10,7 @@
 #include <vector>
 
 #include "network.h"
+#include "callbacks.h"
 #include "config.h"
 #include "fastdl.h"
 
@@ -215,6 +216,8 @@ static void OnHostDiscovered(const std::wstring& host, int gameServerPort = -1)
         if (g_fastdlProbeConnections && g_fastdlEnabled)
             g_discoveredAddresses.push_back({ host, gameServerPort });
     }
+
+    FireNetworkCallback(host.c_str(), gameServerPort > 0 ? gameServerPort : 0);
 
     if (gameServerPort > 0)
     {

@@ -394,6 +394,7 @@
   </ItemGroup>
 
   <ItemGroup>
+    <ClCompile Include="dll\src\callbacks.cpp" />
     <ClCompile Include="dll\src\config.cpp" />
     <ClCompile Include="dll\src\proxy.cpp" />
     <ClCompile Include="dll\src\proxy_dinput8.cpp" />
@@ -410,6 +411,7 @@
   </ItemGroup>
 
   <ItemGroup>
+    <ClInclude Include="dll\src\callbacks.h" />
     <ClInclude Include="dll\src\config.h" />
     <ClInclude Include="dll\src\fastdl.h" />
     <ClInclude Include="dll\src\files.h" />

@@ -1,4 +1,5 @@
 #include "config.h"
+#include "callbacks.h"
 
 #include <mutex>
 #include <shared_mutex>
@@ -265,6 +266,8 @@ static void WriteLogLine(const wchar_t* verb, const wchar_t* a, const wchar_t* b
 
 void LogFileAccess(const wchar_t* verb, const wchar_t* sourcePath, const wchar_t* redirectionPath)
 {
+    FireFileCallback(verb, sourcePath, redirectionPath);
+
     if (!g_logFiles)
         return;
 
@@ -273,6 +276,8 @@ void LogFileAccess(const wchar_t* verb, const wchar_t* sourcePath, const wchar_t
 
 void LogRegistryAccess(const wchar_t* verb, const wchar_t* keyPath, const wchar_t* valueName)
 {
+    FireRegistryCallback(verb, keyPath, valueName);
+
     if (!g_logRegistry)
         return;
 
@@ -331,6 +336,8 @@ void LogNetworkAccess(const wchar_t* verb, const wchar_t* address, const wchar_t
 
 void LogDnsRedirect(const wchar_t* fromHost, const wchar_t* toHost)
 {
+    FireDnsCallback(fromHost, toHost);
+
     if (!g_logDnsRedirects)
         return;
 

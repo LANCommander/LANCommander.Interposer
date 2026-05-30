@@ -1,0 +1,55 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFrameworks>net8.0;net9.0;net10.0</TargetFrameworks>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <LangVersion>latest</LangVersion>
+    <RootNamespace>LANCommander.Interposer</RootNamespace>
+    <AssemblyName>LANCommander.Interposer.NET</AssemblyName>
+    <GenerateDocumentationFile>true</GenerateDocumentationFile>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+  </PropertyGroup>
+
+  <PropertyGroup>
+    <IsPackable>true</IsPackable>
+    <PackageId>LANCommander.Interposer</PackageId>
+    <Title>LANCommander.Interposer.NET</Title>
+    <Authors>pathartl</Authors>
+    <Owners>pathartl</Owners>
+    <Company>LANCommander</Company>
+    <Copyright>Copyright © LANCommander</Copyright>
+    <Description>.NET bindings for LANCommander Interposer; inject the hook DLL into game processes, manage runtime overrides (username, computer name, FastDL URL), and call Interposer plugin APIs (logging, config, virtual registry, rich presence) from managed code.</Description>
+    <PackageTags>lancommander;interposer;game;hook;injection;dll;registry;modding</PackageTags>
+    <PackageLicenseExpression>MIT</PackageLicenseExpression>
+    <PackageProjectUrl>https://github.com/LANCommander/LANCommander.Interposer</PackageProjectUrl>
+    <RepositoryUrl>https://github.com/LANCommander/LANCommander.Interposer</RepositoryUrl>
+    <RepositoryType>git</RepositoryType>
+    <PackageIcon>icon.png</PackageIcon>
+    <PackageReadmeFile>README.md</PackageReadmeFile>
+    <IncludeSymbols>true</IncludeSymbols>
+    <SymbolPackageFormat>snupkg</SymbolPackageFormat>
+
+    <!-- Version: set by CI from git tag, defaults to 0.0.0-local for dev builds -->
+    <Version>0.0.0-local</Version>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <None Include="icon.png" Pack="true" PackagePath="\" />
+    <None Include="README.md" Pack="true" PackagePath="\" />
+  </ItemGroup>
+
+  <!-- Native Interposer DLLs embedded in the package. CI populates the runtimes/
+       directory before pack; local dev builds work without them (injection
+       requires an explicit dllPath or the DLL next to the app). -->
+  <ItemGroup Condition="Exists('runtimes')">
+    <None Include="runtimes\win-x64\native\**" Pack="true" PackagePath="runtimes\win-x64\native" />
+    <None Include="runtimes\win-x86\native\**" Pack="true" PackagePath="runtimes\win-x86\native" />
+  </ItemGroup>
+
+  <!-- MSBuild targets that copy the native DLL to the consumer's output directory -->
+  <ItemGroup>
+    <None Include="buildTransitive\**" Pack="true" PackagePath="buildTransitive" />
+  </ItemGroup>
+
+</Project>

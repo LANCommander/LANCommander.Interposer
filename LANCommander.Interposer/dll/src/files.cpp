@@ -1,4 +1,5 @@
 #include "files.h"
+#include "callbacks.h"
 #include "config.h"
 #include "fastdl.h"
 #include "hooks.h"

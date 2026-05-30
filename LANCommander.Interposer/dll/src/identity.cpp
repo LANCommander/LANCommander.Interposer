@@ -5,6 +5,7 @@
 #include <string>
 
 #include "identity.h"
+#include "callbacks.h"
 #include "config.h"
 
 // ---------------------------------------------------------------------------
@@ -80,6 +81,7 @@ static BOOL WINAPI HookGetUserNameW(LPWSTR lpBuffer, LPDWORD pcbBuffer)
     wmemcpy(lpBuffer, g_username.c_str(), needed);
     *pcbBuffer = needed;
 
+    FireIdentityCallback(L"USERNAME", g_username.c_str());
     LogIdentityAccess(L"IDENTITY", (L"GetUserNameW -> " + g_username).c_str());
 
     return TRUE;
@@ -113,6 +115,7 @@ static BOOL WINAPI HookGetUserNameA(LPSTR lpBuffer, LPDWORD pcbBuffer)
         lpBuffer, static_cast<int>(*pcbBuffer), nullptr, nullptr);
     *pcbBuffer = needed;
 
+    FireIdentityCallback(L"USERNAME", g_username.c_str());
     LogIdentityAccess(L"IDENTITY", (L"GetUserNameA -> " + g_username).c_str());
 
     return TRUE;
@@ -149,6 +152,7 @@ static BOOL WINAPI HookGetComputerNameW(LPWSTR lpBuffer, LPDWORD nSize)
     wmemcpy(lpBuffer, g_computername.c_str(), needed);
     *nSize = nameLength; // success: count without null terminator
 
+    FireIdentityCallback(L"COMPUTERNAME", g_computername.c_str());
     LogIdentityAccess(L"IDENTITY", (L"GetComputerNameW -> " + g_computername).c_str());
 
     return TRUE;
@@ -183,6 +187,7 @@ static BOOL WINAPI HookGetComputerNameA(LPSTR lpBuffer, LPDWORD nSize)
         lpBuffer, static_cast<int>(*nSize), nullptr, nullptr);
     *nSize = nameLength; // success: count without null terminator
 
+    FireIdentityCallback(L"COMPUTERNAME", g_computername.c_str());
     LogIdentityAccess(L"IDENTITY", (L"GetComputerNameA -> " + g_computername).c_str());
 
     return TRUE;

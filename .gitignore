@@ -1,14 +1,18 @@
 # ── Build output ──────────────────────────────────────────────────────────────
 # Top-level MSBuild platform/configuration directories
 x64/
+x86/
 Win32/
+Debug/
 Release/
 Release Proxy/
 Release ASI/
 
 # Per-project intermediate directories
 **/x64/
+**/x86/
 **/Win32/
+**/Debug/
 **/Release/
 **/Release Proxy/
 **/Release ASI/
@@ -41,6 +45,21 @@ vcpkg_installed_x86/
 pkg/
 *.zip
 *.lcx
+
+# ── .NET ──────────────────────────────────────────────────────────────────────
+bin/
+obj/
+*.nupkg
+*.snupkg
+nupkg/
+**/runtimes/
+
+# ── Test output ───────────────────────────────────────────────────────────────
+test_out.txt
+test_err.txt
+
+# ── Syncthing conflicts ──────────────────────────────────────────────────────
+*.sync-conflict-*
 
 # ── Generated ─────────────────────────────────────────────────────────────────
 version_info.h

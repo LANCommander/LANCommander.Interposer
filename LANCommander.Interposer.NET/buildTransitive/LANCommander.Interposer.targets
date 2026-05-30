@@ -1,0 +1,15 @@
+<Project xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+  <!-- Copy the native Interposer DLL matching the consumer's platform to the output directory. -->
+  <ItemGroup Condition="'$(PlatformTarget)' == 'x86' Or '$(RuntimeIdentifier)' == 'win-x86'">
+    <None Include="$(MSBuildThisFileDirectory)..\runtimes\win-x86\native\LANCommander.Interposer.dll"
+          Condition="Exists('$(MSBuildThisFileDirectory)..\runtimes\win-x86\native\LANCommander.Interposer.dll')"
+          CopyToOutputDirectory="PreserveNewest"
+          Link="LANCommander.Interposer.dll" />
+  </ItemGroup>
+  <ItemGroup Condition="'$(PlatformTarget)' != 'x86' And '$(RuntimeIdentifier)' != 'win-x86'">
+    <None Include="$(MSBuildThisFileDirectory)..\runtimes\win-x64\native\LANCommander.Interposer.dll"
+          Condition="Exists('$(MSBuildThisFileDirectory)..\runtimes\win-x64\native\LANCommander.Interposer.dll')"
+          CopyToOutputDirectory="PreserveNewest"
+          Link="LANCommander.Interposer.dll" />
+  </ItemGroup>
+</Project>
