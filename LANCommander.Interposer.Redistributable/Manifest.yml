@@ -1,23 +1,353 @@
 Id: 2180362b-b469-4cbc-be5d-9d0baae164a4
 Name: LANCommander Interposer
-Description: A collection of Windows API compatibility shims
-ReleasedOn: {BuildDate}
+Version: '{VersionTag}'
+Description: Windows API compatibility shim for LAN play - identity overrides, virtual registry, file and DNS redirection, network adapter filtering, FastDL, and rich presence
+Notes: |
+  The Interposer is a DLL that is loaded into the game process and hooks a
+  number of Windows APIs so that older LAN titles behave correctly on modern
+  machines and on a shared LAN.
+
+  Pick a load method under the Loader options:
+
+    Proxy    - installs version.dll next to the game executable. Most games
+               implicitly load version.dll at startup, so nothing else is
+               needed. Try this first.
+    DInput8  - installs dinput8.dll instead. Use this when the game already
+               ships its own version.dll, or when a mod loader has claimed it.
+    ASI      - installs LANCommander.Interposer.asi. Only works when the game
+               already has an ASI loader (Ultimate ASI Loader, ScriptHookV,
+               etc.) installed.
+
+  Architecture defaults to Auto, which reads the PE header of the game's
+  primary executable. Override it if the primary action points at a launcher
+  with different bitness than the game itself.
+
+  Every remaining option is written into .interposer\Config.yml next to the
+  DLL when the redistributable is installed. Changing options on the server
+  requires reinstalling the game for them to take effect.
+ReleasedOn: '{BuildDate}'
+ManifestVersion: 2.0.1
 Archives:
-- Id: {ArchiveGUID}
-  Changelog: 
-  ObjectKey: {ObjectKeyGUID}
-  Version: {VersionTag}
+- Id: '{ArchiveGUID}'
+  Changelog: ''
+  ObjectKey: '{ObjectKeyGUID}'
+  Version: '{VersionTag}'
   CompressedSize: {CompressedSize}
   UncompressedSize: {UncompressedSize}
 Scripts:
+- Id: 0cd54620-c27c-4ba8-b304-365637d214fa
+  Type: DetectInstall
+  Name: Detect Install
+  Description: Always reports not installed - the shim is installed per-game, next to the game executable
+  RequiresAdmin: false
+  Platforms: Windows
 - Id: e4e0c4da-36a5-4a6f-9d35-727d4b1e42e1
   Type: Install
-  Name: Install Script
-  Description: 
+  Name: Install
+  Description: Copies the selected Interposer build next to the game executable and renders the Interposer config from the configured options
   RequiresAdmin: false
+  Platforms: Windows
 - Id: eed8c097-3886-473a-9c2f-194b64ba9e36
   Type: NameChange
-  Name: Name Change Script
-  Description: 
+  Name: Name Change
+  Description: Updates Player.Username in the Interposer config
   RequiresAdmin: false
-ManifestVersion: 2.0.1
+  Platforms: Windows
+- Id: aa917bc3-60e9-4eee-9443-cb85e394c908
+  Type: Uninstall
+  Name: Uninstall
+  Description: Removes the Interposer DLL and the .interposer directory from the game
+  RequiresAdmin: false
+  Platforms: Windows
+OptionSchema: |
+  Options:
+    Loader:
+      DisplayName: Loader
+      Description: How the Interposer DLL gets loaded by the game
+      Options:
+        Method:
+          Type: choice
+          DisplayName: Load Method
+          Description: Which build of the shim to install next to the game executable
+          Default: "Proxy"
+          Choices:
+            - { Value: "Proxy", DisplayName: "version.dll proxy" }
+            - { Value: "DInput8", DisplayName: "dinput8.dll proxy" }
+            - { Value: "ASI", DisplayName: "ASI plugin (requires an ASI loader)" }
+        Architecture:
+          Type: choice
+          DisplayName: Architecture
+          Description: Auto reads the PE header of the game's primary executable
+          Default: "Auto"
+          Choices:
+            - "Auto"
+            - "x86"
+            - "x64"
+        TargetDirectory:
+          Type: string
+          DisplayName: Target Directory
+          Description: Where to install the DLL, relative to the game's install directory. Leave blank to use the folder containing the primary executable.
+
+    Player:
+      DisplayName: Player
+      Description: Identity values reported back to the game
+      Options:
+        Username:
+          Type: string
+          DisplayName: Username
+          Description: Value returned from GetUserName. Leave blank to return the real Windows username. Overwritten by the player's LANCommander alias.
+        ComputerName:
+          Type: string
+          DisplayName: Computer Name
+          Description: Value returned from GetComputerName. Leave blank to return the real Windows computer name.
+
+    Logging:
+      DisplayName: Logging
+      Description: Written to a new session log under the Interposer Logs directory
+      Options:
+        Files:
+          Type: bool
+          DisplayName: File Access
+          Description: Log file open and attribute operations
+          Default: "false"
+        Registry:
+          Type: bool
+          DisplayName: Registry Access
+          Description: Log registry open, read, write, and delete operations
+          Default: "false"
+        Downloads:
+          Type: bool
+          DisplayName: Downloads
+          Description: Log FastDL downloads
+          Default: "true"
+        Plugins:
+          Type: bool
+          DisplayName: Plugins
+          Description: Log plugin load, unload, and config registration events
+          Default: "false"
+        Identity:
+          Type: bool
+          DisplayName: Identity
+          Description: Log GetUserName and GetComputerName hook invocations
+          Default: "false"
+        RichPresence:
+          Type: bool
+          DisplayName: Rich Presence
+          Description: Log rich presence field changes, pushes, and clears
+          Default: "false"
+        DnsRedirects:
+          Type: bool
+          DisplayName: DNS Redirects
+          Description: Log DNS redirect matches
+          Default: "true"
+        Network:
+          Type: bool
+          DisplayName: Network
+          Description: Log server connection and DNS events, plus adapter enumeration
+          Default: "false"
+
+    FileRedirects:
+      Type: list
+      DisplayName: File Redirects
+      Description: Redirect file paths at the CreateFile and GetFileAttributes level. The first matching rule wins.
+      Fields:
+        Pattern:
+          Type: string
+          DisplayName: Pattern
+          Description: Case-insensitive ECMAScript regex matched against the full file path
+        Replacement:
+          Type: string
+          DisplayName: Replacement
+          Description: Target path. Supports regex capture groups and environment variable expansion.
+
+    DnsRedirects:
+      Type: list
+      DisplayName: DNS Redirects
+      Description: Redirect hostname lookups at the resolver level. The first matching rule wins.
+      Fields:
+        Pattern:
+          Type: string
+          DisplayName: Pattern
+          Description: Case-insensitive ECMAScript regex matched against the hostname. Partial matches count, so anchor the pattern for exact hosts.
+        Replacement:
+          Type: string
+          DisplayName: Replacement
+          Description: Hostname or IP literal passed to the real resolver. Supports regex capture groups.
+
+    NetworkAdapters:
+      DisplayName: Network Adapters
+      Description: Allow-list controlling which adapters the game sees. An adapter is kept if it matches any filter below.
+      Options:
+        Enabled:
+          Type: bool
+          DisplayName: Enabled
+          Description: Apply the filters below. No-op when all three lists are empty.
+          Default: "false"
+        Subnets:
+          Type: list
+          ItemType: string
+          DisplayName: Subnets
+          Description: IPv4 CIDR ranges, for example 192.168.1.0/24. Applies to every covered enumeration API.
+        Names:
+          Type: list
+          ItemType: string
+          DisplayName: Names
+          Description: Case-insensitive ECMAScript regex matched against the adapter friendly name and description. Applies to iphlpapi only.
+        MACs:
+          Type: list
+          ItemType: string
+          DisplayName: MAC Addresses
+          Description: Physical addresses, colon- or dash-separated. Applies to iphlpapi only.
+
+    FastDL:
+      DisplayName: FastDL
+      Description: Fetch missing game content over HTTP
+      Options:
+        Enabled:
+          Type: bool
+          DisplayName: Enabled
+          Default: "false"
+        BaseUrl:
+          Type: string
+          DisplayName: Base URL
+          Description: Root URL of the FastDL HTTP server, trailing slash required. Leave blank to rely on connection probing.
+        ProbeConnections:
+          Type: bool
+          DisplayName: Probe Connections
+          Description: Collect server addresses the game connects to and probe them for a FastDL endpoint at the first download
+          Default: "false"
+        ProbePort:
+          Type: int
+          DisplayName: Probe Port
+          Description: HTTP port used when probing discovered addresses
+          Default: "80"
+        ProbePath:
+          Type: string
+          DisplayName: Probe Path
+          Description: HTTP path sent in the HEAD probe. A 200 response means FastDL is available.
+          Default: "/"
+        ProbeTimeout:
+          Type: int
+          DisplayName: Probe Timeout
+          Description: Per-probe timeout in milliseconds covering resolve, connect, send, and receive
+          Default: "2000"
+        FilteredPorts:
+          Type: list
+          DisplayName: Filtered Ports
+          Description: Server port ranges to ignore when collecting addresses for auto-discovery. Clear this list to disable all filtering.
+          Fields:
+            Min:
+              Type: int
+              DisplayName: Min
+              Default: "23000"
+            Max:
+              Type: int
+              DisplayName: Max
+              Default: "23009"
+          Default:
+            - { Min: 23000, Max: 23009 }
+        AllowedExtensions:
+          Type: list
+          ItemType: string
+          DisplayName: Allowed Extensions
+          Description: File extensions eligible for download, for example .pk3 or .bsp. The leading dot is optional. Leave empty to allow all types.
+        UseDownloadDirectory:
+          Type: bool
+          DisplayName: Use Download Directory
+          Description: Write downloads to an overlay directory instead of overwriting game files
+          Default: "true"
+        DownloadDirectory:
+          Type: string
+          DisplayName: Download Directory
+          Description: Override the download path. Relative paths resolve against the DLL directory. Blank uses the Interposer Downloads directory.
+        BlockSensitiveFiles:
+          Type: bool
+          DisplayName: Block Sensitive Files
+          Description: Prevent FastDL from overwriting the Interposer DLL, the game executable, and Interposer config files
+          Default: "true"
+        Paths:
+          Type: list
+          DisplayName: Paths
+          Description: Maps local directory prefixes to URL sub-paths under the base URL. Only files beneath a configured prefix are eligible.
+          Fields:
+            Local:
+              Type: string
+              DisplayName: Local
+              Description: Absolute path to a local directory
+            Remote:
+              Type: string
+              DisplayName: Remote
+              Description: Sub-path appended to the base URL before the relative file path. Leave blank to map directly under the base URL.
+
+    RichPresence:
+      DisplayName: Rich Presence
+      Description: Default activity pushed as soon as the Interposer loads. Plugins may override individual fields at runtime.
+      Options:
+        Type:
+          Type: choice
+          DisplayName: Activity Type
+          Default: "0"
+          Choices:
+            - { Value: "0", DisplayName: "Playing" }
+            - { Value: "1", DisplayName: "Streaming" }
+            - { Value: "2", DisplayName: "Listening" }
+            - { Value: "3", DisplayName: "Watching" }
+            - { Value: "5", DisplayName: "Competing" }
+        Name:
+          Type: string
+          DisplayName: Name
+          Description: Display name shown after the activity verb
+        Details:
+          Type: string
+          DisplayName: Details
+          Description: First detail line displayed under the activity name
+        DetailsUrl:
+          Type: string
+          DisplayName: Details URL
+        State:
+          Type: string
+          DisplayName: State
+          Description: Second detail line, for example In a match
+        StateUrl:
+          Type: string
+          DisplayName: State URL
+        LargeImage:
+          Type: string
+          DisplayName: Large Image
+          Description: Asset key or URL for the large image
+        LargeImageText:
+          Type: string
+          DisplayName: Large Image Text
+        SmallImage:
+          Type: string
+          DisplayName: Small Image
+          Description: Asset key or URL for the small image
+        SmallImageText:
+          Type: string
+          DisplayName: Small Image Text
+        Button1Text:
+          Type: string
+          DisplayName: Button 1 Text
+          Description: Max 32 characters on Discord
+        Button1Url:
+          Type: string
+          DisplayName: Button 1 URL
+        Button2Text:
+          Type: string
+          DisplayName: Button 2 Text
+          Description: Max 32 characters on Discord
+        Button2Url:
+          Type: string
+          DisplayName: Button 2 URL
+        Discord:
+          DisplayName: Discord
+          Options:
+            Enabled:
+              Type: bool
+              DisplayName: Enabled
+              Description: Connect to the local Discord IPC pipe
+              Default: "false"
+            ApplicationId:
+              Type: string
+              DisplayName: Application ID
+              Description: Discord application ID from the Developer Portal. Required for asset keys and the application name to resolve.
