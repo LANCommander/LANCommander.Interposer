@@ -145,6 +145,26 @@ jobs:
           Copy-Item -Recurse $sampleDir "$d\x86\"
           Compress-Archive -Path "$d\x86\*" -DestinationPath "LANCommander.Interposer.ASI.$version.x86.zip"
 
+      - name: Create redistributable payload ZIP
+        shell: pwsh
+        run: |
+          $version = '${{ github.ref_name }}'
+
+          # Single payload carrying every load method for both architectures.
+          # The redistributable's install script picks one based on the
+          # Loader.Method / Loader.Architecture options and renders
+          # .interposer\Config.yml itself, so no sample config is included.
+          $d = 'pkg\redistributable'
+
+          foreach ($arch in @('x64', 'x86')) {
+            New-Item -ItemType Directory -Force "$d\$arch" | Out-Null
+            Copy-Item "Release\Proxy\$arch\version.dll"                      "$d\$arch\"
+            Copy-Item "Release\ProxyDInput8\$arch\dinput8.dll"               "$d\$arch\"
+            Copy-Item "Release\ASI\$arch\LANCommander.Interposer.asi"        "$d\$arch\"
+          }
+
+          Compress-Archive -Path "$d\*" -DestinationPath "LANCommander.Interposer.Redistributable.$version.zip"
+
       - name: Create Plugin CDKey ZIPs
         shell: pwsh
         run: |
@@ -160,7 +180,7 @@ jobs:
           Copy-Item 'Release\CDKey\x86\LANCommander.Interposer.Plugin.CDKey.dll' "$d\"
           Compress-Archive -Path "$d\*" -DestinationPath "LANCommander.Interposer.Plugin.CDKey.$version.x86.zip"
 
-      - name: Create LCX packages
+      - name: Create LCX package
         shell: pwsh
         run: |
           Add-Type -AssemblyName System.IO.Compression.FileSystem
@@ -168,54 +188,55 @@ jobs:
           $version   = '${{ github.ref_name }}'
           $buildDate = (Get-Date -Format 'yyyy-MM-ddTHH:mm:ssZ')
           $redistDir = 'LANCommander.Interposer.Redistributable'
+          $zipPath   = "LANCommander.Interposer.Redistributable.$version.zip"
+          $outPath   = "LANCommander.Interposer.$version.lcx"
 
-          function New-LcxPackage {
-            param([string]$ZipPath, [string]$OutPath)
+          $archiveGuid   = [guid]::NewGuid().ToString()
+          $objectKeyGuid = [guid]::NewGuid().ToString()
 
-            $archiveGuid   = [guid]::NewGuid().ToString()
-            $objectKeyGuid = [guid]::NewGuid().ToString()
+          # Measure sizes
+          $compressedSize   = (Get-Item $zipPath).Length
+          $uncompressedSize = 0
+          $zf = [System.IO.Compression.ZipFile]::OpenRead((Resolve-Path $zipPath).Path)
+          foreach ($e in $zf.Entries) { $uncompressedSize += $e.Length }
+          $zf.Dispose()
 
-            # Measure sizes
-            $compressedSize   = (Get-Item $ZipPath).Length
-            $uncompressedSize = 0
-            $zf = [System.IO.Compression.ZipFile]::OpenRead($ZipPath)
-            foreach ($e in $zf.Entries) { $uncompressedSize += $e.Length }
-            $zf.Dispose()
+          # Substitute variables in Manifest.yml
+          $manifest = (Get-Content "$redistDir\Manifest.yml" -Raw) `
+            -replace '\{BuildDate\}',       $buildDate `
+            -replace '\{ArchiveGUID\}',      $archiveGuid `
+            -replace '\{ObjectKeyGUID\}',    $objectKeyGuid `
+            -replace '\{VersionTag\}',       $version `
+            -replace '\{CompressedSize\}',   $compressedSize `
+            -replace '\{UncompressedSize\}', $uncompressedSize
 
-            # Substitute variables in Manifest.yml
-            $manifest = (Get-Content "$redistDir\Manifest.yml" -Raw) `
-              -replace '\{BuildDate\}',       $buildDate `
-              -replace '\{ArchiveGUID\}',      $archiveGuid `
-              -replace '\{ObjectKeyGUID\}',    $objectKeyGuid `
-              -replace '\{VersionTag\}',       $version `
-              -replace '\{CompressedSize\}',   $compressedSize `
-              -replace '\{UncompressedSize\}', $uncompressedSize
+          # LANCommander's importer looks up Archives/<Archive.Id> and
+          # Scripts/<Script.Id> -- bare GUIDs, no file extension. Anything else
+          # imports as an empty script or a missing archive.
+          $tmp = 'lcx_tmp'
+          New-Item -ItemType Directory -Force "$tmp\Archives" | Out-Null
+          New-Item -ItemType Directory -Force "$tmp\Scripts"  | Out-Null
 
-            # Assemble LCX contents in a temp directory
-            $tmp = "lcx_tmp_$archiveGuid"
-            New-Item -ItemType Directory -Force "$tmp\Archives" | Out-Null
-            Set-Content "$tmp\Manifest.yml" $manifest -Encoding UTF8NoBOM
+          Set-Content "$tmp\Manifest.yml" $manifest -Encoding UTF8NoBOM
 
-            # Copy any extra files from the redistributable directory
-            Get-ChildItem $redistDir -Exclude 'Manifest.yml' | ForEach-Object {
-              Copy-Item $_.FullName $tmp -Recurse
-            }
+          $scripts = Get-ChildItem "$redistDir\Scripts" -Filter '*.ps1'
+          $scripts | ForEach-Object { Copy-Item $_.FullName "$tmp\Scripts\$($_.BaseName)" }
 
-            # Embed the ZIP as Archives/{ObjectKeyGUID}
-            Copy-Item $ZipPath "$tmp\Archives\$objectKeyGuid"
+          Copy-Item $zipPath "$tmp\Archives\$archiveGuid"
 
-            Compress-Archive -Path "$tmp\*" -DestinationPath $OutPath
-            Remove-Item -Recurse -Force $tmp
-          }
+          Compress-Archive -Path "$tmp\*" -DestinationPath $outPath
+          Remove-Item -Recurse -Force $tmp
 
-          New-LcxPackage "LANCommander.Interposer.$version.x86.zip"       "LANCommander.Interposer.$version.x86.lcx"
-          New-LcxPackage "LANCommander.Interposer.Proxy.$version.x86.zip" "LANCommander.Interposer.Proxy.$version.x86.lcx"
-          New-LcxPackage "LANCommander.Interposer.ASI.$version.x86.zip"              "LANCommander.Interposer.ASI.$version.x86.lcx"
-          New-LcxPackage "LANCommander.Interposer.Proxy.DInput8.$version.x86.zip" "LANCommander.Interposer.Proxy.DInput8.$version.x86.lcx"
-          New-LcxPackage "LANCommander.Interposer.$version.x64.zip"               "LANCommander.Interposer.$version.x64.lcx"
-          New-LcxPackage "LANCommander.Interposer.Proxy.$version.x64.zip"         "LANCommander.Interposer.Proxy.$version.x64.lcx"
-          New-LcxPackage "LANCommander.Interposer.ASI.$version.x64.zip"           "LANCommander.Interposer.ASI.$version.x64.lcx"
-          New-LcxPackage "LANCommander.Interposer.Proxy.DInput8.$version.x64.zip" "LANCommander.Interposer.Proxy.DInput8.$version.x64.lcx"
+          # Guard against the layout drifting again
+          $expected = @('Manifest.yml', "Archives/$archiveGuid") + ($scripts | ForEach-Object { "Scripts/$($_.BaseName)" })
+          $zf = [System.IO.Compression.ZipFile]::OpenRead((Resolve-Path $outPath).Path)
+          $names = @($zf.Entries | ForEach-Object { $_.FullName })
+          $zf.Dispose()
+
+          $missing = $expected | Where-Object { $names -notcontains $_ }
+          if ($missing) { throw "LCX is missing expected entries: $($missing -join ', ')" }
+
+          Write-Host "LCX entries: $($names -join ', ')"
 
       - name: Create GitHub release
         uses: softprops/action-gh-release@v2
