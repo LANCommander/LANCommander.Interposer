@@ -5,6 +5,10 @@
 #include <shared_mutex>
 #include <string>
 #include <vector>
+#include <array>
+#include <cctype>
+#include <cstdint>
+#include <cstdio>
 #include <yaml-cpp/yaml.h>
 
 // ---------------------------------------------------------------------------
@@ -36,6 +40,12 @@ bool         g_logDnsRedirects = true;
 bool         g_logNetwork      = false;
 
 std::vector<DnsRedirect> g_dnsRedirects;
+
+bool                            g_naEnabled    = false;
+bool                            g_naAnyFilters = false;
+std::vector<SubnetFilter>       g_naSubnets;
+std::vector<std::wregex>        g_naNames;
+std::vector<std::array<BYTE,6>> g_naMacs;
 
 // Rich presence
 bool        g_rpDiscordEnabled         = false;
@@ -96,6 +106,69 @@ static std::wstring Utf8ToWide(const std::string& s)
     std::wstring out(len - 1, L'\0');
     MultiByteToWideChar(CP_UTF8, 0, s.c_str(), -1, out.data(), len);
     return out;
+}
+
+// ---------------------------------------------------------------------------
+// ParseCidr — parse "A.B.C.D/N" (or bare "A.B.C.D", implying /32) into a
+// host-order network+mask. Parsing the dotted quad by hand yields host order
+// directly, so no winsock dependency or ntohl is needed here. Returns false on
+// malformed input.
+// ---------------------------------------------------------------------------
+static bool ParseCidr(const std::string& cidr, SubnetFilter& out)
+{
+    std::string ipPart = cidr;
+    int prefix = 32;
+
+    size_t slash = cidr.find('/');
+    if (slash != std::string::npos)
+    {
+        ipPart = cidr.substr(0, slash);
+        try { prefix = std::stoi(cidr.substr(slash + 1)); }
+        catch (...) { return false; }
+    }
+    if (prefix < 0 || prefix > 32)
+        return false;
+
+    unsigned a = 0, b = 0, c = 0, d = 0;
+    if (sscanf_s(ipPart.c_str(), "%u.%u.%u.%u", &a, &b, &c, &d) != 4)
+        return false;
+    if (a > 255 || b > 255 || c > 255 || d > 255)
+        return false;
+
+    const uint32_t host = (a << 24) | (b << 16) | (c << 8) | d;
+    const uint32_t mask = (prefix == 0) ? 0u : (0xFFFFFFFFu << (32 - prefix));
+    out.network = host & mask;
+    out.mask    = mask;
+    return true;
+}
+
+// ---------------------------------------------------------------------------
+// ParseMac — parse a 6-octet physical address. Accepts colon- or dash-separated
+// (or any non-hex separators); case-insensitive. Returns false unless exactly 6
+// octets are read.
+// ---------------------------------------------------------------------------
+static bool ParseMac(const std::string& s, std::array<BYTE, 6>& out)
+{
+    int n = 0;
+    const char* p = s.c_str();
+    while (*p && n < 6)
+    {
+        if (!isxdigit(static_cast<unsigned char>(*p))) { ++p; continue; }
+
+        unsigned value = 0;
+        int digits = 0;
+        while (*p && isxdigit(static_cast<unsigned char>(*p)) && digits < 2)
+        {
+            const char ch = *p++;
+            const unsigned hv = (ch <= '9')
+                ? static_cast<unsigned>(ch - '0')
+                : static_cast<unsigned>(tolower(static_cast<unsigned char>(ch)) - 'a' + 10);
+            value = (value << 4) | hv;
+            ++digits;
+        }
+        out[n++] = static_cast<BYTE>(value);
+    }
+    return n == 6;
 }
 
 // ---------------------------------------------------------------------------
@@ -869,6 +942,51 @@ void LoadConfig()
                 catch (const std::regex_error&) { /* skip malformed patterns */ }
             }
         }
+    }
+
+    // ── NetworkAdapters ─────────────────────────────────────────────────────────
+    if (YAML::Node na = root["NetworkAdapters"])
+    {
+        if (na["Enabled"])
+            g_naEnabled = na["Enabled"].as<bool>(false);
+
+        if (YAML::Node subnets = na["Subnets"]; subnets && subnets.IsSequence())
+        {
+            for (const auto& item : subnets)
+            {
+                SubnetFilter f{};
+                if (ParseCidr(item.as<std::string>(""), f))
+                    g_naSubnets.push_back(f);
+            }
+        }
+
+        if (YAML::Node names = na["Names"]; names && names.IsSequence())
+        {
+            for (const auto& item : names)
+            {
+                std::string pat = item.as<std::string>("");
+                if (pat.empty())
+                    continue;
+                try
+                {
+                    g_naNames.emplace_back(Utf8ToWide(pat),
+                        std::regex_constants::ECMAScript | std::regex_constants::icase);
+                }
+                catch (const std::regex_error&) { /* skip malformed patterns */ }
+            }
+        }
+
+        if (YAML::Node macs = na["MACs"]; macs && macs.IsSequence())
+        {
+            for (const auto& item : macs)
+            {
+                std::array<BYTE, 6> m{};
+                if (ParseMac(item.as<std::string>(""), m))
+                    g_naMacs.push_back(m);
+            }
+        }
+
+        g_naAnyFilters = !g_naSubnets.empty() || !g_naNames.empty() || !g_naMacs.empty();
     }
 
     // ── fastDL ────────────────────────────────────────────────────────────────

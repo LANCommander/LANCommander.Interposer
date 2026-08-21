@@ -3,11 +3,19 @@
 #include <windows.h>
 #include <winsock2.h>
 #include <ws2tcpip.h>
+#include <ws2ipdef.h>
+#include <mstcpip.h>
+#include <iphlpapi.h>
 #include <MinHook.h>
 #include <mutex>
 #include <set>
 #include <string>
 #include <vector>
+#include <array>
+#include <cstdint>
+#include <cstring>
+#include <cstdio>
+#include <cwchar>
 
 #include "network.h"
 #include "callbacks.h"
@@ -32,6 +40,12 @@ using FnSend           = int(WSAAPI*)(SOCKET, const char*, int, int);
 using FnWSASend        = int(WSAAPI*)(SOCKET, LPWSABUF, DWORD, LPDWORD, DWORD, LPWSAOVERLAPPED, LPWSAOVERLAPPED_COMPLETION_ROUTINE);
 using FnRecv           = int(WSAAPI*)(SOCKET, char*, int, int);
 using FnWSARecv        = int(WSAAPI*)(SOCKET, LPWSABUF, DWORD, LPDWORD, LPDWORD, LPWSAOVERLAPPED, LPWSAOVERLAPPED_COMPLETION_ROUTINE);
+using FnWSAIoctl       = int(WSAAPI*)(SOCKET, DWORD, LPVOID, DWORD, LPVOID, DWORD, LPDWORD, LPWSAOVERLAPPED, LPWSAOVERLAPPED_COMPLETION_ROUTINE);
+
+// iphlpapi adapter-enumeration trampolines (resolved by name; iphlpapi.lib is
+// intentionally NOT linked).
+using FnGetAdaptersInfo      = DWORD(WINAPI*)(PIP_ADAPTER_INFO, PULONG);
+using FnGetAdaptersAddresses = ULONG(WINAPI*)(ULONG, ULONG, PVOID, PIP_ADAPTER_ADDRESSES, PULONG);
 
 // ws2_32 trampolines
 static FnGetAddrInfo   g_origGetAddrInfo    = nullptr;
@@ -49,6 +63,10 @@ static FnSend          g_origSend          = nullptr;
 static FnWSASend       g_origWSASend       = nullptr;
 static FnRecv          g_origRecv          = nullptr;
 static FnWSARecv       g_origWSARecv       = nullptr;
+static FnWSAIoctl      g_origWSAIoctl      = nullptr;
+
+static FnGetAdaptersInfo      g_origGetAdaptersInfo      = nullptr;
+static FnGetAdaptersAddresses g_origGetAdaptersAddresses = nullptr;
 
 // wsock32 trampolines (separate entries; on modern Windows wsock32 forwards to
 // ws2_32 internally, but games linked directly against wsock32 call these
@@ -190,6 +208,92 @@ static bool IsPortFiltered(int port)
             return true;
 
     return false;
+}
+
+// ---------------------------------------------------------------------------
+// Network adapter filtering (NetworkAdapters config) — allow-list helpers.
+// An adapter is KEPT if it matches ANY populated criterion. When no filter is
+// configured the feature is inert.
+// ---------------------------------------------------------------------------
+static inline bool NaActive() { return g_naEnabled && g_naAnyFilters; }
+
+// The adapter-enumeration hooks are needed when filtering is active OR when
+// network logging is on (so every enumeration request can be logged even with
+// no filters configured).
+static inline bool AdapterHooksWanted() { return NaActive() || g_logNetwork; }
+
+// ipHostOrder: an IPv4 address already in HOST byte order.
+static bool SubnetMatch(uint32_t ipHostOrder)
+{
+    for (const auto& s : g_naSubnets)
+        if ((ipHostOrder & s.mask) == s.network)
+            return true;
+    return false;
+}
+
+// in_addr / sin_addr store IPv4 in network byte order; convert before comparing.
+static bool SubnetMatchInAddr(const in_addr& a)
+{
+    return SubnetMatch(ntohl(a.s_addr));
+}
+
+static bool NameMatch(const wchar_t* name)
+{
+    if (!name || !name[0]) return false;
+    try
+    {
+        const std::wstring s(name);
+        for (const auto& re : g_naNames)
+            if (std::regex_search(s, re))
+                return true;
+    }
+    catch (const std::regex_error&) { /* pathological input — treat as no match */ }
+    return false;
+}
+
+static bool MacMatch(const BYTE* addr, size_t len)
+{
+    if (!addr || len != 6) return false;
+    for (const auto& m : g_naMacs)
+        if (memcmp(m.data(), addr, 6) == 0)
+            return true;
+    return false;
+}
+
+// Returns true when a gethostbyname argument refers to the local machine:
+// null/empty, or case-insensitively equal to the gethostname() result.
+static bool IsLocalHostName(const char* name)
+{
+    if (!name || name[0] == '\0') return true;
+    char host[256]{};
+    if (gethostname(host, sizeof(host)) != 0) return false;
+    return _stricmp(name, host) == 0;
+}
+
+// Compact a hostent's IPv4 h_addr_list in place, keeping only addresses that
+// match a configured subnet. The hostent lives in Winsock per-thread storage, so
+// rewriting the pointer array is thread-safe. To avoid crashing callers that
+// dereference h_addr_list[0] without a null check, the list is left untouched
+// when zero addresses would survive. Only the subnet filter applies here.
+static void FilterHostentAddrs(hostent* he)
+{
+    if (!he || !he->h_addr_list) return;
+    if (he->h_addrtype != AF_INET || he->h_length != 4) return;
+
+    char** list = he->h_addr_list;
+
+    int kept = 0;
+    for (int r = 0; list[r] != nullptr; ++r)
+        if (SubnetMatchInAddr(*reinterpret_cast<const in_addr*>(list[r])))
+            ++kept;
+
+    if (kept == 0) return; // emptying the list risks crashing naive callers
+
+    int w = 0;
+    for (int r = 0; list[r] != nullptr; ++r)
+        if (SubnetMatchInAddr(*reinterpret_cast<const in_addr*>(list[r])))
+            list[w++] = list[r];
+    list[w] = nullptr;
 }
 
 // ---------------------------------------------------------------------------
@@ -487,6 +591,9 @@ static hostent* WSAAPI HookGetHostByName2(const char* name)
     if (ret && name && name[0] != '\0')
         OnHostDiscovered(AnsiToWide(name));
 
+    if (ret && NaActive() && IsLocalHostName(name))
+        FilterHostentAddrs(ret);
+
     return ret;
 }
 
@@ -608,6 +715,9 @@ static hostent* WSAAPI HookGetHostByName(const char* name)
     if (ret && name && name[0] != '\0')
         OnHostDiscovered(AnsiToWide(name));
 
+    if (ret && NaActive() && IsLocalHostName(name))
+        FilterHostentAddrs(ret);
+
     return ret;
 }
 
@@ -667,13 +777,206 @@ static int WSAAPI HookRecv32(SOCKET s, char* buf, int len, int flags)
 }
 
 // ---------------------------------------------------------------------------
+// Adapter enumeration filtering — iphlpapi (GetAdaptersInfo,
+// GetAdaptersAddresses) and ws2_32 (WSAIoctl SIO_GET_INTERFACE_LIST).
+//
+// The original APIs fill a caller-owned buffer as one contiguous block. We only
+// rewrite pointers/compact arrays in place — never free or allocate. For the
+// linked-list APIs the head pointer is passed by value and cannot be redirected,
+// so when the first node is hidden we promote the first survivor's contents into
+// the head slot via a shallow struct copy (embedded/pointed-to sub-structures
+// live elsewhere in the same buffer and stay valid).
+// ---------------------------------------------------------------------------
+
+// KEEP test for one IP_ADAPTER_INFO node (IPv4 only).
+static bool KeepAdapterInfo(const IP_ADAPTER_INFO* p)
+{
+    for (const IP_ADDR_STRING* a = &p->IpAddressList; a; a = a->Next)
+    {
+        in_addr v{};
+        if (InetPtonA(AF_INET, a->IpAddress.String, &v) == 1 && v.s_addr != 0)
+            if (SubnetMatchInAddr(v))
+                return true;
+    }
+    if (MacMatch(p->Address, p->AddressLength))
+        return true;
+    if (NameMatch(AnsiToWide(p->Description).c_str()))
+        return true;
+    if (NameMatch(AnsiToWide(p->AdapterName).c_str()))
+        return true;
+    return false;
+}
+
+// KEEP test for one IP_ADAPTER_ADDRESSES node (IPv4 subnet; name/MAC).
+static bool KeepAdapterAddresses(const IP_ADAPTER_ADDRESSES* p)
+{
+    for (const IP_ADAPTER_UNICAST_ADDRESS* u = p->FirstUnicastAddress; u; u = u->Next)
+    {
+        const SOCKET_ADDRESS& sa = u->Address;
+        if (sa.lpSockaddr && sa.lpSockaddr->sa_family == AF_INET)
+        {
+            const auto* in4 = reinterpret_cast<const sockaddr_in*>(sa.lpSockaddr);
+            if (SubnetMatchInAddr(in4->sin_addr))
+                return true;
+        }
+        // AF_INET6 ignored for subnet matching (IPv4 subnets only).
+    }
+    if (MacMatch(p->PhysicalAddress, p->PhysicalAddressLength))
+        return true;
+    if (NameMatch(p->FriendlyName))
+        return true;
+    if (NameMatch(p->Description))
+        return true;
+    return false;
+}
+
+static DWORD WINAPI HookGetAdaptersInfo(PIP_ADAPTER_INFO pAdapterInfo, PULONG pOutBufLen)
+{
+    const DWORD ret = g_origGetAdaptersInfo(pAdapterInfo, pOutBufLen);
+
+    if (g_logNetwork)
+        LogNetworkAccess(L"ADAPTER ENUM", L"GetAdaptersInfo", nullptr);
+
+    if (!NaActive() || ret != ERROR_SUCCESS || !pAdapterInfo)
+        return ret;
+
+    IP_ADAPTER_INFO* prev = nullptr;
+    IP_ADAPTER_INFO* cur  = pAdapterInfo;
+    IP_ADAPTER_INFO* head = pAdapterInfo;
+
+    while (cur)
+    {
+        IP_ADAPTER_INFO* next = cur->Next;
+        if (KeepAdapterInfo(cur))
+        {
+            prev = cur;
+        }
+        else
+        {
+            if (prev) prev->Next = next;
+            else      head = next;
+            if (g_logNetwork)
+                LogNetworkAccess(L"ADAPTER HIDE", AnsiToWide(cur->Description).c_str(), nullptr);
+        }
+        cur = next;
+    }
+
+    if (!head)
+        return ERROR_NO_DATA;        // all hidden — the API's documented empty result
+    if (head != pAdapterInfo)
+        *pAdapterInfo = *head;       // promote first survivor into the head slot
+
+    return ret;
+}
+
+static ULONG WINAPI HookGetAdaptersAddresses(
+    ULONG Family, ULONG Flags, PVOID Reserved,
+    PIP_ADAPTER_ADDRESSES pAddresses, PULONG pOutBufLen)
+{
+    const ULONG ret = g_origGetAdaptersAddresses(Family, Flags, Reserved, pAddresses, pOutBufLen);
+
+    if (g_logNetwork)
+        LogNetworkAccess(L"ADAPTER ENUM", L"GetAdaptersAddresses", nullptr);
+
+    if (!NaActive() || ret != ERROR_SUCCESS || !pAddresses)
+        return ret;
+
+    IP_ADAPTER_ADDRESSES* prev = nullptr;
+    IP_ADAPTER_ADDRESSES* cur  = pAddresses;
+    IP_ADAPTER_ADDRESSES* head = pAddresses;
+
+    while (cur)
+    {
+        IP_ADAPTER_ADDRESSES* next = cur->Next;
+        if (KeepAdapterAddresses(cur))
+        {
+            prev = cur;
+        }
+        else
+        {
+            if (prev) prev->Next = next;
+            else      head = next;
+            if (g_logNetwork)
+                LogNetworkAccess(L"ADAPTER HIDE", cur->FriendlyName ? cur->FriendlyName : L"", nullptr);
+        }
+        cur = next;
+    }
+
+    if (!head)
+        return ERROR_NO_DATA;
+    if (head != pAddresses)
+        *pAddresses = *head;
+
+    return ret;
+}
+
+// WSAIoctl SIO_GET_INTERFACE_LIST — compact the INTERFACE_INFO[] array in place
+// and adjust the returned byte count. Only act on a synchronous, successful call.
+static int WSAAPI HookWSAIoctl(
+    SOCKET s, DWORD dwIoControlCode,
+    LPVOID lpvInBuffer, DWORD cbInBuffer,
+    LPVOID lpvOutBuffer, DWORD cbOutBuffer,
+    LPDWORD lpcbBytesReturned,
+    LPWSAOVERLAPPED lpOverlapped,
+    LPWSAOVERLAPPED_COMPLETION_ROUTINE lpCompletionRoutine)
+{
+    const int ret = g_origWSAIoctl(s, dwIoControlCode, lpvInBuffer, cbInBuffer,
+        lpvOutBuffer, cbOutBuffer, lpcbBytesReturned, lpOverlapped, lpCompletionRoutine);
+
+    if (dwIoControlCode == SIO_GET_INTERFACE_LIST && g_logNetwork)
+        LogNetworkAccess(L"ADAPTER ENUM", L"WSAIoctl SIO_GET_INTERFACE_LIST", nullptr);
+
+    if (ret != 0 || !NaActive() ||
+        dwIoControlCode != SIO_GET_INTERFACE_LIST ||
+        lpOverlapped != nullptr ||
+        !lpvOutBuffer || !lpcbBytesReturned)
+        return ret;
+
+    const DWORD count = *lpcbBytesReturned / static_cast<DWORD>(sizeof(INTERFACE_INFO));
+    if (count == 0)
+        return ret;
+
+    INTERFACE_INFO* arr = reinterpret_cast<INTERFACE_INFO*>(lpvOutBuffer);
+    DWORD w = 0;
+    for (DWORD r = 0; r < count; ++r)
+    {
+        const sockaddr_in& a = arr[r].iiAddress.AddressIn;
+        if (a.sin_family == AF_INET && SubnetMatchInAddr(a.sin_addr))
+        {
+            if (w != r) arr[w] = arr[r];
+            ++w;
+        }
+    }
+    *lpcbBytesReturned = w * static_cast<DWORD>(sizeof(INTERFACE_INFO));
+    return ret;
+}
+
+// ---------------------------------------------------------------------------
 // Public API
 // ---------------------------------------------------------------------------
+
+// Install the iphlpapi adapter-enumeration hooks. Safe to call repeatedly
+// (MH_ERROR_ALREADY_CREATED is ignored by LogHookInit). MH_ERROR_MODULE_NOT_FOUND
+// at startup means iphlpapi.dll wasn't loaded yet — OnLibraryLoaded retries later
+// via LateInstallNetworkHooks.
+static void InstallAdapterHooks()
+{
+    LogHookInit(L"iphlpapi.dll", "GetAdaptersInfo",
+        MH_CreateHookApi(L"iphlpapi.dll", "GetAdaptersInfo",
+            reinterpret_cast<LPVOID>(HookGetAdaptersInfo),
+            reinterpret_cast<LPVOID*>(&g_origGetAdaptersInfo)));
+
+    LogHookInit(L"iphlpapi.dll", "GetAdaptersAddresses",
+        MH_CreateHookApi(L"iphlpapi.dll", "GetAdaptersAddresses",
+            reinterpret_cast<LPVOID>(HookGetAdaptersAddresses),
+            reinterpret_cast<LPVOID*>(&g_origGetAdaptersAddresses)));
+}
+
 void InstallNetworkHooks()
 {
-    if (!g_logNetwork && !g_fastdlProbeConnections && g_dnsRedirects.empty())
+    if (!g_logNetwork && !g_fastdlProbeConnections && g_dnsRedirects.empty() && !NaActive())
     {
-        InterposerLog(L"HOOK INIT", L"network hooks skipped (Logging.Network, FastDL.ProbeConnections, DnsRedirects all unset)");
+        InterposerLog(L"HOOK INIT", L"network hooks skipped (Logging.Network, FastDL.ProbeConnections, DnsRedirects, NetworkAdapters all unset)");
         return;
     }
 
@@ -752,6 +1055,12 @@ void InstallNetworkHooks()
             reinterpret_cast<LPVOID>(HookWSARecv),
             reinterpret_cast<LPVOID*>(&g_origWSARecv)));
 
+    // WSAIoctl — used by SIO_GET_INTERFACE_LIST adapter enumeration.
+    LogHookInit(L"ws2_32", "WSAIoctl",
+        MH_CreateHookApi(L"ws2_32", "WSAIoctl",
+            reinterpret_cast<LPVOID>(HookWSAIoctl),
+            reinterpret_cast<LPVOID*>(&g_origWSAIoctl)));
+
     // wsock32 — older games (Winsock 1) link against this DLL directly.
     // gethostbyname is wsock32-only; connect/send*/recv* share signatures with
     // ws2_32 but need separate trampolines so MinHook patches the right exports.
@@ -785,12 +1094,25 @@ void InstallNetworkHooks()
         MH_CreateHookApi(L"wsock32", "recv",
             reinterpret_cast<LPVOID>(HookRecv32),
             reinterpret_cast<LPVOID*>(&g_origRecv32)));
+
+    // iphlpapi adapter-enumeration hooks — installed when adapter filtering is
+    // active OR network logging is on (to log every enumeration request).
+    // iphlpapi.dll may not be loaded yet at inject time; OnLibraryLoaded retries.
+    if (AdapterHooksWanted())
+        InstallAdapterHooks();
 }
 
 void LateInstallNetworkHooks(const wchar_t* moduleName)
 {
-    if (!g_logNetwork && !g_fastdlProbeConnections && g_dnsRedirects.empty())
+    if (!g_logNetwork && !g_fastdlProbeConnections && g_dnsRedirects.empty() && !NaActive())
         return;
+
+    if (AdapterHooksWanted() && _wcsicmp(moduleName, L"iphlpapi.dll") == 0)
+    {
+        InstallAdapterHooks();
+        MH_EnableHook(MH_ALL_HOOKS);
+        return;
+    }
 
     if (_wcsicmp(moduleName, L"wsock32.dll") != 0)
         return;
@@ -856,4 +1178,102 @@ void RemoveNetworkHooks()
     g_seenHosts.clear();
     g_discoveredAddresses.clear();
     g_probedCount = 0;
+}
+
+// ---------------------------------------------------------------------------
+// Unified adapter enumeration export — see network.h for the contract. Returns
+// the same allowed/hidden decision the hooks use (KeepAdapterAddresses) so the
+// enumeration and the filtering can never disagree.
+// ---------------------------------------------------------------------------
+extern "C" __declspec(dllexport) DWORD InterposerEnumNetworkAdapters(
+    InterposerNetworkAdapter* buffer, DWORD capacity, DWORD* outCount)
+{
+    if (outCount)
+        *outCount = 0;
+
+    // Prefer the installed trampoline; otherwise resolve dynamically so this
+    // works even when adapter filtering is disabled (no hook installed) without
+    // ever statically importing iphlpapi.lib.
+    FnGetAdaptersAddresses getAddrs = g_origGetAdaptersAddresses;
+    HMODULE iphlp = nullptr;
+    if (!getAddrs)
+    {
+        iphlp = LoadLibraryW(L"iphlpapi.dll");
+        if (iphlp)
+            getAddrs = reinterpret_cast<FnGetAdaptersAddresses>(
+                reinterpret_cast<void*>(GetProcAddress(iphlp, "GetAdaptersAddresses")));
+    }
+    if (!getAddrs)
+    {
+        if (iphlp) FreeLibrary(iphlp);
+        return 0;
+    }
+
+    // Query into a buffer that grows on ERROR_BUFFER_OVERFLOW.
+    std::vector<BYTE> buf(16 * 1024);
+    ULONG size = static_cast<ULONG>(buf.size());
+    ULONG ret = 0;
+    for (int attempt = 0; attempt < 4; ++attempt)
+    {
+        size = static_cast<ULONG>(buf.size());
+        ret = getAddrs(AF_UNSPEC, 0, nullptr,
+            reinterpret_cast<PIP_ADAPTER_ADDRESSES>(buf.data()), &size);
+        if (ret == ERROR_BUFFER_OVERFLOW)
+        {
+            buf.resize(size);
+            continue;
+        }
+        break;
+    }
+
+    DWORD total = 0;
+    if (ret == ERROR_SUCCESS)
+    {
+        const auto* head = reinterpret_cast<const IP_ADAPTER_ADDRESSES*>(buf.data());
+        for (const IP_ADAPTER_ADDRESSES* p = head; p; p = p->Next)
+        {
+            if (total < capacity && buffer)
+            {
+                InterposerNetworkAdapter& out = buffer[total];
+                ZeroMemory(&out, sizeof(out));
+
+                if (p->FriendlyName)
+                    wcsncpy_s(out.friendlyName, p->FriendlyName, _TRUNCATE);
+                if (p->Description)
+                    wcsncpy_s(out.description, p->Description, _TRUNCATE);
+
+                if (p->PhysicalAddressLength == 6)
+                    swprintf_s(out.macAddress, L"%02X:%02X:%02X:%02X:%02X:%02X",
+                        p->PhysicalAddress[0], p->PhysicalAddress[1], p->PhysicalAddress[2],
+                        p->PhysicalAddress[3], p->PhysicalAddress[4], p->PhysicalAddress[5]);
+
+                for (const IP_ADAPTER_UNICAST_ADDRESS* u = p->FirstUnicastAddress; u; u = u->Next)
+                {
+                    const SOCKET_ADDRESS& sa = u->Address;
+                    if (!sa.lpSockaddr) continue;
+                    if (sa.lpSockaddr->sa_family == AF_INET && out.ipv4Address[0] == L'\0')
+                    {
+                        const auto* in4 = reinterpret_cast<const sockaddr_in*>(sa.lpSockaddr);
+                        InetNtopW(AF_INET, const_cast<IN_ADDR*>(&in4->sin_addr),
+                            out.ipv4Address, ARRAYSIZE(out.ipv4Address));
+                    }
+                    else if (sa.lpSockaddr->sa_family == AF_INET6 && out.ipv6Address[0] == L'\0')
+                    {
+                        const auto* in6 = reinterpret_cast<const sockaddr_in6*>(sa.lpSockaddr);
+                        InetNtopW(AF_INET6, const_cast<IN6_ADDR*>(&in6->sin6_addr),
+                            out.ipv6Address, ARRAYSIZE(out.ipv6Address));
+                    }
+                }
+
+                out.allowed = (NaActive() && !KeepAdapterAddresses(p)) ? 0 : 1;
+            }
+            ++total;
+        }
+    }
+
+    if (outCount)
+        *outCount = (total < capacity) ? total : capacity;
+    if (iphlp)
+        FreeLibrary(iphlp);
+    return total;
 }

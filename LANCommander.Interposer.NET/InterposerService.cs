@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 using System.ComponentModel;
 using System.Diagnostics;
 using System.IO;
@@ -99,6 +100,25 @@ namespace LANCommander.Interposer
 
         [DllImport(DllName, CallingConvention = CallingConvention.Cdecl)]
         private static extern void InterposerClearPresence();
+
+        // =================================================================
+        // P/Invoke - Network adapter enumeration
+        // =================================================================
+
+        [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
+        private struct NativeNetworkAdapter
+        {
+            [MarshalAs(UnmanagedType.ByValTStr, SizeConst = 256)] public string FriendlyName;
+            [MarshalAs(UnmanagedType.ByValTStr, SizeConst = 256)] public string Description;
+            [MarshalAs(UnmanagedType.ByValTStr, SizeConst = 24)]  public string MacAddress;
+            [MarshalAs(UnmanagedType.ByValTStr, SizeConst = 16)]  public string Ipv4Address;
+            [MarshalAs(UnmanagedType.ByValTStr, SizeConst = 46)]  public string Ipv6Address;
+            public int Allowed;
+        }
+
+        [DllImport(DllName, CallingConvention = CallingConvention.Cdecl)]
+        private static extern uint InterposerEnumNetworkAdapters(
+            [Out] NativeNetworkAdapter[] buffer, uint capacity, out uint outCount);
 
         // =================================================================
         // P/Invoke - Callback registration
@@ -557,6 +577,48 @@ namespace LANCommander.Interposer
         public uint SetRegistryValueBySuffix(string keySuffix, string valueName, string value)
         {
             return InterposerSetRegistryValueBySuffix(keySuffix, valueName, value);
+        }
+
+        // =================================================================
+        // Network adapter enumeration (in-process only)
+        // =================================================================
+
+        /// <summary>
+        /// Enumerates the machine's network adapters, including each adapter's
+        /// allowed/hidden status under the current NetworkAdapters filter. This is
+        /// the canonical adapter list shared with the native filtering logic, so the
+        /// <see cref="NetworkAdapterInfo.Allowed"/> flag always matches what the
+        /// hooks expose to the game. In-process only.
+        /// </summary>
+        public IReadOnlyList<NetworkAdapterInfo> EnumerateNetworkAdapters()
+        {
+            uint written;
+            uint total = InterposerEnumNetworkAdapters(null, 0, out written);
+
+            if (total == 0)
+                return Array.Empty<NetworkAdapterInfo>();
+
+            var buffer = new NativeNetworkAdapter[total];
+            uint got = InterposerEnumNetworkAdapters(buffer, total, out written);
+
+            uint count = Math.Min(written, (uint)buffer.Length);
+            var result = new NetworkAdapterInfo[count];
+
+            for (uint i = 0; i < count; i++)
+            {
+                var n = buffer[i];
+                result[i] = new NetworkAdapterInfo
+                {
+                    FriendlyName = n.FriendlyName,
+                    Description = n.Description,
+                    MacAddress = n.MacAddress,
+                    IPv4Address = n.Ipv4Address,
+                    IPv6Address = n.Ipv6Address,
+                    Allowed = n.Allowed != 0,
+                };
+            }
+
+            return result;
         }
 
         // =================================================================

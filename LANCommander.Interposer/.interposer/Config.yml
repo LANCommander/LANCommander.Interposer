@@ -137,6 +137,48 @@ FileRedirects: []
 DnsRedirects: []
 
 # ---------------------------------------------------------------------------
+# NetworkAdapters
+#
+# Controls which network adapters the game is allowed to see when it enumerates
+# them. Many games naively pick the first adapter Windows reports, which breaks
+# LAN play when a VPN / Hamachi / virtual adapter shadows the real LAN NIC. This
+# is an ALLOW-LIST: an adapter is KEPT if it matches ANY configured filter, and
+# every non-matching adapter is hidden from the enumeration APIs. If no filters
+# are configured (all three lists empty) the feature is a no-op and every
+# adapter is shown unchanged.
+#
+#   Enabled  - true to apply the filters below, false (default) to disable.
+#
+#   Subnets  - IPv4 CIDR filters. An adapter is kept if any of its IPv4
+#              addresses falls inside one of these ranges. Applies to ALL of the
+#              covered APIs (iphlpapi, gethostbyname, WSAIoctl interface list).
+#              e.g. ['192.168.1.0/24', '10.0.0.0/8']
+#
+#   Names    - Case-insensitive ECMAScript regex matched against each adapter's
+#              FriendlyName and Description. Only applies to the iphlpapi APIs
+#              (GetAdaptersInfo / GetAdaptersAddresses) which expose names.
+#              e.g. ['^Ethernet', 'Realtek']
+#
+#   MACs     - Physical (MAC) addresses, colon- or dash-separated, case-
+#              insensitive. Only applies to the iphlpapi APIs.
+#              e.g. ['00:11:22:33:44:55']
+#
+# Covered enumeration APIs:
+#   - iphlpapi  GetAdaptersInfo, GetAdaptersAddresses (Subnets + Names + MACs)
+#   - ws2_32 / wsock32  gethostbyname for the local host (Subnets only)
+#   - ws2_32  WSAIoctl SIO_GET_INTERFACE_LIST (Subnets only)
+#
+# Hidden-adapter activity is written to the session log when Logging.Network is
+# true. Plugins and host apps can enumerate the canonical adapter list (with
+# each adapter's allowed/hidden status) via InterposerEnumNetworkAdapters.
+# ---------------------------------------------------------------------------
+NetworkAdapters:
+  Enabled: false
+  Subnets: []   # e.g. ['192.168.1.0/24', '10.0.0.0/8'] (IPv4 CIDR)
+  Names:   []   # case-insensitive ECMAScript regex vs FriendlyName/Description
+  MACs:    []   # e.g. ['00:11:22:33:44:55'] (colon or dash separated)
+
+# ---------------------------------------------------------------------------
 # FastDL
 #
 #   Enabled              - true to enable FastDL downloads, false to disable (default).

@@ -6,6 +6,8 @@
 #include <string>
 #include <vector>
 #include <regex>
+#include <array>
+#include <cstdint>
 
 // A compiled file-redirect rule loaded from FileRedirects in Config.yml.
 struct FileRedirect {
@@ -28,6 +30,14 @@ struct PortRange { int min; int max; };
 struct DnsRedirect {
     std::wregex  pattern;     // ECMAScript regex, case-insensitive
     std::wstring replacement; // ECMAScript format string (supports $1..$9)
+};
+
+// A parsed IPv4 CIDR filter from NetworkAdapters.Subnets. `network` and `mask`
+// are stored in HOST byte order with `network` pre-masked, so a match is simply
+// (ntohl(addr) & mask) == network.
+struct SubnetFilter {
+    uint32_t network;
+    uint32_t mask;
 };
 
 // Populated by LoadConfig(). Read-only after that.
@@ -57,6 +67,15 @@ extern bool         g_logDnsRedirects;  // true = log DNS redirect matches
 extern bool         g_logNetwork;       // true = log connection/DNS events
 
 extern std::vector<DnsRedirect> g_dnsRedirects; // DNS hostname redirects (case-insensitive)
+
+// NetworkAdapters — allow-list controlling which adapters games may enumerate.
+// An adapter is KEPT if it matches ANY populated list. g_naAnyFilters is the
+// fast-path gate (false when all three lists are empty → feature is a no-op).
+extern bool                            g_naEnabled;    // NetworkAdapters.Enabled
+extern bool                            g_naAnyFilters; // any of the three lists populated
+extern std::vector<SubnetFilter>       g_naSubnets;    // IPv4 CIDR filters
+extern std::vector<std::wregex>        g_naNames;      // vs FriendlyName + Description
+extern std::vector<std::array<BYTE,6>> g_naMacs;       // physical addresses
 
 // Rich presence config — read by richpresence.cpp after LoadConfig().
 extern bool        g_rpDiscordEnabled;
