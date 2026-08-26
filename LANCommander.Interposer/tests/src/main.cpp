@@ -196,6 +196,7 @@ static void WriteInterposerYaml(const std::wstring& yamlPath,
         "Logging:\n"
         "  Files: true\n"
         "  Registry: true\n"
+        "  Level: Trace\n"
         "\n"
         "Player:\n"
         "  Username: TestPlayer\n"
@@ -692,6 +693,39 @@ static void RunLogTests(const std::wstring& logPath)
     // The original (pre-redirect) path appears in the log
     ASSERT(log.find("TestGame") != std::string::npos || log.find("TESTGAME") != std::string::npos,
         L"L-12: Log contains reference to TestGame path");
+
+    // --- Redirect diagnostics (Logging.Level: Trace in the fixture) ---
+
+    // F-02 redirects C:\TestGame\Saves\profile.dat via the single configured rule.
+    ASSERT(log.find("[REDIRECT HIT]") != std::string::npos,
+        L"L-13: Log contains [REDIRECT HIT] entry");
+    ASSERT(log.find("rule #1") != std::string::npos,
+        L"L-14: [REDIRECT HIT] names the rule that fired");
+
+    // F-01 and F-03 open paths no rule matches.
+    ASSERT(log.find("[REDIRECT MISS]") != std::string::npos,
+        L"L-15: Log contains [REDIRECT MISS] entry");
+    ASSERT(log.find("none matched") != std::string::npos,
+        L"L-16: [REDIRECT MISS] reports how many rules were evaluated");
+
+    // Trace level lists each pattern evaluated and rejected.
+    ASSERT(log.find("[REDIRECT RULE]") != std::string::npos,
+        L"L-17: Log contains [REDIRECT RULE] entry at Trace level");
+
+    // R-01 opens HKLM\SOFTWARE\TestGame\1.0, which is in the virtual store.
+    ASSERT(log.find("[REG HIT]") != std::string::npos,
+        L"L-18: Log contains [REG HIT] entry");
+
+    // R-18 opens HKLM\SOFTWARE\Microsoft, which is not in the virtual store.
+    ASSERT(log.find("[REG MISS]") != std::string::npos,
+        L"L-19: Log contains [REG MISS] entry");
+    ASSERT(log.find("not in virtual space") != std::string::npos,
+        L"L-20: [REG MISS] reports why the key was not redirected");
+
+    // R-06 queries NoSuchValue under a key that IS virtual — the partial-miss case
+    // that is indistinguishable from a successful read at Info level.
+    ASSERT(log.find("[REG PARTIAL]") != std::string::npos,
+        L"L-21: Log contains [REG PARTIAL] entry for a missing value in a virtual key");
 }
 
 // ============================================================

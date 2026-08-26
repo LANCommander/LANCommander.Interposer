@@ -273,6 +273,27 @@ static bool InVirtualSpace(const std::wstring& upperPath)
     return false;
 }
 
+// Emit the Debug-level verdict for a key open/create: whether the request was
+// served from the virtual store or handed to the real registry, and why.
+// `path` is empty when BuildPath could not resolve the handle.
+static void LogVirtualSpaceVerdict(const std::wstring& path, bool inVirtualSpace)
+{
+    if (!g_logRegistry || g_logLevel < LogLevel::Debug)
+        return;
+
+    if (path.empty())
+    {
+        // BuildPath fell through all three tiers. TrackRealHandle no-ops on an
+        // empty path, so every key opened through the resulting handle is also
+        // unresolvable — worth flagging rather than silently passing through.
+        LogRegistryDiag(L"REG MISS", L"(unknown)", L"handle not resolvable");
+    }
+    else if (inVirtualSpace)
+        LogRegistryDiag(L"REG HIT", path.c_str(), L"served from virtual store");
+    else
+        LogRegistryDiag(L"REG MISS", path.c_str(), L"not in virtual space");
+}
+
 // ============================================================
 // String conversion helpers
 // ============================================================
@@ -781,7 +802,11 @@ static LSTATUS WINAPI HookRegOpenKeyExW(HKEY hKey, LPCWSTR lpSubKey, DWORD ulOpt
     
     LogRegistryAccess(L"REG OPEN", path.empty() ? L"(unknown)" : path.c_str());
 
-    if (!path.empty() && InVirtualSpace(path))
+    bool virtualSpace = !path.empty() && InVirtualSpace(path);
+
+    LogVirtualSpaceVerdict(path, virtualSpace);
+
+    if (virtualSpace)
     {
         if (phkResult) *phkResult = NewVirtHandle(path);
         return ERROR_SUCCESS;
@@ -802,11 +827,15 @@ static LSTATUS WINAPI HookRegOpenKeyExA(HKEY hKey, LPCSTR lpSubKey, DWORD ulOpti
     std::wstring path = BuildPath(hKey, wideSubKey.empty() ? nullptr : wideSubKey.c_str());
     LogRegistryAccess(L"REG OPEN", path.empty() ? L"(unknown)" : path.c_str());
 
-    if (!path.empty() && InVirtualSpace(path))
+    bool virtualSpace = !path.empty() && InVirtualSpace(path);
+
+    LogVirtualSpaceVerdict(path, virtualSpace);
+
+    if (virtualSpace)
     {
         if (phkResult)
             *phkResult = NewVirtHandle(path);
-        
+
         return ERROR_SUCCESS;
     }
 
@@ -827,7 +856,11 @@ static LSTATUS WINAPI HookRegCreateKeyExW(HKEY hKey, LPCWSTR lpSubKey, DWORD Res
     
     LogRegistryAccess(L"REG CREATE", path.empty() ? L"(unknown)" : path.c_str());
 
-    if (!path.empty() && InVirtualSpace(path))
+    bool virtualSpace = !path.empty() && InVirtualSpace(path);
+
+    LogVirtualSpaceVerdict(path, virtualSpace);
+
+    if (virtualSpace)
     {
         DWORD disposition;
         {
@@ -864,7 +897,11 @@ static LSTATUS WINAPI HookRegCreateKeyExA(HKEY hKey, LPCSTR lpSubKey, DWORD Rese
     
     LogRegistryAccess(L"REG CREATE", path.empty() ? L"(unknown)" : path.c_str());
 
-    if (!path.empty() && InVirtualSpace(path))
+    bool virtualSpace = !path.empty() && InVirtualSpace(path);
+
+    LogVirtualSpaceVerdict(path, virtualSpace);
+
+    if (virtualSpace)
     {
         DWORD disposition;
         {
@@ -922,14 +959,26 @@ static LSTATUS VirtualQueryValueW(const std::wstring& keyPath, LPCWSTR lpValueNa
     std::shared_lock lock(g_storeMutex);
 
     auto kit = g_store.find(keyPath);
-    
+
     if (kit == g_store.end())
+    {
+        // The handle is virtual (an ancestor or descendant matched), but this
+        // exact key was never loaded from Registry.reg. No fallback to the real
+        // registry happens here — the game just gets ERROR_FILE_NOT_FOUND.
+        LogRegistryDiag(L"REG MISS", keyPath.c_str(), L"virtual key not in store");
+
         return ERROR_FILE_NOT_FOUND;
+    }
 
     auto vit = kit->second.find(upperName);
-    
+
     if (vit == kit->second.end())
+    {
+        LogRegistryDiag(L"REG PARTIAL", keyPath.c_str(),
+            (L"value not in store: " + (upperName.empty() ? std::wstring(L"(default)") : upperName)).c_str());
+
         return ERROR_FILE_NOT_FOUND;
+    }
 
     const RegValue& rv = vit->second;
     
@@ -1022,14 +1071,22 @@ static LSTATUS WINAPI HookRegQueryValueExA(HKEY hKey, LPCSTR lpValueName, LPDWOR
         std::shared_lock lock(g_storeMutex);
         
         auto kit = g_store.find(path);
-        
+
         if (kit == g_store.end())
+        {
+            LogRegistryDiag(L"REG MISS", path.c_str(), L"virtual key not in store");
+
             return ERROR_FILE_NOT_FOUND;
-        
+        }
+
         auto vit = kit->second.find(ToUpper(wideName));
-        
+
         if (vit == kit->second.end())
+        {
+            LogRegistryDiag(L"REG PARTIAL", path.c_str(), L"value not in store");
+
             return ERROR_FILE_NOT_FOUND;
+        }
 
         const RegValue& registryValue = vit->second;
         const wchar_t* wideRegistryValue = reinterpret_cast<const wchar_t*>(registryValue.data.data());
@@ -1175,15 +1232,24 @@ static LSTATUS WINAPI HookRegDeleteValueW(HKEY hKey, LPCWSTR lpValueName)
     {
         std::unique_lock lock(g_storeMutex);
         auto kit = g_store.find(path);
-        
+
         if (kit == g_store.end())
+        {
+            LogRegistryDiag(L"REG MISS", path.c_str(), L"virtual key not in store");
+
             return ERROR_FILE_NOT_FOUND;
-        
+        }
+
         auto vit = kit->second.find(upperName);
-        
+
         if (vit == kit->second.end())
+        {
+            LogRegistryDiag(L"REG PARTIAL", path.c_str(),
+                (L"value not in store: " + (upperName.empty() ? std::wstring(L"(default)") : upperName)).c_str());
+
             return ERROR_FILE_NOT_FOUND;
-        
+        }
+
         kit->second.erase(vit);
         g_dirty = true;
     }
@@ -1221,10 +1287,14 @@ static LSTATUS WINAPI HookRegEnumValueW(HKEY hKey, DWORD dwIndex, LPWSTR lpValue
     std::shared_lock lock(g_storeMutex);
     
     auto kit = g_store.find(path);
-    
+
     if (kit == g_store.end())
+    {
+        LogRegistryDiag(L"REG MISS", path.c_str(), L"virtual key not in store");
+
         return ERROR_NO_MORE_ITEMS;
-    
+    }
+
     if (dwIndex >= static_cast<DWORD>(kit->second.size())) 
         return ERROR_NO_MORE_ITEMS;
 
@@ -1299,10 +1369,14 @@ static LSTATUS WINAPI HookRegEnumValueA(HKEY hKey, DWORD dwIndex, LPSTR lpValueN
     std::shared_lock lock(g_storeMutex);
     
     auto kit = g_store.find(path);
-    
+
     if (kit == g_store.end())
+    {
+        LogRegistryDiag(L"REG MISS", path.c_str(), L"virtual key not in store");
+
         return ERROR_NO_MORE_ITEMS;
-    
+    }
+
     if (dwIndex >= static_cast<DWORD>(kit->second.size()))
         return ERROR_NO_MORE_ITEMS;
 
@@ -1558,10 +1632,12 @@ static LSTATUS WINAPI HookRegQueryInfoKeyW(HKEY hKey, LPWSTR lpClass, LPDWORD lp
         
         auto kit = g_store.find(path);
         
-        if (kit != g_store.end())
+        if (kit == g_store.end())
+            LogRegistryDiag(L"REG MISS", path.c_str(), L"virtual key not in store");
+        else
         {
-            valueCount = static_cast<DWORD>(kit->second.size());\
-            
+            valueCount = static_cast<DWORD>(kit->second.size());
+
             for (auto& [name, rv] : kit->second)
             {
                 if (static_cast<DWORD>(name.size()) > maxValName)

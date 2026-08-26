@@ -110,6 +110,41 @@ static const wchar_t* AccessVerb(DWORD access)
     return             L"FILE READ";
 }
 
+// Applies file redirects and, at Debug level or above, records whether a rule
+// actually fired. Drop-in replacement for ApplyFileRedirects at every hook call
+// site — the existing [FILE REDIRECT] / plain-verb lines are unaffected.
+static std::wstring RedirectWithDiag(const std::wstring& path)
+{
+    // Below Debug there is nothing to report, so skip the bookkeeping entirely.
+    if (!g_logFiles || g_logLevel < LogLevel::Debug)
+        return ApplyFileRedirects(path);
+
+    FileRedirectMatch match;
+    std::wstring result = ApplyFileRedirects(path, &match);
+
+    if (match.matched)
+    {
+        std::wstring detail = L"rule #" + std::to_wstring(match.ruleIndex + 1) + L"  " + match.pattern;
+
+        LogFileDiag(L"REDIRECT HIT", path.c_str(), detail.c_str());
+    }
+    else
+    {
+        std::wstring detail = match.ruleCount == 0
+            ? std::wstring(L"no rules configured")
+            : std::to_wstring(match.ruleCount)
+                + (match.ruleCount == 1 ? L" rule, none matched" : L" rules, none matched");
+
+        LogFileDiag(L"REDIRECT MISS", path.c_str(), detail.c_str());
+
+        // Trace only — `tried` is left empty at Debug.
+        for (const auto& pattern : match.tried)
+            LogFileDiag(L"REDIRECT RULE", path.c_str(), pattern.c_str());
+    }
+
+    return result;
+}
+
 // Core wide-path implementation shared by both W and A CreateFile hooks.
 static HANDLE CreateFileWImpl(
     const std::wstring& path,
@@ -125,7 +160,7 @@ static HANDLE CreateFileWImpl(
         return g_origCreateFileW(path.c_str(), dwDesiredAccess, dwShareMode,
             lpSA, dwCreationDisposition, dwFlagsAndAttributes, hTemplateFile);
 
-    std::wstring redirected = ApplyFileRedirects(path);
+    std::wstring redirected = RedirectWithDiag(path);
 
     if (redirected != path)
     {
@@ -213,7 +248,7 @@ static DWORD WINAPI HookGetFileAttributesW(LPCWSTR lpFileName)
         return g_origGetFileAttributesW(lpFileName);
 
     std::wstring path(lpFileName);
-    std::wstring redirected = ApplyFileRedirects(path);
+    std::wstring redirected = RedirectWithDiag(path);
 
     if (redirected != path)
     {
@@ -265,7 +300,7 @@ static DWORD WINAPI HookGetFileAttributesA(LPCSTR lpFileName)
     std::wstring wpath(wlen - 1, L'\0');
     MultiByteToWideChar(CP_ACP, 0, lpFileName, -1, wpath.data(), wlen);
 
-    std::wstring redirected = ApplyFileRedirects(wpath);
+    std::wstring redirected = RedirectWithDiag(wpath);
 
     if (redirected != wpath)
     {
@@ -308,7 +343,7 @@ static HANDLE WINAPI HookFindFirstFileW(LPCWSTR lpFileName, LPWIN32_FIND_DATAW l
         return g_origFindFirstFileW(lpFileName, lpFindFileData);
 
     std::wstring path(lpFileName);
-    std::wstring redirected = ApplyFileRedirects(path);
+    std::wstring redirected = RedirectWithDiag(path);
 
     if (redirected != path)
     {
@@ -332,7 +367,7 @@ static HANDLE WINAPI HookFindFirstFileA(LPCSTR lpFileName, LPWIN32_FIND_DATAA lp
     std::wstring widePath(wideLength - 1, L'\0');
     MultiByteToWideChar(CP_ACP, 0, lpFileName, -1, widePath.data(), wideLength);
 
-    std::wstring redirected = ApplyFileRedirects(widePath);
+    std::wstring redirected = RedirectWithDiag(widePath);
 
     if (redirected != widePath)
     {
@@ -378,7 +413,7 @@ static HANDLE WINAPI HookFindFirstFileExW(
         return g_origFindFirstFileExW(lpFileName, fInfoLevelId, lpFindFileData, fSearchOp, lpSearchFilter, dwAdditionalFlags);
 
     std::wstring path(lpFileName);
-    std::wstring redirected = ApplyFileRedirects(path);
+    std::wstring redirected = RedirectWithDiag(path);
 
     if (redirected != path)
     {
@@ -402,7 +437,7 @@ static HANDLE WINAPI HookFindFirstFileExA(
     if (wpath.empty())
         return g_origFindFirstFileExA(lpFileName, fInfoLevelId, lpFindFileData, fSearchOp, lpSearchFilter, dwAdditionalFlags);
 
-    std::wstring redirected = ApplyFileRedirects(wpath);
+    std::wstring redirected = RedirectWithDiag(wpath);
 
     if (redirected != wpath)
     {
@@ -435,7 +470,7 @@ static BOOL WINAPI HookDeleteFileW(LPCWSTR lpFileName)
         return g_origDeleteFileW(lpFileName);
 
     std::wstring path(lpFileName);
-    std::wstring redirected = ApplyFileRedirects(path);
+    std::wstring redirected = RedirectWithDiag(path);
 
     if (redirected != path)
     {
@@ -456,7 +491,7 @@ static BOOL WINAPI HookDeleteFileA(LPCSTR lpFileName)
     if (wpath.empty())
         return g_origDeleteFileA(lpFileName);
 
-    std::wstring redirected = ApplyFileRedirects(wpath);
+    std::wstring redirected = RedirectWithDiag(wpath);
 
     if (redirected != wpath)
     {
@@ -480,8 +515,8 @@ static BOOL WINAPI HookMoveFileW(LPCWSTR lpExisting, LPCWSTR lpNew)
 
     std::wstring src(lpExisting ? lpExisting : L"");
     std::wstring dst(lpNew ? lpNew : L"");
-    std::wstring rSrc = ApplyFileRedirects(src);
-    std::wstring rDst = ApplyFileRedirects(dst);
+    std::wstring rSrc = RedirectWithDiag(src);
+    std::wstring rDst = RedirectWithDiag(dst);
 
     if (rSrc != src)
         LogFileAccess(L"FILE REDIRECT", src.c_str(), rSrc.c_str());
@@ -515,8 +550,8 @@ static BOOL WINAPI HookMoveFileA(LPCSTR lpExisting, LPCSTR lpNew)
         return g_origMoveFileA(lpExisting, lpNew);
     }
 
-    std::wstring rSrc = ApplyFileRedirects(src);
-    std::wstring rDst = ApplyFileRedirects(dst);
+    std::wstring rSrc = RedirectWithDiag(src);
+    std::wstring rDst = RedirectWithDiag(dst);
 
     if (rSrc != src)
         LogFileAccess(L"FILE REDIRECT", src.c_str(), rSrc.c_str());
@@ -547,8 +582,8 @@ static BOOL WINAPI HookMoveFileExW(LPCWSTR lpExisting, LPCWSTR lpNew, DWORD dwFl
 
     std::wstring src(lpExisting ? lpExisting : L"");
     std::wstring dst(lpNew ? lpNew : L"");
-    std::wstring rSrc = ApplyFileRedirects(src);
-    std::wstring rDst = ApplyFileRedirects(dst);
+    std::wstring rSrc = RedirectWithDiag(src);
+    std::wstring rDst = RedirectWithDiag(dst);
 
     if (rSrc != src)
         LogFileAccess(L"FILE REDIRECT", src.c_str(), rSrc.c_str());
@@ -582,8 +617,8 @@ static BOOL WINAPI HookMoveFileExA(LPCSTR lpExisting, LPCSTR lpNew, DWORD dwFlag
         return g_origMoveFileExA(lpExisting, lpNew, dwFlags);
     }
 
-    std::wstring rSrc = ApplyFileRedirects(src);
-    std::wstring rDst = ApplyFileRedirects(dst);
+    std::wstring rSrc = RedirectWithDiag(src);
+    std::wstring rDst = RedirectWithDiag(dst);
 
     if (rSrc != src)
         LogFileAccess(L"FILE REDIRECT", src.c_str(), rSrc.c_str());
@@ -617,8 +652,8 @@ static BOOL WINAPI HookCopyFileW(LPCWSTR lpExisting, LPCWSTR lpNew, BOOL bFailIf
 
     std::wstring src(lpExisting ? lpExisting : L"");
     std::wstring dst(lpNew ? lpNew : L"");
-    std::wstring rSrc = ApplyFileRedirects(src);
-    std::wstring rDst = ApplyFileRedirects(dst);
+    std::wstring rSrc = RedirectWithDiag(src);
+    std::wstring rDst = RedirectWithDiag(dst);
 
     if (rSrc != src)
         LogFileAccess(L"FILE REDIRECT", src.c_str(), rSrc.c_str());
@@ -652,8 +687,8 @@ static BOOL WINAPI HookCopyFileA(LPCSTR lpExisting, LPCSTR lpNew, BOOL bFailIfEx
         return g_origCopyFileA(lpExisting, lpNew, bFailIfExists);
     }
 
-    std::wstring rSrc = ApplyFileRedirects(src);
-    std::wstring rDst = ApplyFileRedirects(dst);
+    std::wstring rSrc = RedirectWithDiag(src);
+    std::wstring rDst = RedirectWithDiag(dst);
 
     if (rSrc != src)
         LogFileAccess(L"FILE REDIRECT", src.c_str(), rSrc.c_str());
@@ -686,8 +721,8 @@ static BOOL WINAPI HookCopyFileExW(
 
     std::wstring src(lpExisting ? lpExisting : L"");
     std::wstring dst(lpNew ? lpNew : L"");
-    std::wstring rSrc = ApplyFileRedirects(src);
-    std::wstring rDst = ApplyFileRedirects(dst);
+    std::wstring rSrc = RedirectWithDiag(src);
+    std::wstring rDst = RedirectWithDiag(dst);
 
     if (rSrc != src)
         LogFileAccess(L"FILE REDIRECT", src.c_str(), rSrc.c_str());
@@ -723,8 +758,8 @@ static BOOL WINAPI HookCopyFileExA(
         return g_origCopyFileExA(lpExisting, lpNew, lpProgressRoutine, lpData, pbCancel, dwCopyFlags);
     }
 
-    std::wstring rSrc = ApplyFileRedirects(src);
-    std::wstring rDst = ApplyFileRedirects(dst);
+    std::wstring rSrc = RedirectWithDiag(src);
+    std::wstring rDst = RedirectWithDiag(dst);
 
     if (rSrc != src)
         LogFileAccess(L"FILE REDIRECT", src.c_str(), rSrc.c_str());
@@ -755,7 +790,7 @@ static HMODULE WINAPI HookLoadLibraryW(LPCWSTR lpLibFileName)
         return g_origLoadLibraryW(nullptr);
 
     std::wstring path(lpLibFileName);
-    std::wstring redirected = ApplyFileRedirects(path);
+    std::wstring redirected = RedirectWithDiag(path);
 
     if (redirected != path)
         LogFileAccess(L"FILE REDIRECT", path.c_str(), redirected.c_str());
@@ -779,7 +814,7 @@ static HMODULE WINAPI HookLoadLibraryA(LPCSTR lpLibFileName)
     std::wstring widePath(wideLength - 1, L'\0');
     MultiByteToWideChar(CP_ACP, 0, lpLibFileName, -1, widePath.data(), wideLength);
 
-    std::wstring redirected = ApplyFileRedirects(widePath);
+    std::wstring redirected = RedirectWithDiag(widePath);
 
     HMODULE hMod;
     if (redirected != widePath)
@@ -803,7 +838,7 @@ static HMODULE WINAPI HookLoadLibraryExW(LPCWSTR lpLibFileName, HANDLE hFile, DW
         return g_origLoadLibraryExW(nullptr, hFile, dwFlags);
 
     std::wstring path(lpLibFileName);
-    std::wstring redirected = ApplyFileRedirects(path);
+    std::wstring redirected = RedirectWithDiag(path);
 
     if (redirected != path)
         LogFileAccess(L"FILE REDIRECT", path.c_str(), redirected.c_str());
@@ -831,7 +866,7 @@ static HMODULE WINAPI HookLoadLibraryExA(LPCSTR lpLibFileName, HANDLE hFile, DWO
     std::wstring widePath(wideLength - 1, L'\0');
     MultiByteToWideChar(CP_ACP, 0, lpLibFileName, -1, widePath.data(), wideLength);
 
-    std::wstring redirected = ApplyFileRedirects(widePath);
+    std::wstring redirected = RedirectWithDiag(widePath);
 
     HMODULE hMod;
     if (redirected != widePath)

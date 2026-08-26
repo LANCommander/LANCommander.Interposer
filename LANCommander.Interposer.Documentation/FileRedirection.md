@@ -121,7 +121,28 @@ Enable file logging and look for `[FILE REDIRECT]` entries:
 2025-03-14 12:00:01  [FILE REDIRECT]  C:\Games\MyGame\Saves\profile.dat  ->  C:\Users\Pat\AppData\Roaming\MyGame\Saves\profile.dat
 ```
 
-If a redirect is not firing, check the exact path in `[FILE READ]` or `[FILE ATTR]` entries and compare it against your pattern.
+### Diagnosing a rule that isn't firing
+
+Set `Logging.Level` to `Debug`. Every file operation then reports whether a rule matched:
+
+```
+2025-03-14 12:00:01  [REDIRECT HIT]   C:\Games\MyGame\Saves\profile.dat  ->  rule #1  C:\\Games\\MyGame\\Saves\\(.+)
+2025-03-14 12:00:01  [REDIRECT MISS]  C:\Games\MyGame\config.cfg  ->  2 rules, none matched
+```
+
+A `[REDIRECT MISS]` gives you the exact path the game asked for — copy it and test your pattern against it. A `[REDIRECT HIT]` names the 1-based rule number and its pattern, which is how you confirm that an earlier, broader rule isn't shadowing the one you intended (remember: first match wins).
+
+If the miss says `no rules configured`, the `FileRedirects` block was empty or failed to parse — check for malformed regexes, which are skipped silently at load time.
+
+For a stubborn pattern, `Level: Trace` adds a `[REDIRECT RULE]` line for every pattern that was evaluated and rejected against that path:
+
+```
+2025-03-14 12:00:01  [REDIRECT MISS]  C:\Games\MyGame\config.cfg  ->  2 rules, none matched
+2025-03-14 12:00:01  [REDIRECT RULE]  C:\Games\MyGame\config.cfg  ->  C:\\Games\\MyGame\\Saves\\(.+)
+2025-03-14 12:00:01  [REDIRECT RULE]  C:\Games\MyGame\config.cfg  ->  C:\\Games\\MyGame\\Demos\\(.+)
+```
+
+See [Logging](./Logging.md) for the full list of diagnostic verbs.
 
 ## Hooked Functions
 

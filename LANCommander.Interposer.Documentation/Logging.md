@@ -20,6 +20,7 @@ Logging:
   RichPresence: false
   DnsRedirects: true
   Network: false
+  Level: Info
 ```
 
 | Key | Type | Default | Description |
@@ -32,6 +33,25 @@ Logging:
 | `RichPresence` | bool | `false` | Log rich presence field changes, update pushes, and clears. |
 | `DnsRedirects` | bool | `true` | Log DNS redirect matches. Enabled by default because DNS redirects are deliberate user-configured actions. |
 | `Network` | bool | `false` | Log socket connections and DNS lookups. |
+| `Level` | choice | `Info` | Verbosity within the subsystems enabled above. One of `Info`, `Debug`, `Trace`. |
+
+## Log Level
+
+The per-subsystem flags above decide *which* subsystems log. `Level` decides how much each one says. Unrecognized values fall back to `Info`.
+
+| Level | Adds |
+|---|---|
+| `Info` | Nothing — access lines only. This is the historical output. |
+| `Debug` | Redirect diagnostics: whether a redirect rule fired, and whether a registry key was served from the virtual store or passed through to the real registry. |
+| `Trace` | Everything in `Debug`, plus one line per file redirect rule evaluated and rejected. |
+
+Diagnostic lines are gated by *both* settings. `[REDIRECT MISS]` requires `Files: true` **and** `Level: Debug`; the registry diagnostics require `Registry: true` and `Level: Debug`.
+
+:::caution Debug is verbose
+At `Debug`, every file operation that does *not* match a redirect rule produces an extra `[REDIRECT MISS]` line. That is the point — it shows you the exact paths a game asks for, so you can write rules against them — but the log grows quickly. Set it back to `Info` once your rules work.
+:::
+
+Diagnostic lines are written to the session log only. Unlike the access verbs, they are not delivered to plugins or to the .NET event stream.
 
 Logs are written automatically to `.interposer\Logs\<timestamp>.log` — one file per session, no path configuration required. Each session log begins with a header:
 
@@ -63,6 +83,21 @@ The `->` portion only appears when a path was changed — for example, when a fi
 | `[FILE FIND]` | `FindFirstFileW/A` was called on a path. |
 | `[DLL LOAD]` | A DLL was loaded via `LoadLibraryW/A` or `LoadLibraryExW/A`. |
 | `[FILE OVERLAY]` | A file open was served from the FastDL overlay cache instead of the game directory. |
+
+### Redirect Diagnostics
+
+Only written at `Level: Debug` or higher, and only for a subsystem that is already enabled.
+
+| Verb | Level | Meaning |
+|---|---|---|
+| `[REDIRECT HIT]` | Debug | A `FileRedirects` rule matched. The line shows the source path and, after the `->`, the 1-based rule number and its pattern. |
+| `[REDIRECT MISS]` | Debug | No rule matched this path. The line shows either `no rules configured` or how many rules were evaluated. |
+| `[REDIRECT RULE]` | Trace | One line per redirect pattern that was evaluated and rejected, for working out why a regex did not match. |
+| `[REG HIT]` | Debug | The key was found in the virtual registry, so the request is served from `Registry.reg`. |
+| `[REG MISS]` | Debug | The key was passed through to the real registry, with the reason — `not in virtual space`, `handle not resolvable`, or `virtual key not in store`. |
+| `[REG PARTIAL]` | Debug | The key exists in the virtual store but the requested value name does not. The game receives `ERROR_FILE_NOT_FOUND` and there is **no** fallback to the real registry. |
+
+`[REG PARTIAL]` is worth calling out: it is the signature of a `Registry.reg` that has the right key but is missing a value the game reads. At `Info` level this looks like an ordinary successful `[REG READ]`.
 
 ### FastDL Operations
 
@@ -139,13 +174,23 @@ These events are always written regardless of logging flags:
 2025-03-14 12:00:03  [FASTDL]          http://fastdl.lan/baseq3/maps/q3dm1.bsp  ->  C:\Games\Quake3\.interposer\Downloads\baseq3\maps\q3dm1.bsp
 ```
 
+With `Level: Debug`, the same session additionally shows what the Interposer decided:
+
+```
+2025-03-14 12:00:01  [REDIRECT MISS]   C:\Games\MyGame\config.cfg  ->  2 rules, none matched
+2025-03-14 12:00:01  [REDIRECT HIT]    C:\Games\MyGame\Saves\profile.dat  ->  rule #1  C:\\Games\\MyGame\\Saves\\(.+)
+2025-03-14 12:00:02  [REG HIT]         HKEY_LOCAL_MACHINE\SOFTWARE\MYGAME\1.0  ->  served from virtual store
+2025-03-14 12:00:02  [REG PARTIAL]     HKEY_LOCAL_MACHINE\SOFTWARE\MYGAME\1.0  ->  value not in store: RESOLUTION
+2025-03-14 12:00:02  [REG MISS]        HKEY_CURRENT_USER\SOFTWARE\OTHERAPP  ->  not in virtual space
+```
+
 ## Using Logs to Diagnose Problems
 
 **Finding what paths a game uses**: Enable `Files: true`, run the game briefly, then search the log for paths that look like save directories, config files, or hard-coded installation paths.
 
-**Checking if a redirect fired**: Look for `[FILE REDIRECT]` entries. If you expect a redirect but don't see one, the path did not match your regex pattern — copy the exact path from a `[FILE READ]` or `[FILE ATTR]` entry and test your pattern against it.
+**Checking if a redirect fired**: Set `Level: Debug` and look for `[REDIRECT HIT]` / `[REDIRECT MISS]`. A hit names the rule number and pattern that matched; a miss shows the exact path that nothing matched, which is what you want to write your next pattern against. At `Trace`, each `[REDIRECT RULE]` line shows a pattern that was tried and rejected for that path.
 
-**Verifying virtual registry**: Enable `Registry: true`. Registry operations on keys that exist in `.interposer\Registry.reg` are served from memory and will still appear in the log — a `[REG READ]` line confirms the hook is active.
+**Verifying virtual registry**: Enable `Registry: true`. At `Info`, a `[REG READ]` line only confirms the hook is active — it looks the same whether the value came from `.interposer\Registry.reg` or the real registry. Set `Level: Debug` to tell them apart: `[REG HIT]` means the virtual store served it, `[REG MISS]` means it passed through, and `[REG PARTIAL]` means the key was virtual but the value was missing, so the game got `ERROR_FILE_NOT_FOUND`.
 
 **Debugging plugin issues**: Enable `Plugins: true` to see whether plugins loaded, what errors occurred, and whether config registration succeeded.
 

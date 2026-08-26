@@ -145,6 +145,15 @@ OptionSchema: |
           DisplayName: Network
           Description: Log server connection and DNS events, plus adapter enumeration
           Default: "false"
+        Level:
+          Type: choice
+          DisplayName: Level
+          Description: Verbosity within the enabled subsystems. Debug adds redirect hit/miss diagnostics; Trace also lists every redirect rule evaluated.
+          Default: "Info"
+          Choices:
+            - { Value: "Info", DisplayName: "Info (access lines only)" }
+            - { Value: "Debug", DisplayName: "Debug (redirect hits and misses)" }
+            - { Value: "Trace", DisplayName: "Trace (also list every rule tried)" }
 
     FileRedirects:
       Type: list

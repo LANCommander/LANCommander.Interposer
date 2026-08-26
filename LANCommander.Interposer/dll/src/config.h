@@ -12,7 +12,26 @@
 // A compiled file-redirect rule loaded from FileRedirects in Config.yml.
 struct FileRedirect {
     std::wregex  pattern;     // ECMAScript regex, case-insensitive
+    std::wstring patternText; // original pattern source; std::wregex does not retain it
     std::wstring replacement; // ECMAScript format string; %ENVVAR% expanded after substitution
+};
+
+// Verbosity of the session log. Info reproduces the historical output exactly;
+// Debug and Trace only ever add lines. Set from Logging.Level in Config.yml.
+enum class LogLevel {
+    Info  = 0,  // default — access lines only
+    Debug = 1,  // + redirect hit/miss diagnostics
+    Trace = 2   // + one line per redirect rule evaluated and rejected
+};
+
+// Reported by ApplyFileRedirects so callers can tell a genuine miss from a rule
+// that fired but produced an unchanged string, and can name the rule responsible.
+struct FileRedirectMatch {
+    bool         matched   = false; // a rule fired, regardless of the resulting string
+    size_t       ruleIndex = 0;     // 0-based index of the rule that fired
+    size_t       ruleCount = 0;     // rules configured
+    std::wstring pattern;           // pattern of the rule that fired; populated at Debug+
+    std::vector<std::wstring> tried; // patterns evaluated and rejected; populated at Trace
 };
 
 // A FastDL path mapping loaded from fastDLPaths in interposer.yaml.
@@ -43,6 +62,7 @@ struct SubnetFilter {
 // Populated by LoadConfig(). Read-only after that.
 extern bool         g_logFiles;          // true = log file I/O operations
 extern bool         g_logRegistry;       // true = log registry operations
+extern LogLevel     g_logLevel;          // Logging.Level; Info reproduces pre-existing output
 extern std::wstring g_username;          // non-empty = override GetUserNameW/A return value
 extern std::wstring g_computername;      // non-empty = override GetComputerNameW/A return value
 
@@ -105,7 +125,9 @@ void CloseLog();
 std::wstring ExpandEnvVars(const std::wstring& input);
 
 // Return the redirected path if any rule matches, otherwise return path unchanged.
-std::wstring ApplyFileRedirects(const std::wstring& path);
+// Pass outMatch to learn whether a rule actually fired and which one — the return
+// value alone cannot distinguish a miss from a rule whose replacement equals the input.
+std::wstring ApplyFileRedirects(const std::wstring& path, FileRedirectMatch* outMatch = nullptr);
 
 // Return the redirected hostname if the first DnsRedirects rule matches `host`
 // (ECMAScript regex, case-insensitive, partial match — anchor with ^ $ for
@@ -120,6 +142,13 @@ void LogPluginEvent(const wchar_t* verb, const wchar_t* info);
 void LogIdentityAccess(const wchar_t* verb, const wchar_t* info);
 void LogRichPresence(const wchar_t* verb, const wchar_t* info);
 void LogNetworkAccess(const wchar_t* verb, const wchar_t* address, const wchar_t* info = nullptr);
+
+// Redirect diagnostics. No-op below Debug level or when the subsystem flag is false.
+// Unlike LogFileAccess/LogRegistryAccess these deliberately do NOT fire plugin or
+// named-pipe callbacks — the diagnostic verbs are log-only and must not widen the
+// event vocabulary consumers depend on.
+void LogFileDiag(const wchar_t* verb, const wchar_t* path, const wchar_t* detail = nullptr);
+void LogRegistryDiag(const wchar_t* verb, const wchar_t* keyPath, const wchar_t* detail = nullptr);
 
 // Log a DNS redirect. Gated by the Logging.DnsRedirects flag (default true).
 void LogDnsRedirect(const wchar_t* fromHost, const wchar_t* toHost);

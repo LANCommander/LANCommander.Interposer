@@ -97,7 +97,24 @@ A working session looks like:
 Key paths are uppercased in the log for normalization. Registry key and value name matching is always case-insensitive.
 :::
 
-If a key the game opens does not appear in the log, it is not in the virtual store and is passing through to the real registry. Add it to `.interposer\Registry.reg` to intercept it.
+### Telling virtual reads from real ones
+
+At the default `Info` level a `[REG READ]` line looks identical whether the value came from `.interposer\Registry.reg` or from the real Windows registry. Add `Level: Debug` to see the verdict:
+
+```yaml
+Logging:
+  Registry: true
+  Level: Debug
+```
+
+```
+2025-03-14 12:00:01  [REG HIT]      HKEY_LOCAL_MACHINE\SOFTWARE\MYGAME\1.0  ->  served from virtual store
+2025-03-14 12:00:02  [REG MISS]     HKEY_CURRENT_USER\SOFTWARE\OTHERAPP  ->  not in virtual space
+2025-03-14 12:00:02  [REG PARTIAL]  HKEY_LOCAL_MACHINE\SOFTWARE\MYGAME\1.0  ->  value not in store: RESOLUTION
+```
+
+- **`[REG MISS]`** — the key is not in the virtual store, so the call passed through to the real registry. Add the key to `.interposer\Registry.reg` to intercept it. A miss reading `handle not resolvable` means the game obtained the key handle in a way the Interposer could not trace (for example through an unhooked API), so no redirect was even attempted.
+- **`[REG PARTIAL]`** — the key *is* virtual but the specific value the game asked for is not in the file. Because a virtual key never falls back to the real registry, the game receives `ERROR_FILE_NOT_FOUND`. This is the most common cause of a game behaving as if its settings were wiped, and it is invisible at `Info` level. Add the missing value to `.interposer\Registry.reg`.
 
 ## Hooked Functions
 

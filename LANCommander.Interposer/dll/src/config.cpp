@@ -16,6 +16,7 @@
 // ---------------------------------------------------------------------------
 bool         g_logFiles         = false;
 bool         g_logRegistry      = false;
+LogLevel     g_logLevel         = LogLevel::Info;
 std::wstring g_username;
 std::wstring g_computername;
 
@@ -215,19 +216,41 @@ static std::wstring NormalizeBackslashes(const std::wstring& path)
     return out;
 }
 
-std::wstring ApplyFileRedirects(const std::wstring& path)
+std::wstring ApplyFileRedirects(const std::wstring& path, FileRedirectMatch* outMatch)
 {
+    if (outMatch)
+        outMatch->ruleCount = g_redirects.size();
+
     if (g_redirects.empty())
         return path;
 
-    for (const auto& redirect : g_redirects)
+    for (size_t i = 0; i < g_redirects.size(); ++i)
     {
+        const auto& redirect = g_redirects[i];
+
         std::wstring result = std::regex_replace(
             path, redirect.pattern, redirect.replacement,
             std::regex_constants::format_first_only);
 
         if (result != path)
+        {
+            // Record the match here rather than by comparing the return value:
+            // ExpandEnvVars/NormalizeBackslashes can collapse the result back to
+            // `path`, which would otherwise look identical to a miss.
+            if (outMatch)
+            {
+                outMatch->matched   = true;
+                outMatch->ruleIndex = i;
+
+                if (g_logLevel >= LogLevel::Debug)
+                    outMatch->pattern = redirect.patternText;
+            }
+
             return NormalizeBackslashes(ExpandEnvVars(result));
+        }
+
+        if (outMatch && g_logLevel >= LogLevel::Trace)
+            outMatch->tried.push_back(redirect.patternText);
     }
 
     return path;
@@ -365,6 +388,22 @@ void LogRegistryAccess(const wchar_t* verb, const wchar_t* keyPath, const wchar_
     }
     else
         WriteLogLine(verb, keyPath, nullptr);
+}
+
+void LogFileDiag(const wchar_t* verb, const wchar_t* path, const wchar_t* detail)
+{
+    if (!g_logFiles || g_logLevel < LogLevel::Debug)
+        return;
+
+    WriteLogLine(verb, path, detail);
+}
+
+void LogRegistryDiag(const wchar_t* verb, const wchar_t* keyPath, const wchar_t* detail)
+{
+    if (!g_logRegistry || g_logLevel < LogLevel::Debug)
+        return;
+
+    WriteLogLine(verb, keyPath, detail);
 }
 
 void LogFastDLAccess(const wchar_t* verb, const wchar_t* url, const wchar_t* localPath)
@@ -887,6 +926,23 @@ void LoadConfig()
             g_logDnsRedirects = logging["DnsRedirects"].as<bool>(true);
         if (logging["Network"])
             g_logNetwork = logging["Network"].as<bool>(false);
+
+        // Verbosity within whichever subsystems are enabled above. Unrecognized
+        // values fall back to Info so a typo never silently suppresses output.
+        if (logging["Level"])
+        {
+            std::string level = logging["Level"].as<std::string>("");
+
+            for (auto& c : level)
+                c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+
+            if (level == "debug")
+                g_logLevel = LogLevel::Debug;
+            else if (level == "trace")
+                g_logLevel = LogLevel::Trace;
+            else
+                g_logLevel = LogLevel::Info;
+        }
     }
 
     // ── FileRedirects (legacy: "Redirects") ──────────────────────────────────
@@ -909,7 +965,8 @@ void LoadConfig()
                 {
                     FileRedirect redirect;
                     redirect.replacement = Utf8ToWide(replacement);
-                    redirect.pattern     = std::wregex(Utf8ToWide(pattern),
+                    redirect.patternText = Utf8ToWide(pattern);
+                    redirect.pattern     = std::wregex(redirect.patternText,
                         std::regex_constants::ECMAScript | std::regex_constants::icase);
                     g_redirects.push_back(std::move(redirect));
                 }

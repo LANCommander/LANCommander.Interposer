@@ -327,6 +327,14 @@ foreach ($key in $loggingDefaults.Keys) {
     $lines.Add("  $($key): $(Format-YamlBool $value)")
 }
 
+# Level is a choice, not a bool, so it is rendered outside the loop above.
+# Anything unrecognized falls back to Info, matching the DLL's own parsing.
+$level = Get-StringOption $Options 'Logging.Level' 'Info'
+
+if ($level -notin @('Info', 'Debug', 'Trace')) { $level = 'Info' }
+
+$lines.Add("  Level: $level")
+
 $lines.Add('')
 
 Add-CompositeList $lines '' 'FileRedirects' (Get-ListOption $Options 'FileRedirects') @('Pattern', 'Replacement')

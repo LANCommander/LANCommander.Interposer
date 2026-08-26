@@ -46,6 +46,25 @@ Player:
 #   Network   - true to log server connection/DNS events (addresses the game
 #               connects to), false to disable (default).
 #
+#   Level     - Verbosity within whichever subsystems are enabled above.
+#               Unrecognized values fall back to Info.
+#
+#                 Info  (default) - access lines only; the historical output.
+#
+#                 Debug - adds redirect diagnostics. [REDIRECT HIT] names the
+#                         rule that fired, [REDIRECT MISS] reports every path
+#                         no rule matched, and on the registry side [REG HIT],
+#                         [REG MISS] and [REG PARTIAL] show whether a key was
+#                         served from Registry.reg or passed through to the
+#                         real registry. Requires Files/Registry to be true.
+#
+#                 Trace - adds [REDIRECT RULE], one line per file redirect
+#                         pattern evaluated and rejected, for working out why
+#                         a regex did not match.
+#
+#               Debug logs one extra line per unmatched file operation, so
+#               expect the log to grow quickly. Use it while authoring rules.
+#
 # Logs are written automatically to .interposer\Logs\<timestamp>.log next to
 # the DLL.  A new file is created each session.
 # ---------------------------------------------------------------------------
@@ -58,6 +77,7 @@ Logging:
   RichPresence: false
   DnsRedirects: true
   Network: false
+  Level: Info
 
 # ---------------------------------------------------------------------------
 # FileRedirects
