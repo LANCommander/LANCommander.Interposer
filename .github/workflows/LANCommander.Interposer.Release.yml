@@ -11,6 +11,10 @@ jobs:
     runs-on: windows-latest
     permissions:
       contents: write
+      id-token: write   # required for the OIDC federated credential used by azure/login
+
+    env:
+      SIGNING_ENABLED: ${{ vars.AZURE_SIGNING_ENDPOINT != '' && 'true' || 'false' }}
 
     steps:
       - name: Checkout
@@ -88,6 +92,139 @@ jobs:
           msbuild LANCommander.Interposer.slnx
           /t:LANCommander_Interposer_Plugin_CDKey
           /p:Configuration=Release /p:Platform=x86
+
+      # ── Authenticode signing (Azure Artifact Signing) ────────────────────────
+      #
+      # Signs every PE output under Release\ in place, before any packaging step
+      # runs. The redistributable payload ZIP and the LCX are both assembled by
+      # copying out of Release\ further down, so signing here also covers the
+      # copies embedded in those packages. The ZIP and LCX containers themselves
+      # are not PE files and cannot be Authenticode signed.
+      #
+      # Required repository secrets (OIDC federated credential):
+      #   AZURE_CLIENT_ID, AZURE_TENANT_ID, AZURE_SUBSCRIPTION_ID
+      #
+      # Required repository variables:
+      #   AZURE_SIGNING_ENDPOINT           e.g. https://eus.codesigning.azure.net
+      #   AZURE_SIGNING_ACCOUNT_NAME
+      #   AZURE_SIGNING_CERT_PROFILE_NAME
+      #
+      # Leaving AZURE_SIGNING_ENDPOINT unset disables signing: every step below is
+      # skipped and the job still produces a complete (unsigned) release, so forks
+      # without the Azure setup keep working.
+      #
+      # NOTE: if these secrets and variables are scoped to a GitHub *environment*
+      # rather than the repository, they resolve empty here and signing is silently
+      # skipped. Add a matching `environment:` key to this job in that case — but be
+      # aware that gates the entire release job, not just signing.
+      - name: Report signing configuration
+        shell: pwsh
+        run: |
+          if ($env:SIGNING_ENABLED -eq 'true') {
+            Write-Host "Signing release binaries"
+          } else {
+            Write-Host "::warning::AZURE_SIGNING_ENDPOINT is not set. Release binaries will be unsigned."
+          }
+
+      - name: Collect Files to Sign
+        id: targets
+        if: env.SIGNING_ENABLED == 'true'
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+
+          # Every PE the release ships. LANCommander.Interposer.asi is a renamed
+          # DLL — signtool dispatches on PE format, not file extension.
+          $patterns = @(
+            'LANCommander.Interposer.dll'
+            'LANCommander.Interposer.Injector.exe'
+            'LANCommander.Interposer.Plugin.CDKey.dll'
+            'LANCommander.Interposer.asi'
+            'version.dll'
+            'dinput8.dll'
+          )
+
+          # The signing action expects absolute paths. Each build configuration
+          # writes to its own subdirectory (Injector\, Proxy\, ProxyDInput8\,
+          # ASI\, CDKey\), so the search has to recurse.
+          $files = Get-ChildItem -Path 'Release' -Recurse -File -Include $patterns |
+            Select-Object -ExpandProperty FullName |
+            Sort-Object -Unique
+
+          if (-not $files) {
+            throw "No files under Release\ matched the signing patterns. Refusing to sign nothing."
+          }
+
+          Write-Host "Signing $($files.Count) file(s):"
+          $files | ForEach-Object { Write-Host "  $($_.Substring($PWD.Path.Length + 1))" }
+
+          # Persist the exact list so the verification step checks what was signed
+          # rather than re-deriving it.
+          $manifest = Join-Path $env:RUNNER_TEMP 'sign-targets.txt'
+          $files | Set-Content -Path $manifest -Encoding UTF8
+
+          "files<<SIGNTARGETS" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
+          $files               | Out-File -FilePath $env:GITHUB_OUTPUT -Append
+          "SIGNTARGETS"        | Out-File -FilePath $env:GITHUB_OUTPUT -Append
+
+      # The signing action documents a .NET 8 runtime prerequisite, which is not
+      # guaranteed to be present on every windows-latest image revision.
+      - name: Setup .NET
+        if: env.SIGNING_ENABLED == 'true'
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '8.0.x'
+
+      - name: Azure Login
+        if: env.SIGNING_ENABLED == 'true'
+        uses: azure/login@v3
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Sign Files
+        if: env.SIGNING_ENABLED == 'true'
+        uses: azure/artifact-signing-action@v2
+        with:
+          endpoint: ${{ vars.AZURE_SIGNING_ENDPOINT }}
+          signing-account-name: ${{ vars.AZURE_SIGNING_ACCOUNT_NAME }}
+          certificate-profile-name: ${{ vars.AZURE_SIGNING_CERT_PROFILE_NAME }}
+          files: ${{ steps.targets.outputs.files }}
+          file-digest: SHA256
+          timestamp-rfc3161: http://timestamp.acs.microsoft.com
+          timestamp-digest: SHA256
+          # Pin authentication to the session established by azure/login rather than
+          # letting DefaultAzureCredential fall through a chain of unconfigured options.
+          exclude-environment-credential: true
+          exclude-azure-cli-credential: false
+
+      - name: Verify Signatures
+        if: env.SIGNING_ENABLED == 'true'
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+
+          $manifest = Join-Path $env:RUNNER_TEMP 'sign-targets.txt'
+          $failed = @()
+
+          foreach ($path in Get-Content -Path $manifest) {
+            $signature = Get-AuthenticodeSignature -FilePath $path
+            $relative = $path.Substring($PWD.Path.Length + 1)
+
+            if ($signature.Status -ne 'Valid') {
+              $failed += "$relative : $($signature.Status) - $($signature.StatusMessage)"
+            } elseif (-not $signature.TimeStamperCertificate) {
+              $failed += "$relative : signed but not timestamped"
+            } else {
+              Write-Host "$relative : Valid ($($signature.SignerCertificate.Subject))"
+            }
+          }
+
+          if ($failed) {
+            $failed | ForEach-Object { Write-Host "::error::$_" }
+            throw "$($failed.Count) file(s) failed signature verification."
+          }
 
       - name: Create release ZIPs
         shell: pwsh
