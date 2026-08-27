@@ -127,8 +127,8 @@ All configuration lives in `.interposer\Config.yml` next to the DLL. See the [sa
 
 ```bash
 # Install dependencies
-vcpkg install --triplet x64-windows-static-md --x-install-root=vcpkg_installed
-vcpkg install --triplet x86-windows-static-md --x-install-root=vcpkg_installed_x86
+vcpkg install --triplet x64-windows-static-md --overlay-triplets=triplets --x-install-root=vcpkg_installed
+vcpkg install --triplet x86-windows-static-md --overlay-triplets=triplets --x-install-root=vcpkg_installed_x86
 
 # Build (from Git Bash - use double-slash for MSBuild flags)
 MSBuild LANCommander.Interposer.slnx //p:Configuration=Release //p:Platform=x64

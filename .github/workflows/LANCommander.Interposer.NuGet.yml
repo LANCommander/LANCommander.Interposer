@@ -40,11 +40,17 @@ jobs:
           fi
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"
 
+      # --overlay-triplets is required, not optional: triplets/ pins
+      # VCPKG_PLATFORM_TOOLSET to v143 to match the PlatformToolset the
+      # vcxproj uses. Without it vcpkg silently resolves the built-in triplet
+      # of the same name, builds the dependencies with whatever MSVC the
+      # runner happens to ship, and the link fails on STL symbols that the
+      # v143 import library does not have (e.g. __std_find_last_not_ch_pos_1).
       - name: Install native dependencies (x64)
-        run: vcpkg install --triplet x64-windows-static-md --x-install-root=vcpkg_installed
+        run: vcpkg install --triplet x64-windows-static-md --overlay-triplets=triplets --x-install-root=vcpkg_installed
 
       - name: Install native dependencies (x86)
-        run: vcpkg install --triplet x86-windows-static-md --x-install-root=vcpkg_installed_x86
+        run: vcpkg install --triplet x86-windows-static-md --overlay-triplets=triplets --x-install-root=vcpkg_installed_x86
 
       - name: Generate version header
         shell: pwsh
