@@ -1,9 +1,0 @@
-LIBRARY dinput
-EXPORTS
-    DirectInputCreateA
-    DirectInputCreateEx
-    DirectInputCreateW
-    DllCanUnloadNow        PRIVATE
-    DllGetClassObject      PRIVATE
-    DllRegisterServer      PRIVATE
-    DllUnregisterServer    PRIVATE

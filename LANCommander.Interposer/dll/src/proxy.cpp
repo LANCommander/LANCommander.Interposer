@@ -1,161 +1,297 @@
-#ifdef INTERPOSER_PROXY
-
 #define WIN32_LEAN_AND_MEAN
 #define NOMINMAX
 #include <windows.h>
 
-static HMODULE g_realVersion = nullptr;
+#include "config.h"
+#include "dinput.h"
 
-// Function pointer types
-typedef BOOL  (WINAPI* PFN_GetFileVersionInfoA)      (LPCSTR,  DWORD, DWORD, LPVOID);
-typedef BOOL  (WINAPI* PFN_GetFileVersionInfoW)      (LPCWSTR, DWORD, DWORD, LPVOID);
-typedef BOOL  (WINAPI* PFN_GetFileVersionInfoExA)    (DWORD, LPCSTR,  DWORD, DWORD, LPVOID);
-typedef BOOL  (WINAPI* PFN_GetFileVersionInfoExW)    (DWORD, LPCWSTR, DWORD, DWORD, LPVOID);
-typedef DWORD (WINAPI* PFN_GetFileVersionInfoSizeA)  (LPCSTR,  LPDWORD);
-typedef DWORD (WINAPI* PFN_GetFileVersionInfoSizeW)  (LPCWSTR, LPDWORD);
-typedef DWORD (WINAPI* PFN_GetFileVersionInfoSizeExA)(DWORD, LPCSTR,  LPDWORD);
-typedef DWORD (WINAPI* PFN_GetFileVersionInfoSizeExW)(DWORD, LPCWSTR, LPDWORD);
-typedef DWORD (WINAPI* PFN_VerFindFileA)  (DWORD, LPCSTR,  LPCSTR,  LPCSTR,  LPSTR,  PUINT, LPSTR,  PUINT);
-typedef DWORD (WINAPI* PFN_VerFindFileW)  (DWORD, LPCWSTR, LPCWSTR, LPCWSTR, LPWSTR, PUINT, LPWSTR, PUINT);
-typedef DWORD (WINAPI* PFN_VerInstallFileA)(DWORD, LPCSTR,  LPCSTR,  LPCSTR,  LPCSTR,  LPCSTR,  LPSTR,  PUINT);
-typedef DWORD (WINAPI* PFN_VerInstallFileW)(DWORD, LPCWSTR, LPCWSTR, LPCWSTR, LPCWSTR, LPCWSTR, LPWSTR, PUINT);
-typedef DWORD (WINAPI* PFN_VerLanguageNameA)(DWORD, LPSTR,  DWORD);
-typedef DWORD (WINAPI* PFN_VerLanguageNameW)(DWORD, LPWSTR, DWORD);
-typedef BOOL  (WINAPI* PFN_VerQueryValueA) (LPCVOID, LPCSTR,  LPVOID*, PUINT);
-typedef BOOL  (WINAPI* PFN_VerQueryValueW) (LPCVOID, LPCWSTR, LPVOID*, PUINT);
+// ---------------------------------------------------------------------------
+// Proxy exports.
+//
+// One binary stands in for every DLL the Interposer can be loaded as. Which one
+// it is depends purely on what the file is named when it is deployed:
+//
+//   version.dll   most executables load it implicitly at startup
+//   dinput8.dll   for games that import DirectInput 8
+//   dinput.dll    for DirectInput 3/7 era games, which commonly import nothing
+//                 else that can be proxied
+//   *.asi         ASI loaders dispatch on the extension, not on exports
+//
+// The export table is the union of all three system DLLs. That is safe because
+// a game resolves only the names it imports: a game loading this file as
+// version.dll never looks up DirectInputCreateA, and never notices it is there.
+//
+// Every stub forwards to the system DLL that really owns the export, resolved
+// lazily on first use from an explicit System32 path. The explicit path is what
+// makes renaming safe — LoadLibraryW(L"version.dll") from a file named
+// version.dll sitting in the game directory would find itself and recurse.
+// ---------------------------------------------------------------------------
 
-static PFN_GetFileVersionInfoA       pfn_GetFileVersionInfoA       = nullptr;
-static PFN_GetFileVersionInfoW       pfn_GetFileVersionInfoW       = nullptr;
-static PFN_GetFileVersionInfoExA     pfn_GetFileVersionInfoExA     = nullptr;
-static PFN_GetFileVersionInfoExW     pfn_GetFileVersionInfoExW     = nullptr;
-static PFN_GetFileVersionInfoSizeA   pfn_GetFileVersionInfoSizeA   = nullptr;
-static PFN_GetFileVersionInfoSizeW   pfn_GetFileVersionInfoSizeW   = nullptr;
-static PFN_GetFileVersionInfoSizeExA pfn_GetFileVersionInfoSizeExA = nullptr;
-static PFN_GetFileVersionInfoSizeExW pfn_GetFileVersionInfoSizeExW = nullptr;
-static PFN_VerFindFileA              pfn_VerFindFileA              = nullptr;
-static PFN_VerFindFileW              pfn_VerFindFileW              = nullptr;
-static PFN_VerInstallFileA           pfn_VerInstallFileA           = nullptr;
-static PFN_VerInstallFileW           pfn_VerInstallFileW           = nullptr;
-static PFN_VerLanguageNameA          pfn_VerLanguageNameA          = nullptr;
-static PFN_VerLanguageNameW          pfn_VerLanguageNameW          = nullptr;
-static PFN_VerQueryValueA            pfn_VerQueryValueA            = nullptr;
-static PFN_VerQueryValueW            pfn_VerQueryValueW            = nullptr;
+namespace {
 
-void InitProxy()
+// Cached system module handles, one per DLL we forward to. Deliberately never
+// freed: the game may still be inside a forwarded call at process detach, and
+// these are system DLLs that the process is keeping loaded anyway.
+HMODULE g_systemModules[3] = {};
+
+enum SystemModule { SysVersion = 0, SysDInput8 = 1, SysDInput = 2 };
+
+const wchar_t* const kSystemModuleNames[] = { L"version.dll", L"dinput8.dll", L"dinput.dll" };
+
+HMODULE SystemModuleHandle(SystemModule which)
 {
-    wchar_t path[MAX_PATH];
-    GetSystemDirectoryW(path, MAX_PATH);
-    wcscat_s(path, L"\\version.dll");
+    if (g_systemModules[which])
+        return g_systemModules[which];
 
-    g_realVersion = LoadLibraryW(path);
-    if (!g_realVersion)
-        return;
+    wchar_t path[MAX_PATH]{};
 
-#define RESOLVE(name) pfn_##name = reinterpret_cast<PFN_##name>(GetProcAddress(g_realVersion, #name))
-    RESOLVE(GetFileVersionInfoA);
-    RESOLVE(GetFileVersionInfoW);
-    RESOLVE(GetFileVersionInfoExA);
-    RESOLVE(GetFileVersionInfoExW);
-    RESOLVE(GetFileVersionInfoSizeA);
-    RESOLVE(GetFileVersionInfoSizeW);
-    RESOLVE(GetFileVersionInfoSizeExA);
-    RESOLVE(GetFileVersionInfoSizeExW);
-    RESOLVE(VerFindFileA);
-    RESOLVE(VerFindFileW);
-    RESOLVE(VerInstallFileA);
-    RESOLVE(VerInstallFileW);
-    RESOLVE(VerLanguageNameA);
-    RESOLVE(VerLanguageNameW);
-    RESOLVE(VerQueryValueA);
-    RESOLVE(VerQueryValueW);
-#undef RESOLVE
+    UINT length = GetSystemDirectoryW(path, MAX_PATH);
+
+    if (length == 0 || length > MAX_PATH - 16)
+        return nullptr;
+
+    wcscat_s(path, L"\\");
+    wcscat_s(path, kSystemModuleNames[which]);
+
+    g_systemModules[which] = LoadLibraryW(path);
+
+    return g_systemModules[which];
 }
 
-void UninitProxy()
+FARPROC SystemProc(SystemModule which, const char* name)
 {
-    if (g_realVersion)
+    HMODULE module = SystemModuleHandle(which);
+
+    return module ? GetProcAddress(module, name) : nullptr;
+}
+
+// Resolve `name` from the owning system DLL once and cache it in `cache`.
+// Every stub below is a one-liner on top of this.
+template <typename Fn>
+Fn Resolved(SystemModule which, const char* name, Fn& cache)
+{
+    if (!cache)
+        cache = reinterpret_cast<Fn>(reinterpret_cast<void*>(SystemProc(which, name)));
+
+    return cache;
+}
+
+// DllCanUnloadNow, DllGetClassObject, DllRegisterServer and DllUnregisterServer
+// are exported by BOTH dinput.dll and dinput8.dll, and a single binary can only
+// define each once. Which one a call belongs to is decided by what this file is
+// named — the one place where the deployment name genuinely changes behaviour.
+// Anything else (version.dll, an .asi) never receives these calls at all, so
+// the DirectInput 8 DLL is a harmless default.
+SystemModule ComObjectHost()
+{
+    static SystemModule cached = SysDInput8;
+    static bool resolved = false;
+
+    if (resolved)
+        return cached;
+
+    resolved = true;
+
+    HMODULE self = nullptr;
+
+    if (GetModuleHandleExW(
+            GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+            reinterpret_cast<LPCWSTR>(&ComObjectHost), &self) && self)
     {
-        FreeLibrary(g_realVersion);
-        g_realVersion = nullptr;
+        wchar_t path[MAX_PATH]{};
+
+        if (GetModuleFileNameW(self, path, MAX_PATH))
+        {
+            const wchar_t* slash = wcsrchr(path, L'\\');
+            const wchar_t* name  = slash ? slash + 1 : path;
+
+            if (_wcsicmp(name, L"dinput.dll") == 0)
+                cached = SysDInput;
+        }
     }
+
+    return cached;
+}
+
+} // namespace
+
+// ---------------------------------------------------------------------------
+// version.dll
+// ---------------------------------------------------------------------------
+
+#define FORWARD(module, ret, name, params, args, fail)                        \
+    extern "C" ret WINAPI name params                                         \
+    {                                                                         \
+        using Fn = ret (WINAPI*) params;                                      \
+        static Fn cache = nullptr;                                            \
+        Fn fn = Resolved<Fn>(module, #name, cache);                           \
+        return fn ? fn args : fail;                                           \
+    }
+
+FORWARD(SysVersion, BOOL, GetFileVersionInfoA,
+    (LPCSTR f, DWORD h, DWORD len, LPVOID p), (f, h, len, p), FALSE)
+
+FORWARD(SysVersion, BOOL, GetFileVersionInfoW,
+    (LPCWSTR f, DWORD h, DWORD len, LPVOID p), (f, h, len, p), FALSE)
+
+FORWARD(SysVersion, BOOL, GetFileVersionInfoExA,
+    (DWORD flags, LPCSTR f, DWORD h, DWORD len, LPVOID p), (flags, f, h, len, p), FALSE)
+
+FORWARD(SysVersion, BOOL, GetFileVersionInfoExW,
+    (DWORD flags, LPCWSTR f, DWORD h, DWORD len, LPVOID p), (flags, f, h, len, p), FALSE)
+
+FORWARD(SysVersion, DWORD, GetFileVersionInfoSizeA,
+    (LPCSTR f, LPDWORD handle), (f, handle), 0)
+
+FORWARD(SysVersion, DWORD, GetFileVersionInfoSizeW,
+    (LPCWSTR f, LPDWORD handle), (f, handle), 0)
+
+FORWARD(SysVersion, DWORD, GetFileVersionInfoSizeExA,
+    (DWORD flags, LPCSTR f, LPDWORD handle), (flags, f, handle), 0)
+
+FORWARD(SysVersion, DWORD, GetFileVersionInfoSizeExW,
+    (DWORD flags, LPCWSTR f, LPDWORD handle), (flags, f, handle), 0)
+
+// Undocumented, and not in any SDK header — the signature is taken from the
+// export as the loader sees it. Present so that a game importing the full
+// version.dll export set still binds.
+FORWARD(SysVersion, BOOL, GetFileVersionInfoByHandle,
+    (HANDLE h, LPCWSTR f, DWORD len, LPVOID p), (h, f, len, p), FALSE)
+
+FORWARD(SysVersion, DWORD, VerFindFileA,
+    (DWORD uFlags, LPCSTR szFileName, LPCSTR szWinDir, LPCSTR szAppDir,
+     LPSTR szCurDir, PUINT lpuCurDirLen, LPSTR szDestDir, PUINT lpuDestDirLen),
+    (uFlags, szFileName, szWinDir, szAppDir, szCurDir, lpuCurDirLen, szDestDir, lpuDestDirLen), 0)
+
+FORWARD(SysVersion, DWORD, VerFindFileW,
+    (DWORD uFlags, LPCWSTR szFileName, LPCWSTR szWinDir, LPCWSTR szAppDir,
+     LPWSTR szCurDir, PUINT lpuCurDirLen, LPWSTR szDestDir, PUINT lpuDestDirLen),
+    (uFlags, szFileName, szWinDir, szAppDir, szCurDir, lpuCurDirLen, szDestDir, lpuDestDirLen), 0)
+
+FORWARD(SysVersion, DWORD, VerInstallFileA,
+    (DWORD uFlags, LPCSTR szSrcFileName, LPCSTR szDestFileName, LPCSTR szSrcDir,
+     LPCSTR szDestDir, LPCSTR szCurDir, LPSTR szTmpFile, PUINT lpuTmpFileLen),
+    (uFlags, szSrcFileName, szDestFileName, szSrcDir, szDestDir, szCurDir, szTmpFile, lpuTmpFileLen), 0)
+
+FORWARD(SysVersion, DWORD, VerInstallFileW,
+    (DWORD uFlags, LPCWSTR szSrcFileName, LPCWSTR szDestFileName, LPCWSTR szSrcDir,
+     LPCWSTR szDestDir, LPCWSTR szCurDir, LPWSTR szTmpFile, PUINT lpuTmpFileLen),
+    (uFlags, szSrcFileName, szDestFileName, szSrcDir, szDestDir, szCurDir, szTmpFile, lpuTmpFileLen), 0)
+
+FORWARD(SysVersion, DWORD, VerLanguageNameA,
+    (DWORD wLang, LPSTR szLang, DWORD nSize), (wLang, szLang, nSize), 0)
+
+FORWARD(SysVersion, DWORD, VerLanguageNameW,
+    (DWORD wLang, LPWSTR szLang, DWORD nSize), (wLang, szLang, nSize), 0)
+
+FORWARD(SysVersion, BOOL, VerQueryValueA,
+    (LPCVOID pBlock, LPCSTR lpSubBlock, LPVOID* lplpBuffer, PUINT puLen),
+    (pBlock, lpSubBlock, lplpBuffer, puLen), FALSE)
+
+FORWARD(SysVersion, BOOL, VerQueryValueW,
+    (LPCVOID pBlock, LPCWSTR lpSubBlock, LPVOID* lplpBuffer, PUINT puLen),
+    (pBlock, lpSubBlock, lplpBuffer, puLen), FALSE)
+
+// ---------------------------------------------------------------------------
+// dinput8.dll
+// ---------------------------------------------------------------------------
+
+// Routed through the DirectInput subsystem rather than forwarded blindly, so
+// that DirectInput.DeviceFilter and the enumeration logging apply. It falls
+// back to the real export when neither is configured.
+extern "C" HRESULT WINAPI DirectInput8Create(HINSTANCE hinst, DWORD dwVersion,
+    const void* riidltf, LPVOID* ppvOut, void* punkOuter)
+{
+    return DirectInput8CreateFiltered(hinst, dwVersion, riidltf, ppvOut, punkOuter);
+}
+
+// Returns the address of dinput8's c_dfDIJoystick data format. Games that link
+// the DirectX SDK's dinput8.lib import this, so leaving it out stops them
+// loading at all.
+FORWARD(SysDInput8, LPVOID, GetdfDIJoystick, (void), (), nullptr)
+
+// ---------------------------------------------------------------------------
+// dinput.dll
+// ---------------------------------------------------------------------------
+
+extern "C" HRESULT WINAPI DirectInputCreateA(HINSTANCE hinst, DWORD dwVersion,
+    LPVOID* ppDI, void* punkOuter)
+{
+    if (g_diFixLegacyEnum)
+        return DirectInputBridgeCreate(hinst, dwVersion, ppDI, punkOuter);
+
+    using Fn = HRESULT (WINAPI*)(HINSTANCE, DWORD, LPVOID*, void*);
+    static Fn cache = nullptr;
+
+    Fn fn = Resolved<Fn>(SysDInput, "DirectInputCreateA", cache);
+
+    return fn ? fn(hinst, dwVersion, ppDI, punkOuter) : E_FAIL;
+}
+
+// The Unicode entry point is always forwarded: the bridge only handles ANSI
+// device enumeration, and no game seen on this path uses it.
+FORWARD(SysDInput, HRESULT, DirectInputCreateW,
+    (HINSTANCE hinst, DWORD dwVersion, LPVOID* ppDI, void* punkOuter),
+    (hinst, dwVersion, ppDI, punkOuter), E_FAIL)
+
+extern "C" HRESULT WINAPI DirectInputCreateEx(HINSTANCE hinst, DWORD dwVersion,
+    const void* riid, LPVOID* ppvOut, void* punkOuter)
+{
+    if (g_diFixLegacyEnum && DirectInputBridgeWantsIid(riid))
+        return DirectInputBridgeCreate(hinst, dwVersion, ppvOut, punkOuter);
+
+    using Fn = HRESULT (WINAPI*)(HINSTANCE, DWORD, const void*, LPVOID*, void*);
+    static Fn cache = nullptr;
+
+    Fn fn = Resolved<Fn>(SysDInput, "DirectInputCreateEx", cache);
+
+    return fn ? fn(hinst, dwVersion, riid, ppvOut, punkOuter) : E_FAIL;
 }
 
 // ---------------------------------------------------------------------------
-// Export stubs — forward every call to the real system version.dll
+// Shared between dinput.dll and dinput8.dll — see ComObjectHost above
 // ---------------------------------------------------------------------------
 
-extern "C" BOOL WINAPI GetFileVersionInfoA(LPCSTR f, DWORD h, DWORD len, LPVOID p)
-    { return pfn_GetFileVersionInfoA ? pfn_GetFileVersionInfoA(f, h, len, p) : FALSE; }
-
-extern "C" BOOL WINAPI GetFileVersionInfoW(LPCWSTR f, DWORD h, DWORD len, LPVOID p)
-    { return pfn_GetFileVersionInfoW ? pfn_GetFileVersionInfoW(f, h, len, p) : FALSE; }
-
-extern "C" BOOL WINAPI GetFileVersionInfoExA(DWORD flags, LPCSTR f, DWORD h, DWORD len, LPVOID p)
-    { return pfn_GetFileVersionInfoExA ? pfn_GetFileVersionInfoExA(flags, f, h, len, p) : FALSE; }
-
-extern "C" BOOL WINAPI GetFileVersionInfoExW(DWORD flags, LPCWSTR f, DWORD h, DWORD len, LPVOID p)
-    { return pfn_GetFileVersionInfoExW ? pfn_GetFileVersionInfoExW(flags, f, h, len, p) : FALSE; }
-
-extern "C" DWORD WINAPI GetFileVersionInfoSizeA(LPCSTR f, LPDWORD handle)
-    { return pfn_GetFileVersionInfoSizeA ? pfn_GetFileVersionInfoSizeA(f, handle) : 0; }
-
-extern "C" DWORD WINAPI GetFileVersionInfoSizeW(LPCWSTR f, LPDWORD handle)
-    { return pfn_GetFileVersionInfoSizeW ? pfn_GetFileVersionInfoSizeW(f, handle) : 0; }
-
-extern "C" DWORD WINAPI GetFileVersionInfoSizeExA(DWORD flags, LPCSTR f, LPDWORD handle)
-    { return pfn_GetFileVersionInfoSizeExA ? pfn_GetFileVersionInfoSizeExA(flags, f, handle) : 0; }
-
-extern "C" DWORD WINAPI GetFileVersionInfoSizeExW(DWORD flags, LPCWSTR f, LPDWORD handle)
-    { return pfn_GetFileVersionInfoSizeExW ? pfn_GetFileVersionInfoSizeExW(flags, f, handle) : 0; }
-
-extern "C" DWORD WINAPI VerFindFileA(DWORD uFlags,
-    LPCSTR szFileName, LPCSTR szWinDir, LPCSTR szAppDir,
-    LPSTR szCurDir, PUINT lpuCurDirLen, LPSTR szDestDir, PUINT lpuDestDirLen)
+extern "C" HRESULT WINAPI DllCanUnloadNow(void)
 {
-    return pfn_VerFindFileA
-        ? pfn_VerFindFileA(uFlags, szFileName, szWinDir, szAppDir, szCurDir, lpuCurDirLen, szDestDir, lpuDestDirLen)
-        : 0;
+    using Fn = HRESULT (WINAPI*)(void);
+
+    Fn fn = reinterpret_cast<Fn>(
+        reinterpret_cast<void*>(SystemProc(ComObjectHost(), "DllCanUnloadNow")));
+
+    // S_FALSE keeps the DLL resident, which is what we want either way: the
+    // DirectInput bridge patches vtables the game is still holding.
+    return fn ? fn() : S_FALSE;
 }
 
-extern "C" DWORD WINAPI VerFindFileW(DWORD uFlags,
-    LPCWSTR szFileName, LPCWSTR szWinDir, LPCWSTR szAppDir,
-    LPWSTR szCurDir, PUINT lpuCurDirLen, LPWSTR szDestDir, PUINT lpuDestDirLen)
+extern "C" HRESULT WINAPI DllGetClassObject(const void* rclsid, const void* riid, LPVOID* ppv)
 {
-    return pfn_VerFindFileW
-        ? pfn_VerFindFileW(uFlags, szFileName, szWinDir, szAppDir, szCurDir, lpuCurDirLen, szDestDir, lpuDestDirLen)
-        : 0;
+    using Fn = HRESULT (WINAPI*)(const void*, const void*, LPVOID*);
+
+    Fn fn = reinterpret_cast<Fn>(
+        reinterpret_cast<void*>(SystemProc(ComObjectHost(), "DllGetClassObject")));
+
+    return fn ? fn(rclsid, riid, ppv) : 0x80040111L; // CLASS_E_CLASSNOTAVAILABLE
 }
 
-extern "C" DWORD WINAPI VerInstallFileA(DWORD uFlags,
-    LPCSTR szSrcFileName, LPCSTR szDestFileName,
-    LPCSTR szSrcDir, LPCSTR szDestDir, LPCSTR szCurDir,
-    LPSTR szTmpFile, PUINT lpuTmpFileLen)
+extern "C" HRESULT WINAPI DllRegisterServer(void)
 {
-    return pfn_VerInstallFileA
-        ? pfn_VerInstallFileA(uFlags, szSrcFileName, szDestFileName, szSrcDir, szDestDir, szCurDir, szTmpFile, lpuTmpFileLen)
-        : 0;
+    using Fn = HRESULT (WINAPI*)(void);
+
+    Fn fn = reinterpret_cast<Fn>(
+        reinterpret_cast<void*>(SystemProc(ComObjectHost(), "DllRegisterServer")));
+
+    return fn ? fn() : E_FAIL;
 }
 
-extern "C" DWORD WINAPI VerInstallFileW(DWORD uFlags,
-    LPCWSTR szSrcFileName, LPCWSTR szDestFileName,
-    LPCWSTR szSrcDir, LPCWSTR szDestDir, LPCWSTR szCurDir,
-    LPWSTR szTmpFile, PUINT lpuTmpFileLen)
+extern "C" HRESULT WINAPI DllUnregisterServer(void)
 {
-    return pfn_VerInstallFileW
-        ? pfn_VerInstallFileW(uFlags, szSrcFileName, szDestFileName, szSrcDir, szDestDir, szCurDir, szTmpFile, lpuTmpFileLen)
-        : 0;
+    using Fn = HRESULT (WINAPI*)(void);
+
+    Fn fn = reinterpret_cast<Fn>(
+        reinterpret_cast<void*>(SystemProc(ComObjectHost(), "DllUnregisterServer")));
+
+    return fn ? fn() : E_FAIL;
 }
 
-extern "C" DWORD WINAPI VerLanguageNameA(DWORD wLang, LPSTR szLang, DWORD nSize)
-    { return pfn_VerLanguageNameA ? pfn_VerLanguageNameA(wLang, szLang, nSize) : 0; }
-
-extern "C" DWORD WINAPI VerLanguageNameW(DWORD wLang, LPWSTR szLang, DWORD nSize)
-    { return pfn_VerLanguageNameW ? pfn_VerLanguageNameW(wLang, szLang, nSize) : 0; }
-
-extern "C" BOOL WINAPI VerQueryValueA(LPCVOID pBlock, LPCSTR lpSubBlock, LPVOID* lplpBuffer, PUINT puLen)
-    { return pfn_VerQueryValueA ? pfn_VerQueryValueA(pBlock, lpSubBlock, lplpBuffer, puLen) : FALSE; }
-
-extern "C" BOOL WINAPI VerQueryValueW(LPCVOID pBlock, LPCWSTR lpSubBlock, LPVOID* lplpBuffer, PUINT puLen)
-    { return pfn_VerQueryValueW ? pfn_VerQueryValueW(pBlock, lpSubBlock, lplpBuffer, puLen) : FALSE; }
-
-#endif // INTERPOSER_PROXY
+#undef FORWARD

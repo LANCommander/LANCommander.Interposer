@@ -5,98 +5,52 @@ sidebar_position: 2
 
 # Release Packages
 
-Each release publishes five ZIP variants for manual deployment, plus a single LCX package for import into LANCommander. Choose the ZIP variant that matches how the DLL will be loaded into the game process — the LCX bundles all of them and lets you pick per game.
+| Artifact | For |
+|---|---|
+| `LANCommander.Interposer.<version>.zip` | Manual deployment |
+| `LANCommander.Interposer.<version>.lcx` | Import into LANCommander |
 
-## Standard
+## Manual Deployment
 
-**Files:** `LANCommander.Interposer.dll` + `LANCommander.Interposer.Injector.exe`
-
-Use this when you have explicit control over how the DLL is loaded — for example, via the bundled injector CLI, the LANCommander client, or your own bootstrap code.
+The manual deployment consists of builds for both x86 and 64-bit architectures:
 
 ```
+README.md
 x64\
-  LANCommander.Interposer.dll
-  LANCommander.Interposer.Injector.exe
 x86\
   LANCommander.Interposer.dll
+  version.dll
+  dinput8.dll
+  dinput.dll
+  LANCommander.Interposer.asi
   LANCommander.Interposer.Injector.exe
-.interposer\
-  Config.yml
+  Plugins\
+    LANCommander.Interposer.Plugin.CDKey.dll
+  .interposer\
+    Config.yml
 ```
 
-This is the most flexible variant and the recommended choice for use with LANCommander.
-
-## Proxy
-
-**Files:** `version.dll`
-
-The DLL is renamed to `version.dll` — a Windows system library that most game executables load implicitly. Placing it in the same directory as the game executable causes Windows to load it automatically before the game starts, with no injector required.
-
-```
-x64\
-  version.dll
-x86\
-  version.dll
-.interposer\
-  Config.yml
-```
-
-:::tip
-This is the easiest deployment method for manual use. Copy the correct architecture's `version.dll` and the `.interposer\` directory next to the game executable and launch the game normally.
+:::note Unified Binary
+`version.dll`, `dinput8.dll`, `dinput.dll` and `LANCommander.Interposer.asi` are
+byte-for-byte the same file as `LANCommander.Interposer.dll`. The injection method
+will vary based on which filename is used. Supported DLL signatures are represented
+by these filenames.
 :::
 
-:::caution
-Some games ship their own `version.dll`. If the game directory already contains `version.dll`, use the Standard or ASI variant instead.
-:::
+Copy **one** of those files, plus the `.interposer\` directory, next to the game
+executable.
 
-## Proxy (dinput8)
+| File | Use it when |
+|---|---|
+| `version.dll` | **Start here.** Most executables load `version.dll` implicitly at startup, so nothing else is needed. |
+| `dinput8.dll` | The game already ships its own `version.dll`, or a mod loader has claimed that name. Works for games using DirectInput 8. |
+| `dinput.dll` | DirectInput 3/7 era games. They commonly import `dinput.dll` and nothing else that can be proxied, so this is often the only method that reaches them. Pair it with the [DirectInput](/Interposer/DirectInput) settings. |
+| `LANCommander.Interposer.asi` | The game already has an ASI loader installed. |
+| `LANCommander.Interposer.dll` | You control loading yourself — via the bundled injector, a launcher, or your own bootstrap code. |
 
-**Files:** `dinput8.dll`
-
-This is another version of the proxy DLL that hooks using `dinput8.dll` instead of `version.dll`. This is also the easiest method, but is provided as an alternative as most hook-based game patchers already use `dinput8.dll` for injection.
-
-```
-x64\
-  dinput8.dll
-x86\
-  dinput8.dll
-.interposer\
-  Config.yml
-```
-
-## Proxy (dinput)
-
-**Files:** `dinput.dll`
-
-The DLL is output as `dinput.dll`, for games from the DirectInput 3 / 7 era. Those titles commonly import `dinput.dll` and nothing else that can be proxied — no `version.dll`, no `dinput8.dll` — so this is often the only load method that can reach them at all.
-
-```
-x64\
-  dinput.dll
-x86\
-  dinput.dll
-.interposer\
-  Config.yml
-```
-
-Pair it with the [DirectInput](/Interposer/DirectInput) options to bridge the game onto DirectInput 8, working around the record-array overrun in the legacy Windows `dinput.dll` that makes affected games hang or crash on startup. With the bridge enabled the system `dinput.dll` is never loaded; with it disabled this build is a plain passthrough.
-
-## ASI
-
-**Files:** `LANCommander.Interposer.asi`
-
-The DLL is output as a `.asi` file for use with ASI loaders such as [Ultimate ASI Loader](https://github.com/ThirteenAG/Ultimate-ASI-Loader) or ScriptHookV. These loaders are already present in many moddable games (GTA series, etc.) and will pick up any `.asi` file placed in the game directory.
-
-```
-x64\
-  LANCommander.Interposer.asi
-x86\
-  LANCommander.Interposer.asi
-.interposer\
-  Config.yml
-```
-
-Use this variant when the target game already has an ASI loader installed and you want to avoid replacing any existing `version.dll`.
+`Plugins\` is shipped but not active. To enable a plugin, copy it into
+`.interposer\Plugins\` beside the DLL and add its section under `Plugins:` in
+`Config.yml`.
 
 ## Architecture
 
@@ -128,7 +82,3 @@ The Standard (injector) variant is not offered through the LCX — driving the i
 | Install | Copies the selected build next to the game executable and renders `.interposer\Config.yml` from the configured options |
 | Name Change | Keeps `Player.Username` in sync with the LANCommander player alias |
 | Uninstall | Removes the DLL and the `.interposer\` directory. Files are checked against their embedded product name first, so a game's own `version.dll` is never deleted. |
-
-:::caution
-`Config.yml` is rendered at install time only. Changing options on the server requires reinstalling the game before they take effect, and local edits to the file are overwritten when that happens.
-:::

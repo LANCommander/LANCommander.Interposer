@@ -9,7 +9,22 @@ on:
 jobs:
   release:
     runs-on: windows-latest
+
+    # Load-bearing for code signing, not bookkeeping. The Azure federated
+    # credential is registered against the subject
+    #
+    #   repo:LANCommander@144402227/LANCommander.Interposer@1181985472:environment:release
+    #
+    # and the ":environment:release" tail only appears in the OIDC token's
+    # subject claim when the job declares an environment. Without this key the
+    # token's subject is ref-scoped instead, Entra rejects it as no matching
+    # federated identity credential, and azure/login fails.
+    #
+    # It also gates the whole job: any protection rules on the `release`
+    # environment (required reviewers, wait timer, branch/tag restrictions)
+    # apply to the entire release, not just the signing steps.
     environment: release
+
     permissions:
       contents: write
       id-token: write   # required for the OIDC federated credential used by azure/login
@@ -52,54 +67,6 @@ jobs:
           /t:LANCommander_Interposer,LANCommander_Interposer_Injector
           /p:Configuration=Release /p:Platform=x86
 
-      - name: Build Release Proxy x64
-        run: >
-          msbuild LANCommander.Interposer.slnx
-          /t:LANCommander_Interposer
-          /p:Configuration="Release Proxy" /p:Platform=x64
-
-      - name: Build Release Proxy x86
-        run: >
-          msbuild LANCommander.Interposer.slnx
-          /t:LANCommander_Interposer
-          /p:Configuration="Release Proxy" /p:Platform=x86
-
-      - name: Build Release Proxy DInput8 x64
-        run: >
-          msbuild LANCommander.Interposer.slnx
-          /t:LANCommander_Interposer
-          /p:Configuration="Release Proxy DInput8" /p:Platform=x64
-
-      - name: Build Release Proxy DInput8 x86
-        run: >
-          msbuild LANCommander.Interposer.slnx
-          /t:LANCommander_Interposer
-          /p:Configuration="Release Proxy DInput8" /p:Platform=x86
-
-      - name: Build Release Proxy DInput x64
-        run: >
-          msbuild LANCommander.Interposer.slnx
-          /t:LANCommander_Interposer
-          /p:Configuration="Release Proxy DInput" /p:Platform=x64
-
-      - name: Build Release Proxy DInput x86
-        run: >
-          msbuild LANCommander.Interposer.slnx
-          /t:LANCommander_Interposer
-          /p:Configuration="Release Proxy DInput" /p:Platform=x86
-
-      - name: Build Release ASI x64
-        run: >
-          msbuild LANCommander.Interposer.slnx
-          /t:LANCommander_Interposer
-          /p:Configuration="Release ASI" /p:Platform=x64
-
-      - name: Build Release ASI x86
-        run: >
-          msbuild LANCommander.Interposer.slnx
-          /t:LANCommander_Interposer
-          /p:Configuration="Release ASI" /p:Platform=x86
-
       - name: Build Plugin CDKey x64
         run: >
           msbuild LANCommander.Interposer.slnx
@@ -135,6 +102,18 @@ jobs:
       # These resolve from the `release` environment as well as the repository,
       # because the job declares that environment (see the top of the job).
       # Environment-scoped values win over repository-scoped ones.
+      - name: Build Plugin Mouse x64
+        run: >
+          msbuild LANCommander.Interposer.slnx
+          /t:LANCommander_Interposer_Plugin_Mouse
+          /p:Configuration=Release /p:Platform=x64
+
+      - name: Build Plugin Mouse x86
+        run: >
+          msbuild LANCommander.Interposer.slnx
+          /t:LANCommander_Interposer_Plugin_Mouse
+          /p:Configuration=Release /p:Platform=x86
+
       - name: Report signing configuration
         shell: pwsh
         run: |
@@ -151,21 +130,22 @@ jobs:
         run: |
           $ErrorActionPreference = 'Stop'
 
-          # Every PE the release ships. LANCommander.Interposer.asi is a renamed
-          # DLL — signtool dispatches on PE format, not file extension.
+          # Every distinct PE the release ships: the Interposer itself, the
+          # injector, and the CD key plugin. One Interposer DLL serves every
+          # load method — packaging copies it out under the name each method
+          # needs (version.dll, dinput8.dll, dinput.dll, *.asi) — so it is
+          # signed once here, before any of those copies are made. Authenticode
+          # covers the PE contents, not the file name, so every copy in the
+          # archive and in the LCX payload carries the signature.
           $patterns = @(
             'LANCommander.Interposer.dll'
             'LANCommander.Interposer.Injector.exe'
-            'LANCommander.Interposer.Plugin.CDKey.dll'
-            'LANCommander.Interposer.asi'
-            'version.dll'
-            'dinput8.dll'
-            'dinput.dll'
+            'LANCommander.Interposer.Plugin.*.dll'
           )
 
-          # The signing action expects absolute paths. Each build configuration
-          # writes to its own subdirectory (Injector\, Proxy\, ProxyDInput8\,
-          # ProxyDInput\, ASI\, CDKey\), so the search has to recurse.
+          # The signing action expects absolute paths. Each project writes to its
+          # own subdirectory under Release\, so the search has to recurse. The
+          # plugin pattern is a wildcard so a new plugin is signed by existing.
           $files = Get-ChildItem -Path 'Release' -Recurse -File -Include $patterns |
             Select-Object -ExpandProperty FullName |
             Sort-Object -Unique
@@ -245,109 +225,95 @@ jobs:
             throw "$($failed.Count) file(s) failed signature verification."
           }
 
-      - name: Create release ZIPs
+      - name: Create release ZIP
         shell: pwsh
         run: |
+          $ErrorActionPreference = 'Stop'
+
           $version   = '${{ github.ref_name }}'
           $sampleDir = 'LANCommander.Interposer\.interposer'
+          $d         = 'pkg\release'
 
-          # Standard (DLL + Injector)
-          $d = 'pkg\standard'
-          New-Item -ItemType Directory -Force "$d\x64" | Out-Null
-          Copy-Item 'Release\Injector\x64\LANCommander.Interposer.dll'            "$d\x64\"
-          Copy-Item 'Release\Injector\x64\LANCommander.Interposer.Injector.exe'   "$d\x64\"
-          Copy-Item -Recurse $sampleDir "$d\x64\"
-          Compress-Archive -Path "$d\x64\*" -DestinationPath "LANCommander.Interposer.$version.x64.zip"
+          # One archive, one directory per architecture. Every load method is
+          # the same signed DLL copied out under the name that method needs, so
+          # the user picks a file name rather than a download. Authenticode
+          # covers the PE contents, not the file name, so each copy stays
+          # signed.
+          $loaderNames = @('version.dll', 'dinput8.dll', 'dinput.dll', 'LANCommander.Interposer.asi')
 
-          New-Item -ItemType Directory -Force "$d\x86" | Out-Null
-          Copy-Item 'Release\Injector\x86\LANCommander.Interposer.dll'            "$d\x86\"
-          Copy-Item 'Release\Injector\x86\LANCommander.Interposer.Injector.exe'   "$d\x86\"
-          Copy-Item -Recurse $sampleDir "$d\x86\"
-          Compress-Archive -Path "$d\x86\*" -DestinationPath "LANCommander.Interposer.$version.x86.zip"
+          foreach ($arch in @('x64', 'x86')) {
+            $archDir = "$d\$arch"
+            New-Item -ItemType Directory -Force $archDir | Out-Null
 
-          # Proxy (version.dll)
-          $d = 'pkg\proxy'
-          New-Item -ItemType Directory -Force "$d\x64" | Out-Null
-          Copy-Item 'Release\Proxy\x64\version.dll' "$d\x64\"
-          Copy-Item -Recurse $sampleDir "$d\x64\"
-          Compress-Archive -Path "$d\x64\*" -DestinationPath "LANCommander.Interposer.Proxy.$version.x64.zip"
+            $dll = "Release\Injector\$arch\LANCommander.Interposer.dll"
 
-          New-Item -ItemType Directory -Force "$d\x86" | Out-Null
-          Copy-Item 'Release\Proxy\x86\version.dll' "$d\x86\"
-          Copy-Item -Recurse $sampleDir "$d\x86\"
-          Compress-Archive -Path "$d\x86\*" -DestinationPath "LANCommander.Interposer.Proxy.$version.x86.zip"
+            Copy-Item $dll "$archDir\"
+            Copy-Item "Release\Injector\$arch\LANCommander.Interposer.Injector.exe" "$archDir\"
 
-          # Proxy DInput8 (dinput8.dll)
-          $d = 'pkg\proxy-dinput8'
-          New-Item -ItemType Directory -Force "$d\x64" | Out-Null
-          Copy-Item 'Release\ProxyDInput8\x64\dinput8.dll' "$d\x64\"
-          Copy-Item -Recurse $sampleDir "$d\x64\"
-          Compress-Archive -Path "$d\x64\*" -DestinationPath "LANCommander.Interposer.Proxy.DInput8.$version.x64.zip"
+            foreach ($name in $loaderNames) {
+              Copy-Item $dll (Join-Path $archDir $name)
+            }
 
-          New-Item -ItemType Directory -Force "$d\x86" | Out-Null
-          Copy-Item 'Release\ProxyDInput8\x86\dinput8.dll' "$d\x86\"
-          Copy-Item -Recurse $sampleDir "$d\x86\"
-          Compress-Archive -Path "$d\x86\*" -DestinationPath "LANCommander.Interposer.Proxy.DInput8.$version.x86.zip"
+            # Shipped but not enabled: plugins only load from .interposer\Plugins\,
+            # so the user has to opt in by moving one there. Listed explicitly
+            # rather than globbed — Plugin.Example is a template for plugin
+            # authors and must not end up in a release.
+            New-Item -ItemType Directory -Force "$archDir\Plugins" | Out-Null
 
-          # Proxy DInput (dinput.dll)
-          $d = 'pkg\proxy-dinput'
-          New-Item -ItemType Directory -Force "$d\x64" | Out-Null
-          Copy-Item 'Release\ProxyDInput\x64\dinput.dll' "$d\x64\"
-          Copy-Item -Recurse $sampleDir "$d\x64\"
-          Compress-Archive -Path "$d\x64\*" -DestinationPath "LANCommander.Interposer.Proxy.DInput.$version.x64.zip"
+            foreach ($plugin in @('CDKey', 'Mouse')) {
+              $source = "Release\$plugin\$arch\LANCommander.Interposer.Plugin.$plugin.dll"
 
-          New-Item -ItemType Directory -Force "$d\x86" | Out-Null
-          Copy-Item 'Release\ProxyDInput\x86\dinput.dll' "$d\x86\"
-          Copy-Item -Recurse $sampleDir "$d\x86\"
-          Compress-Archive -Path "$d\x86\*" -DestinationPath "LANCommander.Interposer.Proxy.DInput.$version.x86.zip"
+              if (-not (Test-Path -LiteralPath $source)) { throw "Missing plugin build: $source" }
 
-          # ASI
-          $d = 'pkg\asi'
-          New-Item -ItemType Directory -Force "$d\x64" | Out-Null
-          Copy-Item 'Release\ASI\x64\LANCommander.Interposer.asi' "$d\x64\"
-          Copy-Item -Recurse $sampleDir "$d\x64\"
-          Compress-Archive -Path "$d\x64\*" -DestinationPath "LANCommander.Interposer.ASI.$version.x64.zip"
+              Copy-Item $source "$archDir\Plugins\"
+            }
 
-          New-Item -ItemType Directory -Force "$d\x86" | Out-Null
-          Copy-Item 'Release\ASI\x86\LANCommander.Interposer.asi' "$d\x86\"
-          Copy-Item -Recurse $sampleDir "$d\x86\"
-          Compress-Archive -Path "$d\x86\*" -DestinationPath "LANCommander.Interposer.ASI.$version.x86.zip"
+            Copy-Item -Recurse $sampleDir "$archDir\"
+          }
+
+          (Get-Content 'packaging\README.md' -Raw) -replace '\{VersionTag\}', $version |
+            Set-Content "$d\README.md" -Encoding UTF8NoBOM
+
+          Compress-Archive -Path "$d\*" -DestinationPath "LANCommander.Interposer.$version.zip"
+
+          # Guard the layout the README documents.
+          Add-Type -AssemblyName System.IO.Compression.FileSystem
+          $zf = [System.IO.Compression.ZipFile]::OpenRead((Resolve-Path "LANCommander.Interposer.$version.zip").Path)
+          $names = @($zf.Entries | ForEach-Object { $_.FullName })
+          $zf.Dispose()
+
+          $expected = @('README.md')
+          foreach ($arch in @('x64', 'x86')) {
+            $expected += "$arch/LANCommander.Interposer.dll"
+            $expected += "$arch/LANCommander.Interposer.Injector.exe"
+            $expected += "$arch/Plugins/LANCommander.Interposer.Plugin.CDKey.dll"
+            $expected += "$arch/Plugins/LANCommander.Interposer.Plugin.Mouse.dll"
+            $expected += "$arch/.interposer/Config.yml"
+            foreach ($name in $loaderNames) { $expected += "$arch/$name" }
+          }
+
+          $missing = $expected | Where-Object { $names -notcontains $_ }
+          if ($missing) { throw "Release ZIP is missing expected entries: $($missing -join ', ')" }
+
+          Write-Host "Release ZIP entries: $($names.Count)"
 
       - name: Create redistributable payload ZIP
         shell: pwsh
         run: |
           $version = '${{ github.ref_name }}'
 
-          # Single payload carrying every load method for both architectures.
-          # The redistributable's install script picks one based on the
-          # Loader.Method / Loader.Architecture options and renders
-          # .interposer\Config.yml itself, so no sample config is included.
+          # One DLL per architecture. It serves every load method, so the
+          # install script copies it out under whichever name Loader.Method
+          # calls for and renders .interposer\Config.yml itself — no sample
+          # config and no per-method duplicates are included.
           $d = 'pkg\redistributable'
 
           foreach ($arch in @('x64', 'x86')) {
             New-Item -ItemType Directory -Force "$d\$arch" | Out-Null
-            Copy-Item "Release\Proxy\$arch\version.dll"                      "$d\$arch\"
-            Copy-Item "Release\ProxyDInput8\$arch\dinput8.dll"               "$d\$arch\"
-            Copy-Item "Release\ProxyDInput\$arch\dinput.dll"                 "$d\$arch\"
-            Copy-Item "Release\ASI\$arch\LANCommander.Interposer.asi"        "$d\$arch\"
+            Copy-Item "Release\Injector\$arch\LANCommander.Interposer.dll"   "$d\$arch\"
           }
 
           Compress-Archive -Path "$d\*" -DestinationPath "LANCommander.Interposer.Redistributable.$version.zip"
-
-      - name: Create Plugin CDKey ZIPs
-        shell: pwsh
-        run: |
-          $version = '${{ github.ref_name }}'
-
-          $d = 'pkg\cdkey\x64'
-          New-Item -ItemType Directory -Force $d | Out-Null
-          Copy-Item 'Release\CDKey\x64\LANCommander.Interposer.Plugin.CDKey.dll' "$d\"
-          Compress-Archive -Path "$d\*" -DestinationPath "LANCommander.Interposer.Plugin.CDKey.$version.x64.zip"
-
-          $d = 'pkg\cdkey\x86'
-          New-Item -ItemType Directory -Force $d | Out-Null
-          Copy-Item 'Release\CDKey\x86\LANCommander.Interposer.Plugin.CDKey.dll' "$d\"
-          Compress-Archive -Path "$d\*" -DestinationPath "LANCommander.Interposer.Plugin.CDKey.$version.x86.zip"
 
       - name: Create LCX package
         shell: pwsh
@@ -412,5 +378,5 @@ jobs:
         with:
           generate_release_notes: true
           files: |
-            LANCommander.Interposer*.zip
-            LANCommander.Interposer*.lcx
+            LANCommander.Interposer.${{ github.ref_name }}.zip
+            LANCommander.Interposer.${{ github.ref_name }}.lcx

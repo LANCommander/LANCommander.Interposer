@@ -13,8 +13,18 @@ on:
 jobs:
   publish:
     runs-on: windows-latest
+
+    # Same federated credential as the release workflow, whose subject ends in
+    # ":environment:release" — that tail only appears in the OIDC token when the
+    # job declares an environment. See the release workflow for the full note.
+    environment: release
+
     permissions:
       packages: write
+      id-token: write   # required for the OIDC federated credential used by azure/login
+
+    env:
+      SIGNING_ENABLED: ${{ vars.AZURE_SIGNING_ENDPOINT != '' && 'true' || 'false' }}
 
     steps:
       - name: Checkout
@@ -81,6 +91,102 @@ jobs:
 
       - name: Build .NET bindings
         run: dotnet build LANCommander.Interposer.NET/LANCommander.Interposer.NET.csproj -c Release -p:Version=${{ steps.version.outputs.version }}
+
+      # ── Authenticode signing (Azure Artifact Signing) ────────────────────────
+      #
+      # Signs the assemblies the package ships — the managed binding and the
+      # native Interposer staged under runtimes\ — in place, before pack picks
+      # them up. Leaving AZURE_SIGNING_ENDPOINT unset skips every step below and
+      # still publishes a working (unsigned) package, so forks keep working.
+      #
+      # NOTE: this signs the PEs inside the .nupkg, not the .nupkg itself.
+      # NuGet package signatures are a separate format that signtool does not
+      # produce; adding one would mean the `sign` CLI (`sign code
+      # trusted-signing`) or `dotnet nuget sign` with a certificate.
+      - name: Report signing configuration
+        shell: pwsh
+        run: |
+          if ($env:SIGNING_ENABLED -eq 'true') {
+            Write-Host "Signing package assemblies"
+          } else {
+            Write-Host "::warning::AZURE_SIGNING_ENDPOINT is not set. Package assemblies will be unsigned."
+          }
+
+      - name: Collect Files to Sign
+        id: targets
+        if: env.SIGNING_ENABLED == 'true'
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+
+          $netDir = 'LANCommander.Interposer.NET'
+
+          # The managed binding, once per target framework, plus the native DLL
+          # staged for each runtime identifier.
+          $files = @(
+            Get-ChildItem -Path "$netDir\bin\Release" -Recurse -File -Filter 'LANCommander.Interposer.NET.dll'
+            Get-ChildItem -Path "$netDir\runtimes"     -Recurse -File -Filter 'LANCommander.Interposer.dll'
+          ) | Select-Object -ExpandProperty FullName | Sort-Object -Unique
+
+          if (-not $files) {
+            throw "Found no package assemblies to sign. Refusing to sign nothing."
+          }
+
+          Write-Host "Signing $($files.Count) file(s):"
+          $files | ForEach-Object { Write-Host "  $($_.Substring($PWD.Path.Length + 1))" }
+
+          $manifest = Join-Path $env:RUNNER_TEMP 'sign-targets.txt'
+          $files | Set-Content -Path $manifest -Encoding UTF8
+
+          "files<<SIGNTARGETS" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
+          $files               | Out-File -FilePath $env:GITHUB_OUTPUT -Append
+          "SIGNTARGETS"        | Out-File -FilePath $env:GITHUB_OUTPUT -Append
+
+      - name: Azure Login
+        if: env.SIGNING_ENABLED == 'true'
+        uses: azure/login@v3
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Sign Files
+        if: env.SIGNING_ENABLED == 'true'
+        uses: azure/artifact-signing-action@v2
+        with:
+          endpoint: ${{ vars.AZURE_SIGNING_ENDPOINT }}
+          signing-account-name: ${{ vars.AZURE_SIGNING_ACCOUNT_NAME }}
+          certificate-profile-name: ${{ vars.AZURE_SIGNING_CERT_PROFILE_NAME }}
+          files: ${{ steps.targets.outputs.files }}
+          file-digest: SHA256
+          timestamp-rfc3161: http://timestamp.acs.microsoft.com
+          timestamp-digest: SHA256
+          # Pin authentication to the session established by azure/login rather than
+          # letting DefaultAzureCredential fall through a chain of unconfigured options.
+          exclude-environment-credential: true
+          exclude-azure-cli-credential: false
+
+      - name: Verify Signatures
+        if: env.SIGNING_ENABLED == 'true'
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+
+          $manifest = Join-Path $env:RUNNER_TEMP 'sign-targets.txt'
+          $failed = @()
+
+          foreach ($path in Get-Content -Path $manifest) {
+            $signature = Get-AuthenticodeSignature -FilePath $path
+            $relative = $path.Substring($PWD.Path.Length + 1)
+
+            if ($signature.Status -ne 'Valid') {
+              $failed += "$relative : $($signature.Status) - $($signature.StatusMessage)"
+            }
+          }
+
+          if ($failed) { throw "Signature verification failed:`n$($failed -join "`n")" }
+
+          Write-Host "All signatures valid."
 
       - name: Pack
         run: dotnet pack LANCommander.Interposer.NET/LANCommander.Interposer.NET.csproj -c Release --no-build -p:Version=${{ steps.version.outputs.version }} -o nupkg

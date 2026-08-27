@@ -1,10 +1,5 @@
 #include "version_info.h"
 
-// One binary serves every load method, so it carries one identity regardless of
-// the name it is deployed under (version.dll, dinput8.dll, dinput.dll, *.asi).
-#define VER_ORIGINAL_NAME    "LANCommander.Interposer.dll"
-#define VER_DESCRIPTION      "LANCommander Interposer"
-
 VS_VERSION_INFO VERSIONINFO
  FILEVERSION    VER_FILEVERSION
  PRODUCTVERSION VER_PRODUCTVERSION
@@ -19,11 +14,11 @@ BEGIN
         BLOCK "040904b0"
         BEGIN
             VALUE "CompanyName",      VER_COMPANY_STR
-            VALUE "FileDescription",  VER_DESCRIPTION
+            VALUE "FileDescription",  "LANCommander Interposer Mouse Plugin\0"
             VALUE "FileVersion",      VER_FILEVERSION_STR
-            VALUE "InternalName",     "LANCommander.Interposer\0"
+            VALUE "InternalName",     "LANCommander.Interposer.Plugin.Mouse\0"
             VALUE "LegalCopyright",   VER_COPYRIGHT_STR
-            VALUE "OriginalFilename", VER_ORIGINAL_NAME
+            VALUE "OriginalFilename", "LANCommander.Interposer.Plugin.Mouse.dll\0"
             VALUE "ProductName",      VER_PRODUCT_STR
             VALUE "ProductVersion",   VER_PRODUCTVERSION_STR
         END

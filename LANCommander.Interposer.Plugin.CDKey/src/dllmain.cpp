@@ -34,11 +34,14 @@
 // All functions are resolved at runtime via GetProcAddress so the plugin has no
 // link-time dependency on the interposer.
 
-using FnInterposerLog                      = void  (WINAPI*)(const wchar_t* verb, const wchar_t* message);
-using FnInterposerGetConfigString          = BOOL  (WINAPI*)(const wchar_t* dotPath, wchar_t* buf, DWORD bufSize);
-using FnInterposerGetUsername              = BOOL  (WINAPI*)(wchar_t* buf, DWORD bufSize);
-using FnInterposerSetRegistryValueBySuffix = DWORD (WINAPI*)(const wchar_t* keySuffix, const wchar_t* valueName, const wchar_t* value);
-using FnInterposerRegisterPluginConfig     = BOOL  (WINAPI*)(const wchar_t* pluginName, const wchar_t* yamlDefaults);
+// The Interposer's exports are __cdecl — they are declared without a calling
+// convention and the export table carries their undecorated names. Declaring
+// these pointers __stdcall instead leaks the arguments on every call on x86.
+using FnInterposerLog                      = void  (*)(const wchar_t* verb, const wchar_t* message);
+using FnInterposerGetConfigString          = BOOL  (*)(const wchar_t* dotPath, wchar_t* buf, DWORD bufSize);
+using FnInterposerGetUsername              = BOOL  (*)(wchar_t* buf, DWORD bufSize);
+using FnInterposerSetRegistryValueBySuffix = DWORD (*)(const wchar_t* keySuffix, const wchar_t* valueName, const wchar_t* value);
+using FnInterposerRegisterPluginConfig     = BOOL  (*)(const wchar_t* pluginName, const wchar_t* yamlDefaults);
 
 static FnInterposerLog                      pfnLog          = nullptr;
 static FnInterposerGetConfigString          pfnGetConfig    = nullptr;

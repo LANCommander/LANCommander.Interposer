@@ -41,6 +41,8 @@ If a plugin fails to load, the error is logged with the Win32 error code and the
 | Plugin | Description |
 |---|---|
 | [CD Key](CDKey) | Generates a deterministic CD key from the player username and injects it into a registry value |
+| [Mouse](Mouse) | Coalesces buffered mouse axis events to stop stair-stepped mouse look, and scales each axis |
+| [Mouse](Mouse) | Coalesces buffered mouse axis events to stop stair-stepped mouse look, and scales each axis |
 
 ## Writing Your Own Plugin
 

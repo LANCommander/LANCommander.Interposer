@@ -1,13 +1,18 @@
 # Install
 #
-# Copies the selected Interposer build next to the game executable and renders
-# .interposer\Config.yml from the redistributable's configured options.
+# Copies the Interposer next to the game executable, under the file name the
+# selected load method requires, and renders .interposer\Config.yml from the
+# redistributable's configured options.
 #
 # The archive is extracted to <InstallDirectory>\.lancommander\<Id>\Files and
-# is laid out as:
+# holds one DLL per architecture:
 #
-#   x64\version.dll  x64\dinput8.dll  x64\dinput.dll  x64\LANCommander.Interposer.asi
-#   x86\version.dll  x86\dinput8.dll  x86\dinput.dll  x86\LANCommander.Interposer.asi
+#   x64\LANCommander.Interposer.dll
+#   x86\LANCommander.Interposer.dll
+#
+# That single binary serves every load method - it exports the union of what
+# version.dll, dinput8.dll and dinput.dll export, and decides what it is by the
+# name it was given - so installing is a copy plus a rename.
 
 $RedistributableName = 'LANCommander Interposer'
 $Options = Get-RedistributableOptions -Path $InstallDirectory -Id $GameManifest.Id -Name $RedistributableName
@@ -221,7 +226,7 @@ function Get-PeArchitecture {
 
 $primaryExecutable = Get-PrimaryExecutablePath $GameManifest $InstallDirectory
 
-# Load method -> file shipped in the archive
+# Load method -> the name the DLL has to be given next to the game executable
 $loaderFiles = @{
     'Proxy'   = 'version.dll'
     'DInput8' = 'dinput8.dll'
@@ -281,10 +286,10 @@ $sourceRoot = Join-Path $InstallDirectory ".lancommander\$($RedistributableManif
 
 if (-not (Test-Path -LiteralPath $sourceRoot)) { $sourceRoot = (Get-Location).Path }
 
-$sourceFile = Join-Path $sourceRoot "$architecture\$loaderFile"
+$sourceFile = Join-Path $sourceRoot "$architecture\LANCommander.Interposer.dll"
 
 if (-not (Test-Path -LiteralPath $sourceFile)) {
-    throw "Interposer payload is missing '$architecture\$loaderFile' (looked in '$sourceRoot')"
+    throw "Interposer payload is missing '$architecture\LANCommander.Interposer.dll' (looked in '$sourceRoot')"
 }
 
 New-Item -ItemType Directory -Force -Path $targetDirectory | Out-Null

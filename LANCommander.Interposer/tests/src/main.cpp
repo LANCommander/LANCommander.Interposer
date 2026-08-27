@@ -751,6 +751,13 @@ static void RunLogTests(const std::wstring& logPath)
     ASSERT(log.find("found,") != std::string::npos,
         L"L-DI-8: [DINPUT ENUM] summarises how many devices were found and shown");
 
+    // M-03 set a data format declaring X/Y/Z at 0/4/8; the SetDataFormat detour
+    // reads those back out so a plugin transform can identify the axes.
+    ASSERT(log.find("[DINPUT FORMAT]") != std::string::npos,
+        L"L-DI-9: Log records the mouse data format at Debug level");
+    ASSERT(log.find("X=0  Y=4  Z=8") != std::string::npos,
+        L"L-DI-10: [DINPUT FORMAT] reports the axis offsets the game declared");
+
     // R-06 queries NoSuchValue under a key that IS virtual — the partial-miss case
     // that is indistinguishable from a successful read at Info level.
     ASSERT(log.find("[REG PARTIAL]") != std::string::npos,
@@ -975,6 +982,151 @@ static void RunDirectInputTests(HMODULE hDInput)
     reinterpret_cast<TestPfnRelease>(TestVtSlot(di, 2))(di);
 }
 
+// ─── Mouse transform API ──────────────────────────────────────────────────────
+
+typedef struct TestInputEvent {
+    DWORD dwOfs;
+    LONG  data;
+    DWORD timeStamp;
+    DWORD sequence;
+} TestInputEvent;
+
+#define TEST_MOUSE_AXIS_NONE 0xFFFFFFFFu
+
+typedef struct TestMouseBatch {
+    DWORD            structSize;
+    DWORD            axisOffsetX;
+    DWORD            axisOffsetY;
+    DWORD            axisOffsetZ;
+    TestInputEvent*  events;
+    DWORD            count;
+    DWORD            capacity;
+} TestMouseBatch;
+
+// The transform the Interposer calls back INTO is __stdcall; the registration
+// export it provides is __cdecl, like every other Interposer export. Declaring
+// the latter __stdcall leaks its arguments on every call on x86 and eventually
+// trips /GS with STATUS_STACK_BUFFER_OVERRUN.
+using TestPfnMouseTransform    = void (WINAPI*)(TestMouseBatch*, void*);
+using TestPfnRegisterTransform = BOOL (*)(TestPfnMouseTransform, void*);
+using TestPfnSetDataFormat     = HRESULT (WINAPI*)(void*, const void*);
+
+static void WINAPI TestMouseTransformCallback(TestMouseBatch*, void*) {}
+
+// A minimal but valid DIDATAFORMAT describing the standard mouse layout:
+// three axes at 0/4/8 and four buttons at 12..15. Hand-built because the SDK's
+// c_dfDIMouse lives in dinput8.lib, which the test EXE does not link.
+static const GUID kTestGuidXAxis =
+    { 0xA36D02E0, 0xC9F3, 0x11CF, { 0xBF, 0xC7, 0x44, 0x45, 0x53, 0x54, 0x00, 0x00 } };
+static const GUID kTestGuidYAxis =
+    { 0xA36D02E1, 0xC9F3, 0x11CF, { 0xBF, 0xC7, 0x44, 0x45, 0x53, 0x54, 0x00, 0x00 } };
+static const GUID kTestGuidZAxis =
+    { 0xA36D02E2, 0xC9F3, 0x11CF, { 0xBF, 0xC7, 0x44, 0x45, 0x53, 0x54, 0x00, 0x00 } };
+
+struct TestObjectDataFormat
+{
+    const GUID* pguid;
+    DWORD       dwOfs;
+    DWORD       dwType;
+    DWORD       dwFlags;
+};
+
+struct TestDataFormat
+{
+    DWORD                 dwSize;
+    DWORD                 dwObjSize;
+    DWORD                 dwFlags;
+    DWORD                 dwDataSize;
+    DWORD                 dwNumObjs;
+    TestObjectDataFormat* rgodf;
+};
+
+// DIDFT_AXIS | DIDFT_ANYINSTANCE, DIDFT_BUTTON | DIDFT_ANYINSTANCE
+static constexpr DWORD kTestAxisType   = 0x00000003 | 0x00FFFF00;
+static constexpr DWORD kTestButtonType = 0x0000000C | 0x00FFFF00;
+
+// The Interposer routes the system mouse through a plugin transform, learning
+// the axis offsets from whatever data format the game sets. That plumbing is
+// what these cover; the transform's own behaviour lives in the Mouse plugin.
+static void RunMouseTransformTests(HMODULE hDll, HMODULE hDInput)
+{
+    wprintf(L"\n--- Mouse Transform API Tests ---\n");
+
+    auto pfnRegister = reinterpret_cast<TestPfnRegisterTransform>(
+        reinterpret_cast<void*>(GetProcAddress(hDll, "InterposerRegisterMouseTransform")));
+
+    ASSERT(pfnRegister != nullptr, L"M-01: InterposerRegisterMouseTransform is exported");
+
+    if (!pfnRegister)
+        return;
+
+    ASSERT(pfnRegister(TestMouseTransformCallback, nullptr) != FALSE,
+        L"M-02: registering a mouse transform succeeds");
+
+    // Drive a real bridged mouse device so the SetDataFormat detour runs and
+    // the axis offsets are learned from the format below.
+    if (!hDInput)
+    {
+        wprintf(L"  SKIP  dinput.dll unavailable; axis learning not exercised\n");
+        pfnRegister(nullptr, nullptr);
+        return;
+    }
+
+    auto create = reinterpret_cast<TestPfnCreateA>(
+        reinterpret_cast<void*>(GetProcAddress(hDInput, "DirectInputCreateA")));
+
+    void* di = nullptr;
+
+    if (!create || FAILED(create(GetModuleHandleW(nullptr), 0x0700, &di, nullptr)) || !di)
+    {
+        wprintf(L"  SKIP  could not create a DirectInput object\n");
+        pfnRegister(nullptr, nullptr);
+        return;
+    }
+
+    void* device = nullptr;
+    TestPfnCreateDev createDevice = reinterpret_cast<TestPfnCreateDev>(TestVtSlot(di, 3));
+    HRESULT hr = createDevice(di, &kTestGuidSysMouse, &device, nullptr);
+
+    if (SUCCEEDED(hr) && device)
+    {
+        TestObjectDataFormat objects[] = {
+            { &kTestGuidXAxis, 0,  kTestAxisType,   0 },
+            { &kTestGuidYAxis, 4,  kTestAxisType,   0 },
+            { &kTestGuidZAxis, 8,  kTestAxisType,   0 },
+            { nullptr,         12, kTestButtonType, 0 },
+            { nullptr,         13, kTestButtonType, 0 },
+            { nullptr,         14, kTestButtonType, 0 },
+            { nullptr,         15, kTestButtonType, 0 },
+        };
+
+        TestDataFormat format{};
+        format.dwSize     = sizeof(TestDataFormat);
+        format.dwObjSize  = sizeof(TestObjectDataFormat);
+        format.dwFlags    = 2;  // DIDF_ABSAXIS
+        format.dwDataSize = 16; // sizeof(DIMOUSESTATE)
+        format.dwNumObjs  = ARRAYSIZE(objects);
+        format.rgodf      = objects;
+
+        auto setFormat = reinterpret_cast<TestPfnSetDataFormat>(TestVtSlot(device, 11));
+
+        hr = setFormat(device, &format);
+
+        ASSERT(SUCCEEDED(hr), L"M-03: SetDataFormat on the bridged mouse succeeds");
+
+        reinterpret_cast<TestPfnRelease>(TestVtSlot(device, 2))(device);
+    }
+    else
+    {
+        ASSERT(false, L"M-03: CreateDevice(GUID_SysMouse) for the format test succeeds");
+    }
+
+    reinterpret_cast<TestPfnRelease>(TestVtSlot(di, 2))(di);
+
+    // Leave the input path clean for anything that runs after this.
+    pfnRegister(nullptr, nullptr);
+}
+
 // A game that uses DirectInput 8 natively never touches the bridge, but the
 // device filter still applies to it — DirectInput8Create is hooked separately.
 static void RunDirectInput8Tests(HMODULE hDInput8)
@@ -1055,6 +1207,10 @@ static void RunDirectInput8Tests(HMODULE hDInput8)
 
 int wmain()
 {
+    // Unbuffered: a crash mid-run otherwise discards everything still sitting in
+    // the buffer, which is exactly the output needed to locate it.
+    setvbuf(stdout, nullptr, _IONBF, 0);
+
     std::wstring exeDir        = GetExeDir();
     std::wstring testTmpDir    = GetTestTempDir();
     std::wstring interposerDir = exeDir + L".interposer\\";
@@ -1112,6 +1268,7 @@ int wmain()
     RunIdentityTests();
     RunDirectInputTests(hDInput);
     RunDirectInput8Tests(hDInput8);
+    RunMouseTransformTests(hDll, hDInput);
 
     // ── Unload DLL ───────────────────────────────────────────────────────────
     // DLL_PROCESS_DETACH fires: RemoveRegistryHooks (SaveRegFile if dirty),

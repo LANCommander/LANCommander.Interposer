@@ -34,10 +34,20 @@ BOOL APIENTRY DllMain(HMODULE /*hModule*/, DWORD /*fdwReason*/, LPVOID /*lpReser
 
 Declare function pointer types for the Interposer exports you need and resolve them with `GetProcAddress` using the `hInterposer` handle:
 
+:::caution Calling convention
+The Interposer's exports are `__cdecl` — declared without an explicit convention, which is
+what the undecorated names in its export table reflect. Declaring these pointers `WINAPI`
+(`__stdcall`) compiles and appears to work, but leaks the arguments on every call on x86
+and eventually trips `/GS` with `STATUS_STACK_BUFFER_OVERRUN`.
+
+The callbacks the Interposer invokes *inside* your plugin — `InterposerPluginInit` and the
+mouse transform — are `WINAPI`, and must be defined that way.
+:::
+
 ```cpp
-using FnInterposerLog                  = void (WINAPI*)(const wchar_t* verb, const wchar_t* message);
-using FnInterposerGetConfigString      = BOOL (WINAPI*)(const wchar_t* dotPath, wchar_t* buf, DWORD bufSize);
-using FnInterposerRegisterPluginConfig = BOOL (WINAPI*)(const wchar_t* pluginName, const wchar_t* yamlDefaults);
+using FnInterposerLog                  = void (*)(const wchar_t* verb, const wchar_t* message);
+using FnInterposerGetConfigString      = BOOL (*)(const wchar_t* dotPath, wchar_t* buf, DWORD bufSize);
+using FnInterposerRegisterPluginConfig = BOOL (*)(const wchar_t* pluginName, const wchar_t* yamlDefaults);
 
 static FnInterposerLog                  pfnLog       = nullptr;
 static FnInterposerGetConfigString      pfnGetConfig = nullptr;
@@ -178,6 +188,96 @@ The target key must already exist in `.interposer\Registry.reg` for reads to be 
 
 ---
 
+### `InterposerRegisterMouseTransform`
+
+```c
+typedef struct InterposerInputEvent {
+    DWORD dwOfs;      // offset of the object within the game's data format
+    LONG  data;       // axis delta, or button state
+    DWORD timeStamp;
+    DWORD sequence;
+} InterposerInputEvent;
+
+#define INTERPOSER_MOUSE_AXIS_NONE 0xFFFFFFFFu
+
+typedef struct InterposerMouseBatch {
+    DWORD                 structSize;   // sizeof(InterposerMouseBatch)
+    DWORD                 axisOffsetX;  // dwOfs of each axis in the game's own
+    DWORD                 axisOffsetY;  // data format, or INTERPOSER_MOUSE_AXIS_NONE
+    DWORD                 axisOffsetZ;
+    InterposerInputEvent* events;
+    DWORD                 count;        // in: retrieved. out: to deliver.
+    DWORD                 capacity;
+} InterposerMouseBatch;
+
+typedef void (WINAPI* InterposerMouseTransform)(InterposerMouseBatch* batch, void* userData);
+
+BOOL InterposerRegisterMouseTransform(InterposerMouseTransform callback, void* userData);
+```
+
+Rewrites the system mouse's buffered event stream on its way from DirectInput to the game.
+
+The Interposer provides the mechanism: it pulls a whole batch rather than the single event the game asked for, holds whatever does not fit until the next read, and resolves which `dwOfs` the game assigned to each axis by watching `SetDataFormat`. Your callback provides the policy.
+
+Rewrite `batch->events` in place and set `batch->count` to how many events should be delivered. That may be fewer than came in (coalescing) or more (splitting), up to `batch->capacity`. Check `structSize` before reading anything — the struct may grow.
+
+Both axis offsets are `INTERPOSER_MOUSE_AXIS_NONE` until the game has called `SetDataFormat`, and stay that way if it declares no axes. There is nothing to identify in that case, so return without touching the batch.
+
+The callback runs on the game's input thread inside `GetDeviceData`, once per read. It must not block, allocate on a contended lock, or call back into the Interposer.
+
+Registering replaces any previous transform; passing `nullptr` unregisters.
+
+:::caution Only bridged games
+Only the system mouse of a game bridged by `DirectInput.FixLegacyDeviceEnumeration` is routed through a transform. Other devices, and games that drive DirectInput 8 natively, are passed through untouched.
+:::
+
+See the [Mouse plugin](Mouse) for a complete implementation.
+
+### `InterposerRegisterMouseTransform`
+
+```c
+typedef struct InterposerInputEvent {
+    DWORD dwOfs;      // offset of the object within the game's data format
+    LONG  data;       // axis delta, or button state
+    DWORD timeStamp;
+    DWORD sequence;
+} InterposerInputEvent;
+
+#define INTERPOSER_MOUSE_AXIS_NONE 0xFFFFFFFFu
+
+typedef struct InterposerMouseBatch {
+    DWORD                 structSize;   // sizeof(InterposerMouseBatch)
+    DWORD                 axisOffsetX;  // dwOfs of each axis in the game's own
+    DWORD                 axisOffsetY;  // data format, or INTERPOSER_MOUSE_AXIS_NONE
+    DWORD                 axisOffsetZ;
+    InterposerInputEvent* events;
+    DWORD                 count;        // in: retrieved. out: to deliver.
+    DWORD                 capacity;
+} InterposerMouseBatch;
+
+typedef void (WINAPI* InterposerMouseTransform)(InterposerMouseBatch* batch, void* userData);
+
+BOOL InterposerRegisterMouseTransform(InterposerMouseTransform callback, void* userData);
+```
+
+Rewrites the system mouse's buffered event stream on its way from DirectInput to the game.
+
+The Interposer provides the mechanism: it pulls a whole batch rather than the single event the game asked for, holds whatever does not fit until the next read, and resolves which `dwOfs` the game assigned to each axis by watching `SetDataFormat`. Your callback provides the policy.
+
+Rewrite `batch->events` in place and set `batch->count` to how many events should be delivered. That may be fewer than came in (coalescing) or more (splitting), up to `batch->capacity`. Check `structSize` before reading anything — the struct may grow.
+
+Both axis offsets are `INTERPOSER_MOUSE_AXIS_NONE` until the game has called `SetDataFormat`, and stay that way if it declares no axes. There is nothing to identify in that case, so return without touching the batch.
+
+The callback runs on the game's input thread inside `GetDeviceData`, once per read. It must not block, allocate on a contended lock, or call back into the Interposer.
+
+Registering replaces any previous transform; passing `nullptr` unregisters.
+
+:::caution Only bridged games
+Only the system mouse of a game bridged by `DirectInput.FixLegacyDeviceEnumeration` is routed through a transform. Other devices, and games that drive DirectInput 8 natively, are passed through untouched.
+:::
+
+See the [Mouse plugin](Mouse) for a complete implementation.
+
 ### `InterposerSetRegistryValueBySuffix`
 
 ```cpp
@@ -203,9 +303,9 @@ pfnSetBySuffix(L"Battlefield 1942\\ergc", L"@", generatedKey);
 #include <windows.h>
 #include <string>
 
-using FnInterposerLog                  = void (WINAPI*)(const wchar_t*, const wchar_t*);
-using FnInterposerGetConfigString      = BOOL (WINAPI*)(const wchar_t*, wchar_t*, DWORD);
-using FnInterposerRegisterPluginConfig = BOOL (WINAPI*)(const wchar_t*, const wchar_t*);
+using FnInterposerLog                  = void (*)(const wchar_t*, const wchar_t*);
+using FnInterposerGetConfigString      = BOOL (*)(const wchar_t*, wchar_t*, DWORD);
+using FnInterposerRegisterPluginConfig = BOOL (*)(const wchar_t*, const wchar_t*);
 
 static FnInterposerLog                  pfnLog       = nullptr;
 static FnInterposerGetConfigString      pfnGetConfig = nullptr;

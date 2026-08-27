@@ -11,7 +11,7 @@ A Windows DLL that hooks into game processes to provide virtual registry, file r
 - **FastDL** - Automatically download missing game files from an HTTP server on first access. Supports auto-discovery by probing game server addresses.
 - **Rich Presence** - Push game activity to Discord via local IPC. Configurable from `Config.yml` or at runtime from plugins.
 - **DirectInput** - Serve DirectInput 3/7 from `dinput8.dll`, working around the record-array overrun in the legacy Windows `dinput.dll` that makes affected games hang or crash on startup. Filter enumerated devices by class or name so a game binds to the right one.
-- **Plugin System** - Drop custom DLLs into `.interposer\Plugins\` to extend functionality. Plugins resolve Interposer exports at runtime (no link-time dependency).
+- **Plugin System** - Drop custom DLLs into `.interposer\Plugins\` to extend functionality. Plugins resolve Interposer exports at runtime (no link-time dependency). Ships with a CD key generator and a mouse smoothing/scaling plugin.
 
 ## Quick Start
 
@@ -22,15 +22,24 @@ A Windows DLL that hooks into game processes to provide virtual registry, file r
 
 ## Release Variants
 
-| Variant | DLL Name | How It Loads |
-|---------|----------|-------------|
-| **Standard** | `LANCommander.Interposer.dll` | Injected via `LANCommander.Interposer.Injector.exe` or programmatically |
-| **Proxy** | `version.dll` | Auto-loaded by Windows when placed next to the game EXE |
-| **Proxy DInput8** | `dinput8.dll` | Auto-loaded by DirectInput games |
-| **Proxy DInput** | `dinput.dll` | Auto-loaded by DirectInput 3/7 games, which often import nothing else that can be proxied |
-| **ASI** | `LANCommander.Interposer.asi` | Loaded by ASI loaders (Ultimate ASI Loader, ScriptHookV, etc.) |
+Each release attaches two artifacts: `LANCommander.Interposer.<version>.zip` for manual
+deployment, and `LANCommander.Interposer.<version>.lcx` for import into LANCommander.
 
-Each variant is available for both x64 and x86, and as a `.zip` or `.lcx` (LANCommander redistributable) package.
+The ZIP holds an `x64\` and an `x86\` directory. Within each, the Interposer is present
+under every name it can be loaded as — all byte-identical, because one binary serves every
+load method and works out which system DLL it is standing in for from the name it was
+given:
+
+| File | How it loads |
+|---------|-------------|
+| `version.dll` | Auto-loaded by Windows when placed next to the game EXE. Start here. |
+| `dinput8.dll` | For games that import DirectInput 8, or that ship their own `version.dll` |
+| `dinput.dll` | For DirectInput 3/7 era games, which often import nothing else that can be proxied |
+| `LANCommander.Interposer.asi` | Loaded by ASI loaders (Ultimate ASI Loader, ScriptHookV, etc.) |
+| `LANCommander.Interposer.dll` | Injected via `LANCommander.Interposer.Injector.exe` or programmatically |
+
+Copy one of them plus the `.interposer\` directory next to the game executable. The
+archive's `README.md` walks through it.
 
 ## Injector CLI
 

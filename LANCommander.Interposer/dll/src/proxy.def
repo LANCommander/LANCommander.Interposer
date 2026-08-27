@@ -1,6 +1,11 @@
-LIBRARY version
+; Union of the exports of every system DLL this binary can stand in for.
+; No LIBRARY statement: the internal name follows whatever the file is renamed
+; to at deploy time. A game resolves only the names it imports, so the exports
+; belonging to the other targets are inert.
 EXPORTS
+; ---- version.dll ----
     GetFileVersionInfoA
+    GetFileVersionInfoByHandle
     GetFileVersionInfoExA
     GetFileVersionInfoExW
     GetFileVersionInfoSizeA
@@ -16,3 +21,15 @@ EXPORTS
     VerLanguageNameW
     VerQueryValueA
     VerQueryValueW
+; ---- dinput8.dll ----
+    DirectInput8Create
+    GetdfDIJoystick
+; ---- dinput.dll ----
+    DirectInputCreateA
+    DirectInputCreateEx
+    DirectInputCreateW
+; ---- exported by both dinput.dll and dinput8.dll ----
+    DllCanUnloadNow        PRIVATE
+    DllGetClassObject      PRIVATE
+    DllRegisterServer      PRIVATE
+    DllUnregisterServer    PRIVATE

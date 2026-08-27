@@ -61,10 +61,13 @@
 // Declare function pointer types for each export you intend to use.
 // These have no link-time dependency on the Interposer.
 
-using FnInterposerLog                  = void (WINAPI*)(const wchar_t* verb, const wchar_t* message);
-using FnInterposerGetConfigString      = BOOL (WINAPI*)(const wchar_t* dotPath, wchar_t* buf, DWORD bufSize);
-using FnInterposerGetUsername          = BOOL (WINAPI*)(wchar_t* buf, DWORD bufSize);
-using FnInterposerRegisterPluginConfig = BOOL (WINAPI*)(const wchar_t* pluginName, const wchar_t* yamlDefaults);
+// The Interposer's exports are __cdecl — they are declared without a calling
+// convention and the export table carries their undecorated names. Declaring
+// these pointers __stdcall instead leaks the arguments on every call on x86.
+using FnInterposerLog                  = void (*)(const wchar_t* verb, const wchar_t* message);
+using FnInterposerGetConfigString      = BOOL (*)(const wchar_t* dotPath, wchar_t* buf, DWORD bufSize);
+using FnInterposerGetUsername          = BOOL (*)(wchar_t* buf, DWORD bufSize);
+using FnInterposerRegisterPluginConfig = BOOL (*)(const wchar_t* pluginName, const wchar_t* yamlDefaults);
 
 static FnInterposerLog                pfnLog       = nullptr;
 static FnInterposerGetConfigString    pfnGetConfig = nullptr;

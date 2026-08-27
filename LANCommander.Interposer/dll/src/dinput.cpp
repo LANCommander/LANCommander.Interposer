@@ -70,6 +70,8 @@ struct DiObjectDataDx8
 };
 
 static_assert(sizeof(DiObjectDataDx3) == 16, "DIDEVICEOBJECTDATA_DX3 must be 16 bytes");
+static_assert(sizeof(InterposerInputEvent) == sizeof(DiObjectDataDx3),
+    "the plugin-facing event must match the DX3 record — the queue copies between them");
 static_assert(sizeof(DiObjectDataDx8) != sizeof(DiObjectDataDx3),
     "the DX3 and DX8 record sizes must differ — cbObjectData is how the two are told apart");
 
@@ -79,6 +81,7 @@ using PfnEnumDevicesA   = HRESULT (WINAPI*)(void*, DWORD, PfnEnumCallbackA, void
 using PfnEnumDevicesW   = HRESULT (WINAPI*)(void*, DWORD, PfnEnumCallbackW, void*, DWORD);
 using PfnCreateDevice   = HRESULT (WINAPI*)(void*, const GUID*, void**, void*);
 using PfnGetDeviceData  = HRESULT (WINAPI*)(void*, DWORD, void*, DWORD*, DWORD);
+using PfnSetDataFormat  = HRESULT (WINAPI*)(void*, const void*);
 using PfnQueryInterface = HRESULT (WINAPI*)(void*, const GUID*, void**);
 using PfnAddRef         = ULONG   (WINAPI*)(void*);
 
@@ -130,6 +133,18 @@ constexpr DWORD kDevClassKeyboard = 3;
 // buffer stays comfortably on the stack (3 KB at worst).
 constexpr DWORD kEventBatch = 128;
 
+// Events held over between calls when a mouse transform is registered. Has to
+// exceed kEventBatch: a transform is allowed to return more events than it was
+// given, and whatever the game did not ask for this call is kept for the next.
+constexpr DWORD kPendingMax = 192;
+
+// The axis GUIDs DirectInput reports in a data format, identified by Data1
+// alone — that is enough to tell them apart and avoids carrying three more
+// GUID constants.
+constexpr DWORD kGuidXAxisData1 = 0xA36D02E0u;
+constexpr DWORD kGuidYAxisData1 = 0xA36D02E1u;
+constexpr DWORD kGuidZAxisData1 = 0xA36D02E2u;
+
 // ---------------------------------------------------------------------------
 // State
 //
@@ -147,8 +162,25 @@ PfnQueryInterface g_origDirectInputQI = nullptr;
 PfnEnumDevicesA g_origEnumDevicesA = nullptr;
 PfnEnumDevicesW g_origEnumDevicesW = nullptr;
 
-PfnGetDeviceData  g_origGetDeviceData = nullptr;
-PfnQueryInterface g_origDeviceQI      = nullptr;
+PfnGetDeviceData   g_origGetDeviceData  = nullptr;
+PfnQueryInterface  g_origDeviceQI       = nullptr;
+PfnSetDataFormat   g_origSetDataFormat  = nullptr;
+
+// Mouse transform state. The mouse and keyboard share one device vtable, so
+// every device detour runs for both — anything mouse-specific has to be gated
+// on the object actually being the mouse.
+InterposerMouseTransform g_mouseTransform     = nullptr;
+void*                    g_mouseTransformUser = nullptr;
+void*                    g_mouseDevice        = nullptr;
+
+DWORD g_axisOffsetX = INTERPOSER_MOUSE_AXIS_NONE;
+DWORD g_axisOffsetY = INTERPOSER_MOUSE_AXIS_NONE;
+DWORD g_axisOffsetZ = INTERPOSER_MOUSE_AXIS_NONE;
+
+// Events the transform produced that the game has not collected yet. Owned by
+// the mouse alone, so a keyboard read can never drain mouse events.
+InterposerInputEvent g_pending[kPendingMax];
+DWORD                g_pendingCount = 0;
 
 // The vtables the slots above were taken from. Kept so the patches can be
 // reverted on detach — MinHook only knows about its own trampolines, and a
@@ -159,13 +191,9 @@ void** g_enumVTableA  = nullptr;  // IDirectInput8A,       slot 4
 void** g_enumVTableW  = nullptr;  // IDirectInput8W,       slot 4
 void** g_deviceVTable = nullptr;  // IDirectInputDevice8A, slots 0 and 10
 
-#ifndef INTERPOSER_PROXY_DINPUT
 PfnDirectInputCreateA  g_origDirectInputCreateA  = nullptr;
 PfnDirectInputCreateEx g_origDirectInputCreateEx = nullptr;
-#endif
-#ifndef INTERPOSER_PROXY_DINPUT8
-PfnDirectInput8Create g_origDirectInput8Create = nullptr;
-#endif
+PfnDirectInput8Create  g_origDirectInput8Create  = nullptr;
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -547,8 +575,131 @@ void AttachEnumFilter(void* directInput, bool unicode)
 }
 
 // ---------------------------------------------------------------------------
+// Mouse transform plumbing
+// ---------------------------------------------------------------------------
+
+// DIDATAFORMAT, as far as we need it. The trailing pointer is why this is not
+// a fixed table of offsets: rgodf is pointer-sized, so the struct differs
+// between x86 and x64 and has to be described rather than assumed.
+struct DiDataFormat
+{
+    DWORD       dwSize;
+    DWORD       dwObjSize;
+    DWORD       dwFlags;
+    DWORD       dwDataSize;
+    DWORD       dwNumObjs;
+    const BYTE* rgodf;
+};
+
+// DIOBJECTDATAFORMAT — { const GUID* pguid; DWORD dwOfs; DWORD dwType; DWORD dwFlags; }
+struct DiObjectDataFormat
+{
+    const GUID* pguid;
+    DWORD       dwOfs;
+    DWORD       dwType;
+    DWORD       dwFlags;
+};
+
+// Learn which dwOfs the game gave each axis in its own data format. Without
+// this a transform cannot tell an axis event from a button event, because the
+// offsets are whatever the game decided.
+void LearnAxisOffsets(const void* format)
+{
+    g_axisOffsetX = INTERPOSER_MOUSE_AXIS_NONE;
+    g_axisOffsetY = INTERPOSER_MOUSE_AXIS_NONE;
+    g_axisOffsetZ = INTERPOSER_MOUSE_AXIS_NONE;
+
+    const DiDataFormat* df = static_cast<const DiDataFormat*>(format);
+
+    if (!df || !df->rgodf || df->dwNumObjs == 0 || df->dwNumObjs > 256)
+        return;
+
+    // dwObjSize rather than sizeof(DiObjectDataFormat): the format declares its
+    // own stride, and trusting ours would walk the array wrong if it differs.
+    const DWORD stride = df->dwObjSize ? df->dwObjSize
+                                       : static_cast<DWORD>(sizeof(DiObjectDataFormat));
+
+    for (DWORD i = 0; i < df->dwNumObjs; ++i)
+    {
+        const DiObjectDataFormat* obj =
+            reinterpret_cast<const DiObjectDataFormat*>(df->rgodf + static_cast<size_t>(i) * stride);
+
+        if (!obj->pguid)
+            continue;
+
+        switch (obj->pguid->Data1)
+        {
+        case kGuidXAxisData1: g_axisOffsetX = obj->dwOfs; break;
+        case kGuidYAxisData1: g_axisOffsetY = obj->dwOfs; break;
+        case kGuidZAxisData1: g_axisOffsetZ = obj->dwOfs; break;
+        default: break;
+        }
+    }
+
+    if (g_logDirectInput && g_logLevel >= LogLevel::Debug)
+    {
+        wchar_t detail[128]{};
+
+        wsprintfW(detail, L"X=%d  Y=%d  Z=%d  objects=%u",
+            static_cast<int>(g_axisOffsetX), static_cast<int>(g_axisOffsetY),
+            static_cast<int>(g_axisOffsetZ), df->dwNumObjs);
+
+        LogDirectInputDiag(L"DINPUT FORMAT", L"mouse axis offsets", detail);
+    }
+}
+
+void QueuePending(const InterposerInputEvent* events, DWORD count)
+{
+    if (count > kPendingMax)
+        count = kPendingMax;
+
+    memcpy(g_pending, events, count * sizeof(InterposerInputEvent));
+
+    g_pendingCount = count;
+}
+
+// Move up to `want` queued events into the caller's DX3 buffer.
+DWORD DrainPending(DiObjectDataDx3* out, DWORD want)
+{
+    DWORD moved = 0;
+
+    while (g_pendingCount > 0 && moved < want)
+    {
+        out[moved].dwOfs       = g_pending[0].dwOfs;
+        out[moved].dwData      = static_cast<DWORD>(g_pending[0].data);
+        out[moved].dwTimeStamp = g_pending[0].timeStamp;
+        out[moved].dwSequence  = g_pending[0].sequence;
+
+        --g_pendingCount;
+        memmove(g_pending, g_pending + 1, g_pendingCount * sizeof(InterposerInputEvent));
+
+        ++moved;
+    }
+
+    return moved;
+}
+
+// ---------------------------------------------------------------------------
 // Device interface detours (bridged games only)
 // ---------------------------------------------------------------------------
+
+// Nothing but a way to see the game's data format go past — the offsets it
+// declares are what make a transform able to identify the axes.
+HRESULT WINAPI DeviceSetDataFormat(void* self, const void* format)
+{
+    HRESULT hr = g_origSetDataFormat(self, format);
+
+    if (SUCCEEDED(hr) && format && self == g_mouseDevice)
+    {
+        LearnAxisOffsets(format);
+
+        // A fresh format means the previous queue describes offsets that no
+        // longer mean anything.
+        g_pendingCount = 0;
+    }
+
+    return hr;
+}
 
 HRESULT WINAPI DeviceQueryInterface(void* self, const GUID* iid, void** out)
 {
@@ -586,10 +737,69 @@ HRESULT WINAPI DeviceGetDeviceData(void* self, DWORD cbObjectData, void* rgdod,
     if (*pdwInOut == 0)
         return g_origGetDeviceData(self, sizeof(DiObjectDataDx8), nullptr, pdwInOut, flags);
 
+    const DWORD want = *pdwInOut;
+    const bool  peek = (flags & 1) != 0; // DIGDD_PEEK — must not consume anything
+
+    // Mouse transform path. DirectInput hands the game a queue of many tiny
+    // axis events and games of this era drain it one per frame, so a transform
+    // only has something to work with if a whole batch is pulled at once. What
+    // the game does not take is held for the next call rather than dropped —
+    // events pulled and not returned are gone from DirectInput's buffer.
+    if (g_mouseTransform && !peek && self == g_mouseDevice)
+    {
+        DiObjectDataDx3* out     = static_cast<DiObjectDataDx3*>(rgdod);
+        DWORD            written = DrainPending(out, want);
+
+        if (written < want)
+        {
+            DiObjectDataDx8 scratch[kEventBatch];
+            DWORD           retrieved = kEventBatch;
+
+            HRESULT hr = g_origGetDeviceData(self, sizeof(DiObjectDataDx8), scratch, &retrieved, flags);
+
+            if (FAILED(hr))
+            {
+                *pdwInOut = written;
+                return written > 0 ? S_OK : hr;
+            }
+
+            if (retrieved > kEventBatch)
+                retrieved = kEventBatch;
+
+            InterposerInputEvent events[kPendingMax];
+
+            for (DWORD i = 0; i < retrieved; ++i)
+            {
+                events[i].dwOfs     = scratch[i].dwOfs;
+                events[i].data      = static_cast<LONG>(scratch[i].dwData);
+                events[i].timeStamp = scratch[i].dwTimeStamp;
+                events[i].sequence  = scratch[i].dwSequence;
+            }
+
+            InterposerMouseBatch batch{};
+            batch.structSize  = sizeof(batch);
+            batch.axisOffsetX = g_axisOffsetX;
+            batch.axisOffsetY = g_axisOffsetY;
+            batch.axisOffsetZ = g_axisOffsetZ;
+            batch.events      = events;
+            batch.count       = retrieved;
+            batch.capacity    = kPendingMax;
+
+            g_mouseTransform(&batch, g_mouseTransformUser);
+
+            QueuePending(events, batch.count);
+
+            written += DrainPending(out + written, want - written);
+        }
+
+        *pdwInOut = written;
+        return S_OK;
+    }
+
     // Never pull more events than can be handed back: anything pulled and not
     // returned is gone from DirectInput's buffer, and games on this path read
     // one event at a time. Returning fewer records than asked for is allowed.
-    DWORD requested = *pdwInOut < kEventBatch ? *pdwInOut : kEventBatch;
+    DWORD requested = want < kEventBatch ? want : kEventBatch;
     DWORD retrieved = requested;
 
     DiObjectDataDx8 scratch[kEventBatch];
@@ -650,6 +860,17 @@ HRESULT WINAPI DirectInputCreateDevice(void* self, const GUID* rguid, void** ppD
         GuidEquals(rguid, &kGUID_SysMouse)    ? L"GUID_SysMouse"    :
         GuidEquals(rguid, &kGUID_SysKeyboard) ? L"GUID_SysKeyboard" : L"other");
 
+    // Remembered so the device detours can tell the mouse from the keyboard,
+    // which share this vtable. Re-creating it invalidates the learned format.
+    if (GuidEquals(rguid, &kGUID_SysMouse))
+    {
+        g_mouseDevice  = *ppDevice;
+        g_pendingCount = 0;
+        g_axisOffsetX  = INTERPOSER_MOUSE_AXIS_NONE;
+        g_axisOffsetY  = INTERPOSER_MOUSE_AXIS_NONE;
+        g_axisOffsetZ  = INTERPOSER_MOUSE_AXIS_NONE;
+    }
+
     // Mouse and keyboard share one device vtable, so this runs exactly once.
     if (!g_deviceVTable)
     {
@@ -659,6 +880,8 @@ HRESULT WINAPI DirectInputCreateDevice(void* self, const GUID* rguid, void** ppD
                 reinterpret_cast<void**>(&g_origDeviceQI));
             PatchVTableSlot(vtable, 10, reinterpret_cast<void*>(DeviceGetDeviceData),
                 reinterpret_cast<void**>(&g_origGetDeviceData));
+            PatchVTableSlot(vtable, 11, reinterpret_cast<void*>(DeviceSetDataFormat),
+                reinterpret_cast<void**>(&g_origSetDataFormat));
 
             g_deviceVTable = vtable;
         }
@@ -707,10 +930,11 @@ bool LoadDirectInput8()
 // trampoline has to be preferred or creating an object would recurse.
 PfnDirectInput8Create RealDirectInput8Create()
 {
-#ifndef INTERPOSER_PROXY_DINPUT8
+    // Null whenever the export was not hooked, which includes the case where
+    // this binary IS dinput8.dll — then GetProcAddress on the system copy is
+    // both correct and the only way to avoid calling our own export.
     if (g_origDirectInput8Create)
         return g_origDirectInput8Create;
-#endif
 
     return LoadDirectInput8() ? g_di8Create : nullptr;
 }
@@ -720,6 +944,18 @@ PfnDirectInput8Create RealDirectInput8Create()
 // ---------------------------------------------------------------------------
 // Public API
 // ---------------------------------------------------------------------------
+
+BOOL InterposerRegisterMouseTransform(InterposerMouseTransform callback, void* userData)
+{
+    g_mouseTransform     = callback;
+    g_mouseTransformUser = userData;
+    g_pendingCount       = 0;
+
+    LogDirectInput(L"DINPUT", callback ? L"mouse transform registered"
+                                       : L"mouse transform cleared");
+
+    return TRUE;
+}
 
 bool DirectInputBridgeWantsIid(const void* riid)
 {
@@ -800,9 +1036,10 @@ HRESULT DirectInputBridgeCreate(HINSTANCE hinst, DWORD version, void** ppDI, voi
 
 namespace {
 
-// True when the named module resolves to this one — impossible for the load
-// methods that compile the corresponding path in, but hooking our own export
-// would be unrecoverable, so it is checked rather than assumed.
+// True when the named module resolves to this one. This is the guard that makes
+// a single binary safe to deploy under any name: when the file IS dinput.dll or
+// dinput8.dll, its exports are served directly by proxy.cpp and hooking them
+// would detour us straight back into ourselves.
 bool ModuleIsSelf(const wchar_t* moduleName)
 {
     HMODULE self = nullptr;
@@ -813,8 +1050,6 @@ bool ModuleIsSelf(const wchar_t* moduleName)
 
     return self && self == GetModuleHandleW(moduleName);
 }
-
-#ifndef INTERPOSER_PROXY_DINPUT
 
 HRESULT WINAPI HookDirectInputCreateA(HINSTANCE hinst, DWORD version, void** ppDI, void* punkOuter)
 {
@@ -853,16 +1088,6 @@ void InstallLegacyCreateHooks()
             reinterpret_cast<LPVOID*>(&g_origDirectInputCreateEx)));
 }
 
-#else
-
-// The dinput.dll proxy build serves these exports itself; hooking our own
-// export would recurse forever.
-void InstallLegacyCreateHooks() {}
-
-#endif // INTERPOSER_PROXY_DINPUT
-
-#ifndef INTERPOSER_PROXY_DINPUT8
-
 HRESULT WINAPI HookDirectInput8Create(HINSTANCE hinst, DWORD version, const GUID* riid,
     void** ppvOut, void* punkOuter)
 {
@@ -896,14 +1121,6 @@ void InstallDirectInput8Hook()
             reinterpret_cast<LPVOID>(HookDirectInput8Create),
             reinterpret_cast<LPVOID*>(&g_origDirectInput8Create)));
 }
-
-#else
-
-// The dinput8.dll proxy build routes its own export through
-// DirectInput8CreateFiltered instead.
-void InstallDirectInput8Hook() {}
-
-#endif // INTERPOSER_PROXY_DINPUT8
 
 } // namespace
 
@@ -942,11 +1159,20 @@ void RemoveDirectInputHooks()
             PatchVTableSlot(g_deviceVTable, 0, reinterpret_cast<void*>(g_origDeviceQI), nullptr);
         if (g_origGetDeviceData)
             PatchVTableSlot(g_deviceVTable, 10, reinterpret_cast<void*>(g_origGetDeviceData), nullptr);
+        if (g_origSetDataFormat)
+            PatchVTableSlot(g_deviceVTable, 11, reinterpret_cast<void*>(g_origSetDataFormat), nullptr);
 
         g_deviceVTable      = nullptr;
         g_origDeviceQI      = nullptr;
         g_origGetDeviceData = nullptr;
+        g_origSetDataFormat = nullptr;
     }
+
+    // The transform lives in a plugin, which is unloaded around the same time.
+    g_mouseTransform     = nullptr;
+    g_mouseTransformUser = nullptr;
+    g_mouseDevice        = nullptr;
+    g_pendingCount       = 0;
 
     if (g_bridgeVTable)
     {
