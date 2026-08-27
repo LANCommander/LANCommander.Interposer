@@ -4,6 +4,8 @@
 #define NOMINMAX
 #include <windows.h>
 
+#include "dinput.h"
+
 static HMODULE g_realDInput8 = nullptr;
 
 // Function pointer types — use opaque pointers to avoid SDK header dependencies
@@ -51,12 +53,14 @@ void UninitProxy()
 // Export stubs — forward every call to the real system dinput8.dll
 // ---------------------------------------------------------------------------
 
+// Routed through the DirectInput subsystem rather than forwarded blindly, so
+// that DirectInput.DeviceFilter and the enumeration logging apply to games that
+// load this proxy. DirectInput8CreateFiltered falls back to the real export
+// when neither is configured.
 extern "C" HRESULT WINAPI DirectInput8Create(HINSTANCE hinst, DWORD dwVersion,
     const void* riidltf, LPVOID* ppvOut, void* punkOuter)
 {
-    return pfn_DirectInput8Create
-        ? pfn_DirectInput8Create(hinst, dwVersion, riidltf, ppvOut, punkOuter)
-        : E_FAIL;
+    return DirectInput8CreateFiltered(hinst, dwVersion, riidltf, ppvOut, punkOuter);
 }
 
 extern "C" HRESULT WINAPI DllCanUnloadNow(void)

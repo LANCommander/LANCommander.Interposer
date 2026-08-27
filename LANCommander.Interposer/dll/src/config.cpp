@@ -39,8 +39,14 @@ bool         g_logIdentity     = false;
 bool         g_logRichPresence  = false;
 bool         g_logDnsRedirects = true;
 bool         g_logNetwork      = false;
+bool         g_logDirectInput  = false;
 
 std::vector<DnsRedirect> g_dnsRedirects;
+
+bool                       g_diFixLegacyEnum = false;
+bool                       g_diFilterEnabled = false;
+std::vector<DiDeviceClass> g_diFilterClasses;
+std::vector<DiNameFilter>  g_diFilterNames;
 
 bool                            g_naEnabled    = false;
 bool                            g_naAnyFilters = false;
@@ -444,6 +450,107 @@ void LogNetworkAccess(const wchar_t* verb, const wchar_t* address, const wchar_t
         return;
 
     WriteLogLine(verb, address, info);
+}
+
+// Log-only, like LogFileDiag/LogRegistryDiag: the DirectInput bridge deliberately
+// does NOT fire the plugin or named-pipe callbacks, so its verbs stay out of the
+// event vocabulary in LANCommander.Interposer.NET\Events\.
+// ---------------------------------------------------------------------------
+// DirectInput device classes
+// ---------------------------------------------------------------------------
+
+namespace {
+
+struct DiClassEntry {
+    const char*   name;      // as written in DirectInput.DeviceFilter.Classes
+    DiDeviceClass value;
+    DWORD         dx7Type;   // DIDEVTYPE_*,   0 = no DirectInput 3/7 equivalent
+    DWORD         dx8Type;   // DI8DEVTYPE_*
+};
+
+// The DirectInput 3/7 type numbers (1..4) and the DirectInput 8 ones
+// (0x11..0x1C) occupy disjoint ranges, so a single table classifies both.
+constexpr DiClassEntry kDiClasses[] = {
+    { "Device",        DiDeviceClass::Device,        0x01, 0x11 },
+    { "Mouse",         DiDeviceClass::Mouse,         0x02, 0x12 },
+    { "Keyboard",      DiDeviceClass::Keyboard,      0x03, 0x13 },
+    { "Joystick",      DiDeviceClass::Joystick,      0x04, 0x14 },
+    { "Gamepad",       DiDeviceClass::Gamepad,       0,    0x15 },
+    { "Driving",       DiDeviceClass::Driving,       0,    0x16 },
+    { "Flight",        DiDeviceClass::Flight,        0,    0x17 },
+    { "FirstPerson",   DiDeviceClass::FirstPerson,   0,    0x18 },
+    { "DeviceControl", DiDeviceClass::DeviceControl, 0,    0x19 },
+    { "ScreenPointer", DiDeviceClass::ScreenPointer, 0,    0x1A },
+    { "Remote",        DiDeviceClass::Remote,        0,    0x1B },
+    { "Supplemental",  DiDeviceClass::Supplemental,  0,    0x1C },
+};
+
+// Case-insensitive, so 'mouse' and 'Mouse' both work in Config.yml.
+bool DiClassFromName(const std::string& name, DiDeviceClass& out)
+{
+    for (const DiClassEntry& entry : kDiClasses)
+    {
+        if (_stricmp(entry.name, name.c_str()) == 0)
+        {
+            out = entry.value;
+            return true;
+        }
+    }
+
+    return false;
+}
+
+} // namespace
+
+DiDeviceClass DiClassFromDevType(DWORD devType)
+{
+    // Only the low byte identifies the class; the next byte is the subtype and
+    // the high bits carry flags such as DIDEVTYPE_HID.
+    const DWORD type = devType & 0xFF;
+
+    for (const DiClassEntry& entry : kDiClasses)
+    {
+        if ((entry.dx7Type && type == entry.dx7Type) || type == entry.dx8Type)
+            return entry.value;
+    }
+
+    return DiDeviceClass::Unknown;
+}
+
+const wchar_t* DiClassName(DiDeviceClass deviceClass)
+{
+    switch (deviceClass)
+    {
+    case DiDeviceClass::Device:        return L"Device";
+    case DiDeviceClass::Mouse:         return L"Mouse";
+    case DiDeviceClass::Keyboard:      return L"Keyboard";
+    case DiDeviceClass::Joystick:      return L"Joystick";
+    case DiDeviceClass::Gamepad:       return L"Gamepad";
+    case DiDeviceClass::Driving:       return L"Driving";
+    case DiDeviceClass::Flight:        return L"Flight";
+    case DiDeviceClass::FirstPerson:   return L"FirstPerson";
+    case DiDeviceClass::DeviceControl: return L"DeviceControl";
+    case DiDeviceClass::ScreenPointer: return L"ScreenPointer";
+    case DiDeviceClass::Remote:        return L"Remote";
+    case DiDeviceClass::Supplemental:  return L"Supplemental";
+    default:                           return L"Unknown";
+    }
+}
+
+void LogDirectInputDiag(const wchar_t* verb, const wchar_t* info, const wchar_t* detail)
+{
+    if (!g_logDirectInput || g_logLevel < LogLevel::Debug)
+        return;
+
+    WriteLogLine(verb, info, detail);
+}
+
+void LogDirectInput(const wchar_t* verb, const wchar_t* info, const wchar_t* detail)
+{
+    if (!g_logDirectInput)
+        return;
+
+    WriteLogLine(verb, info, detail);
 }
 
 void LogDnsRedirect(const wchar_t* fromHost, const wchar_t* toHost)
@@ -926,6 +1033,8 @@ void LoadConfig()
             g_logDnsRedirects = logging["DnsRedirects"].as<bool>(true);
         if (logging["Network"])
             g_logNetwork = logging["Network"].as<bool>(false);
+        if (logging["DirectInput"])
+            g_logDirectInput = logging["DirectInput"].as<bool>(false);
 
         // Verbosity within whichever subsystems are enabled above. Unrecognized
         // values fall back to Info so a typo never silently suppresses output.
@@ -997,6 +1106,67 @@ void LoadConfig()
                     g_dnsRedirects.push_back(std::move(rule));
                 }
                 catch (const std::regex_error&) { /* skip malformed patterns */ }
+            }
+        }
+    }
+
+    // ── DirectInput ─────────────────────────────────────────────────────────────
+    if (YAML::Node directInput = root["DirectInput"])
+    {
+        if (directInput["FixLegacyDeviceEnumeration"])
+            g_diFixLegacyEnum = directInput["FixLegacyDeviceEnumeration"].as<bool>(false);
+
+        if (YAML::Node filter = directInput["DeviceFilter"])
+        {
+            if (filter["Enabled"])
+                g_diFilterEnabled = filter["Enabled"].as<bool>(false);
+
+            if (YAML::Node classes = filter["Classes"]; classes && classes.IsSequence())
+            {
+                for (const auto& item : classes)
+                {
+                    std::string name = item.as<std::string>("");
+
+                    if (name.empty())
+                        continue;
+
+                    DiDeviceClass parsed = DiDeviceClass::Unknown;
+
+                    if (DiClassFromName(name, parsed))
+                        g_diFilterClasses.push_back(parsed);
+                    else
+                    {
+                        // Always reported: a typo here silently hides every
+                        // device of the class the user meant to allow.
+                        InterposerLog(L"DINPUT",
+                            (L"unknown device class in DeviceFilter.Classes: " + Utf8ToWide(name)).c_str());
+                    }
+                }
+            }
+
+            if (YAML::Node names = filter["Names"]; names && names.IsSequence())
+            {
+                for (const auto& item : names)
+                {
+                    std::string pat = item.as<std::string>("");
+
+                    if (pat.empty())
+                        continue;
+
+                    try
+                    {
+                        DiNameFilter rule;
+                        rule.patternText = Utf8ToWide(pat);
+                        rule.pattern.assign(rule.patternText,
+                            std::regex_constants::ECMAScript | std::regex_constants::icase);
+                        g_diFilterNames.push_back(std::move(rule));
+                    }
+                    catch (const std::regex_error&)
+                    {
+                        InterposerLog(L"DINPUT",
+                            (L"malformed regex in DeviceFilter.Names: " + Utf8ToWide(pat)).c_str());
+                    }
+                }
             }
         }
     }

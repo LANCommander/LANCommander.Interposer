@@ -14,6 +14,10 @@ Notes: |
                needed. Try this first.
     DInput8  - installs dinput8.dll instead. Use this when the game already
                ships its own version.dll, or when a mod loader has claimed it.
+    DInput   - installs dinput.dll. For DirectInput 3/7 era games, which
+               commonly import dinput.dll and nothing else that can be proxied.
+               Pair it with the DirectInput options to bridge the game onto
+               DirectInput 8.
     ASI      - installs LANCommander.Interposer.asi. Only works when the game
                already has an ASI loader (Ultimate ASI Loader, ScriptHookV,
                etc.) installed.
@@ -73,6 +77,7 @@ OptionSchema: |
           Choices:
             - { Value: "Proxy", DisplayName: "version.dll proxy" }
             - { Value: "DInput8", DisplayName: "dinput8.dll proxy" }
+            - { Value: "DInput", DisplayName: "dinput.dll proxy (DirectInput 3/7 games)" }
             - { Value: "ASI", DisplayName: "ASI plugin (requires an ASI loader)" }
         Architecture:
           Type: choice
@@ -145,6 +150,11 @@ OptionSchema: |
           DisplayName: Network
           Description: Log server connection and DNS events, plus adapter enumeration
           Default: "false"
+        DirectInput:
+          Type: bool
+          DisplayName: DirectInput
+          Description: Log DirectInput bridge object creation, device creation, and enumeration
+          Default: "false"
         Level:
           Type: choice
           DisplayName: Level
@@ -182,6 +192,35 @@ OptionSchema: |
           Type: string
           DisplayName: Replacement
           Description: Hostname or IP literal passed to the real resolver. Supports regex capture groups.
+
+    DirectInput:
+      DisplayName: DirectInput
+      Description: Compatibility fix and device filtering for DirectInput games
+      Options:
+        FixLegacyDeviceEnumeration:
+          Type: bool
+          DisplayName: Fix Legacy Device Enumeration
+          Description: Serve DirectInput 3/7 from DirectInput 8, working around the record-array overrun in the legacy Windows dinput.dll that makes affected games hang or crash on startup. Only the ANSI entry points are bridged.
+          Default: "false"
+        DeviceFilter:
+          DisplayName: Device Filter
+          Description: Allow-list controlling which devices the game sees when it enumerates them. A device is kept if it matches any filter below. Applies to bridged and native DirectInput 8 games alike.
+          Options:
+            Enabled:
+              Type: bool
+              DisplayName: Enabled
+              Description: Apply the filters below. No-op when both lists are empty.
+              Default: "false"
+            Classes:
+              Type: list
+              ItemType: string
+              DisplayName: Classes
+              Description: "Device classes to allow: Mouse, Keyboard, Joystick, Gamepad, Driving, Flight, FirstPerson, DeviceControl, ScreenPointer, Remote, Supplemental, Device. Listing only Mouse and Keyboard also lets the Interposer skip the enumeration entirely, which can save ~21 seconds of startup on a large HID stack."
+            Names:
+              Type: list
+              ItemType: string
+              DisplayName: Names
+              Description: Case-insensitive ECMAScript regex matched against each device's instance name and product name. Partial matches count, so anchor the pattern for exact names.
 
     NetworkAdapters:
       DisplayName: Network Adapters

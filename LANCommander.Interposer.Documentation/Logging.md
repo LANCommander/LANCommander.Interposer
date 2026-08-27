@@ -33,6 +33,7 @@ Logging:
 | `RichPresence` | bool | `false` | Log rich presence field changes, update pushes, and clears. |
 | `DnsRedirects` | bool | `true` | Log DNS redirect matches. Enabled by default because DNS redirects are deliberate user-configured actions. |
 | `Network` | bool | `false` | Log socket connections and DNS lookups. |
+| `DirectInput` | bool | `false` | Log DirectInput object and device creation, enumeration, and interface aliasing. At `Debug` also lists every device an enumeration found and every device the filter hid. |
 | `Level` | choice | `Info` | Verbosity within the subsystems enabled above. One of `Info`, `Debug`, `Trace`. |
 
 ## Log Level

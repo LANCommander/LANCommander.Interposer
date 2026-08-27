@@ -69,6 +69,18 @@ jobs:
           /t:LANCommander_Interposer
           /p:Configuration="Release Proxy DInput8" /p:Platform=x86
 
+      - name: Build Release Proxy DInput x64
+        run: >
+          msbuild LANCommander.Interposer.slnx
+          /t:LANCommander_Interposer
+          /p:Configuration="Release Proxy DInput" /p:Platform=x64
+
+      - name: Build Release Proxy DInput x86
+        run: >
+          msbuild LANCommander.Interposer.slnx
+          /t:LANCommander_Interposer
+          /p:Configuration="Release Proxy DInput" /p:Platform=x86
+
       - name: Build Release ASI x64
         run: >
           msbuild LANCommander.Interposer.slnx
@@ -142,11 +154,12 @@ jobs:
             'LANCommander.Interposer.asi'
             'version.dll'
             'dinput8.dll'
+            'dinput.dll'
           )
 
           # The signing action expects absolute paths. Each build configuration
           # writes to its own subdirectory (Injector\, Proxy\, ProxyDInput8\,
-          # ASI\, CDKey\), so the search has to recurse.
+          # ProxyDInput\, ASI\, CDKey\), so the search has to recurse.
           $files = Get-ChildItem -Path 'Release' -Recurse -File -Include $patterns |
             Select-Object -ExpandProperty FullName |
             Sort-Object -Unique
@@ -270,6 +283,18 @@ jobs:
           Copy-Item -Recurse $sampleDir "$d\x86\"
           Compress-Archive -Path "$d\x86\*" -DestinationPath "LANCommander.Interposer.Proxy.DInput8.$version.x86.zip"
 
+          # Proxy DInput (dinput.dll)
+          $d = 'pkg\proxy-dinput'
+          New-Item -ItemType Directory -Force "$d\x64" | Out-Null
+          Copy-Item 'Release\ProxyDInput\x64\dinput.dll' "$d\x64\"
+          Copy-Item -Recurse $sampleDir "$d\x64\"
+          Compress-Archive -Path "$d\x64\*" -DestinationPath "LANCommander.Interposer.Proxy.DInput.$version.x64.zip"
+
+          New-Item -ItemType Directory -Force "$d\x86" | Out-Null
+          Copy-Item 'Release\ProxyDInput\x86\dinput.dll' "$d\x86\"
+          Copy-Item -Recurse $sampleDir "$d\x86\"
+          Compress-Archive -Path "$d\x86\*" -DestinationPath "LANCommander.Interposer.Proxy.DInput.$version.x86.zip"
+
           # ASI
           $d = 'pkg\asi'
           New-Item -ItemType Directory -Force "$d\x64" | Out-Null
@@ -297,6 +322,7 @@ jobs:
             New-Item -ItemType Directory -Force "$d\$arch" | Out-Null
             Copy-Item "Release\Proxy\$arch\version.dll"                      "$d\$arch\"
             Copy-Item "Release\ProxyDInput8\$arch\dinput8.dll"               "$d\$arch\"
+            Copy-Item "Release\ProxyDInput\$arch\dinput.dll"                 "$d\$arch\"
             Copy-Item "Release\ASI\$arch\LANCommander.Interposer.asi"        "$d\$arch\"
           }
 

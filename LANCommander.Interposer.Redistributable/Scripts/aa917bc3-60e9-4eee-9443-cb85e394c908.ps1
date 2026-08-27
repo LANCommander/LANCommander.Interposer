@@ -3,7 +3,7 @@
 # Removes the Interposer DLL and its .interposer directory from the game.
 #
 # Every candidate file is checked against its embedded ProductName before being
-# deleted, so a game that ships its own version.dll or dinput8.dll is left
+# deleted, so a game that ships its own version.dll, dinput8.dll or dinput.dll is left
 # alone even if the load method changed after install.
 
 $RedistributableName = 'LANCommander Interposer'
@@ -73,7 +73,7 @@ if ($primaryExecutable) {
 
 $directories.Add($InstallDirectory)
 
-$loaderFiles = @('version.dll', 'dinput8.dll', 'LANCommander.Interposer.asi')
+$loaderFiles = @('version.dll', 'dinput8.dll', 'dinput.dll', 'LANCommander.Interposer.asi')
 $seen = New-Object System.Collections.Generic.HashSet[string]
 
 foreach ($directory in $directories) {

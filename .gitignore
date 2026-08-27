@@ -6,6 +6,8 @@ Win32/
 Debug/
 Release/
 Release Proxy/
+Release Proxy DInput/
+Release Proxy DInput8/
 Release ASI/
 
 # Per-project intermediate directories
@@ -15,6 +17,8 @@ Release ASI/
 **/Debug/
 **/Release/
 **/Release Proxy/
+**/Release Proxy DInput/
+**/Release Proxy DInput8/
 **/Release ASI/
 
 # Common intermediate / linker artefacts

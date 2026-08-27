@@ -3,7 +3,7 @@
 #include <windows.h>
 #include "hooks.h"
 
-#if defined(INTERPOSER_PROXY) || defined(INTERPOSER_PROXY_DINPUT8)
+#if defined(INTERPOSER_PROXY) || defined(INTERPOSER_PROXY_DINPUT8) || defined(INTERPOSER_PROXY_DINPUT)
 void InitProxy();
 void UninitProxy();
 #endif
@@ -35,7 +35,7 @@ BOOL APIENTRY DllMain(HMODULE hInstance, DWORD fdwReason, LPVOID /*lpvReserved*/
     {
     case DLL_PROCESS_ATTACH:
         DisableThreadLibraryCalls(hInstance);
-#if defined(INTERPOSER_PROXY) || defined(INTERPOSER_PROXY_DINPUT8)
+#if defined(INTERPOSER_PROXY) || defined(INTERPOSER_PROXY_DINPUT8) || defined(INTERPOSER_PROXY_DINPUT)
         InitProxy();
 #endif
         WriteLog(L"DLL_PROCESS_ATTACH: calling InstallHooks");
@@ -54,7 +54,7 @@ BOOL APIENTRY DllMain(HMODULE hInstance, DWORD fdwReason, LPVOID /*lpvReserved*/
 
     case DLL_PROCESS_DETACH:
         RemoveHooks();
-#if defined(INTERPOSER_PROXY) || defined(INTERPOSER_PROXY_DINPUT8)
+#if defined(INTERPOSER_PROXY) || defined(INTERPOSER_PROXY_DINPUT8) || defined(INTERPOSER_PROXY_DINPUT)
         UninitProxy();
 #endif
         break;

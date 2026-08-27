@@ -6,8 +6,8 @@
 # The archive is extracted to <InstallDirectory>\.lancommander\<Id>\Files and
 # is laid out as:
 #
-#   x64\version.dll  x64\dinput8.dll  x64\LANCommander.Interposer.asi
-#   x86\version.dll  x86\dinput8.dll  x86\LANCommander.Interposer.asi
+#   x64\version.dll  x64\dinput8.dll  x64\dinput.dll  x64\LANCommander.Interposer.asi
+#   x86\version.dll  x86\dinput8.dll  x86\dinput.dll  x86\LANCommander.Interposer.asi
 
 $RedistributableName = 'LANCommander Interposer'
 $Options = Get-RedistributableOptions -Path $InstallDirectory -Id $GameManifest.Id -Name $RedistributableName
@@ -225,6 +225,7 @@ $primaryExecutable = Get-PrimaryExecutablePath $GameManifest $InstallDirectory
 $loaderFiles = @{
     'Proxy'   = 'version.dll'
     'DInput8' = 'dinput8.dll'
+    'DInput'  = 'dinput.dll'
     'ASI'     = 'LANCommander.Interposer.asi'
 }
 
@@ -318,6 +319,7 @@ $loggingDefaults = [ordered]@{
     RichPresence = $false
     DnsRedirects = $true
     Network      = $false
+    DirectInput  = $false
 }
 
 $lines.Add('Logging:')
@@ -341,6 +343,14 @@ Add-CompositeList $lines '' 'FileRedirects' (Get-ListOption $Options 'FileRedire
 $lines.Add('')
 
 Add-CompositeList $lines '' 'DnsRedirects' (Get-ListOption $Options 'DnsRedirects') @('Pattern', 'Replacement')
+$lines.Add('')
+
+$lines.Add('DirectInput:')
+$lines.Add("  FixLegacyDeviceEnumeration: $(Format-YamlBool (Get-BoolOption $Options 'DirectInput.FixLegacyDeviceEnumeration' $false))")
+$lines.Add('  DeviceFilter:')
+$lines.Add("    Enabled: $(Format-YamlBool (Get-BoolOption $Options 'DirectInput.DeviceFilter.Enabled' $false))")
+Add-ScalarList $lines '    ' 'Classes' (Get-ListOption $Options 'DirectInput.DeviceFilter.Classes')
+Add-ScalarList $lines '    ' 'Names' (Get-ListOption $Options 'DirectInput.DeviceFilter.Names')
 $lines.Add('')
 
 $lines.Add('NetworkAdapters:')

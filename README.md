@@ -10,6 +10,7 @@ A Windows DLL that hooks into game processes to provide virtual registry, file r
 - **Identity Overrides** - Override `GetUserNameW/A` and `GetComputerNameW/A` so each player gets a unique identity without renaming their Windows account.
 - **FastDL** - Automatically download missing game files from an HTTP server on first access. Supports auto-discovery by probing game server addresses.
 - **Rich Presence** - Push game activity to Discord via local IPC. Configurable from `Config.yml` or at runtime from plugins.
+- **DirectInput** - Serve DirectInput 3/7 from `dinput8.dll`, working around the record-array overrun in the legacy Windows `dinput.dll` that makes affected games hang or crash on startup. Filter enumerated devices by class or name so a game binds to the right one.
 - **Plugin System** - Drop custom DLLs into `.interposer\Plugins\` to extend functionality. Plugins resolve Interposer exports at runtime (no link-time dependency).
 
 ## Quick Start
@@ -26,6 +27,7 @@ A Windows DLL that hooks into game processes to provide virtual registry, file r
 | **Standard** | `LANCommander.Interposer.dll` | Injected via `LANCommander.Interposer.Injector.exe` or programmatically |
 | **Proxy** | `version.dll` | Auto-loaded by Windows when placed next to the game EXE |
 | **Proxy DInput8** | `dinput8.dll` | Auto-loaded by DirectInput games |
+| **Proxy DInput** | `dinput.dll` | Auto-loaded by DirectInput 3/7 games, which often import nothing else that can be proxied |
 | **ASI** | `LANCommander.Interposer.asi` | Loaded by ASI loaders (Ultimate ASI Loader, ScriptHookV, etc.) |
 
 Each variant is available for both x64 and x86, and as a `.zip` or `.lcx` (LANCommander redistributable) package.
@@ -108,6 +110,7 @@ All configuration lives in `.interposer\Config.yml` next to the DLL. See the [sa
 | `Logging` | Toggle per-subsystem logging (files, registry, network, etc.) |
 | `FileRedirects` | Regex-based file path redirection rules |
 | `DnsRedirects` | Regex-based DNS hostname redirection rules |
+| `DirectInput` | Legacy enumeration fix and device filtering by class or name |
 | `FastDL` | HTTP content delivery with auto-discovery |
 | `RichPresence` | Discord activity display with configurable defaults |
 | `Plugins` | Arbitrary key-value config for plugins |

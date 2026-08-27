@@ -5,7 +5,7 @@ sidebar_position: 2
 
 # Release Packages
 
-Each release publishes four ZIP variants for manual deployment, plus a single LCX package for import into LANCommander. Choose the ZIP variant that matches how the DLL will be loaded into the game process — the LCX bundles all of them and lets you pick per game.
+Each release publishes five ZIP variants for manual deployment, plus a single LCX package for import into LANCommander. Choose the ZIP variant that matches how the DLL will be loaded into the game process — the LCX bundles all of them and lets you pick per game.
 
 ## Standard
 
@@ -64,6 +64,23 @@ x86\
   Config.yml
 ```
 
+## Proxy (dinput)
+
+**Files:** `dinput.dll`
+
+The DLL is output as `dinput.dll`, for games from the DirectInput 3 / 7 era. Those titles commonly import `dinput.dll` and nothing else that can be proxied — no `version.dll`, no `dinput8.dll` — so this is often the only load method that can reach them at all.
+
+```
+x64\
+  dinput.dll
+x86\
+  dinput.dll
+.interposer\
+  Config.yml
+```
+
+Pair it with the [DirectInput](/Interposer/DirectInput) options to bridge the game onto DirectInput 8, working around the record-array overrun in the legacy Windows `dinput.dll` that makes affected games hang or crash on startup. With the bridge enabled the system `dinput.dll` is never loaded; with it disabled this build is a plain passthrough.
+
 ## ASI
 
 **Files:** `LANCommander.Interposer.asi`
@@ -97,7 +114,7 @@ Because the redistributable defines an [option schema](https://lancommander.app/
 
 | Option | Values | Meaning |
 |---|---|---|
-| `Loader.Method` | `Proxy`, `DInput8`, `ASI` | Which build to copy next to the game executable |
+| `Loader.Method` | `Proxy`, `DInput8`, `DInput`, `ASI` | Which build to copy next to the game executable |
 | `Loader.Architecture` | `Auto`, `x86`, `x64` | `Auto` reads the PE header of the game's primary executable |
 | `Loader.TargetDirectory` | path | Override the install location. Blank uses the folder containing the primary executable. |
 

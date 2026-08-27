@@ -85,8 +85,50 @@ extern bool         g_logIdentity;     // true = log identity override operation
 extern bool         g_logRichPresence;  // true = log rich presence updates
 extern bool         g_logDnsRedirects;  // true = log DNS redirect matches
 extern bool         g_logNetwork;       // true = log connection/DNS events
+extern bool         g_logDirectInput;   // true = log DirectInput bridge activity
 
 extern std::vector<DnsRedirect> g_dnsRedirects; // DNS hostname redirects (case-insensitive)
+
+// A DirectInput device class, taken from the low byte of DIDEVICEINSTANCE::dwDevType.
+// Covers both encodings: DirectInput 3/7 numbers its types 1..4 and DirectInput 8
+// numbers its own 0x11..0x1C, and the two ranges do not overlap, so one mapping
+// serves both eras.
+enum class DiDeviceClass {
+    Unknown = 0,
+    Device,
+    Mouse,
+    Keyboard,
+    Joystick,
+    Gamepad,
+    Driving,
+    Flight,
+    FirstPerson,
+    DeviceControl,
+    ScreenPointer,
+    Remote,
+    Supplemental
+};
+
+// A DirectInput.DeviceFilter.Names rule. patternText is retained for Trace
+// logging, because std::wregex does not keep its source.
+struct DiNameFilter {
+    std::wregex  pattern;
+    std::wstring patternText;
+};
+
+// DirectInput — see dinput.cpp. The fix bridges games that ask for DirectInput
+// 3/7 onto DirectInput 8, working around the record-array overrun in the legacy
+// Windows dinput.dll. The filter is an allow-list applied to device enumeration
+// for bridged and native DirectInput 8 games alike: a device is KEPT if it
+// matches ANY populated list, and both lists empty means the filter is a no-op.
+extern bool                       g_diFixLegacyEnum;  // DirectInput.FixLegacyDeviceEnumeration
+extern bool                       g_diFilterEnabled;  // DirectInput.DeviceFilter.Enabled
+extern std::vector<DiDeviceClass> g_diFilterClasses;  // DirectInput.DeviceFilter.Classes
+extern std::vector<DiNameFilter>  g_diFilterNames;    // DirectInput.DeviceFilter.Names
+
+// Classify a device from its dwDevType, and name a class for logging.
+DiDeviceClass  DiClassFromDevType(DWORD devType);
+const wchar_t* DiClassName(DiDeviceClass deviceClass);
 
 // NetworkAdapters — allow-list controlling which adapters games may enumerate.
 // An adapter is KEPT if it matches ANY populated list. g_naAnyFilters is the
@@ -142,6 +184,14 @@ void LogPluginEvent(const wchar_t* verb, const wchar_t* info);
 void LogIdentityAccess(const wchar_t* verb, const wchar_t* info);
 void LogRichPresence(const wchar_t* verb, const wchar_t* info);
 void LogNetworkAccess(const wchar_t* verb, const wchar_t* address, const wchar_t* info = nullptr);
+
+// Log DirectInput bridge activity. Gated by the Logging.DirectInput flag (default false).
+// Log-only: deliberately does not fire plugin or named-pipe callbacks.
+void LogDirectInput(const wchar_t* verb, const wchar_t* info, const wchar_t* detail = nullptr);
+
+// Per-device enumeration diagnostics. Additionally requires Logging.Level Debug
+// (or Trace), because a busy HID stack produces a line per device per call.
+void LogDirectInputDiag(const wchar_t* verb, const wchar_t* info, const wchar_t* detail = nullptr);
 
 // Redirect diagnostics. No-op below Debug level or when the subsystem flag is false.
 // Unlike LogFileAccess/LogRegistryAccess these deliberately do NOT fire plugin or

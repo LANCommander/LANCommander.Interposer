@@ -46,6 +46,10 @@ Player:
 #   Network   - true to log server connection/DNS events (addresses the game
 #               connects to), false to disable (default).
 #
+#   DirectInput - true to log DirectInput bridge activity (object creation,
+#                 device creation, enumeration, interface aliasing), false to
+#                 disable (default).
+#
 #   Level     - Verbosity within whichever subsystems are enabled above.
 #               Unrecognized values fall back to Info.
 #
@@ -77,6 +81,7 @@ Logging:
   RichPresence: false
   DnsRedirects: true
   Network: false
+  DirectInput: false
   Level: Info
 
 # ---------------------------------------------------------------------------
@@ -155,6 +160,74 @@ FileRedirects: []
 #     Replacement: 'master.local'
 # ---------------------------------------------------------------------------
 DnsRedirects: []
+
+# ---------------------------------------------------------------------------
+# DirectInput
+#
+# FixLegacyDeviceEnumeration
+#
+#   Serves games that ask for DirectInput 3 or 7 from DirectInput 8 instead.
+#
+#   The legacy dinput.dll shipped with Windows has a long-standing bug that
+#   causes an overflow while enumerating HID devices on some machines. This can
+#   result in certain games hanging or crashing on start up. DirectInput 8 has
+#   a nearly identical API, so enabling this fix will use the newer implementation
+#   when device enumeration is called from games that use the 3/7 API.
+#
+#   To reach a game that imports dinput.dll directly - which is most titles from
+#   this era, and often the only DLL they import that can be proxied - install
+#   the Interposer using the dinput.dll load method.
+#
+# DeviceFilter
+#
+#   Controls which devices a game is allowed to see when it enumerates them.
+#   Applies to games bridged by the fix above and to games that use DirectInput
+#   8 natively. This is an ALLOW-LIST: a device is KEPT if it matches ANY
+#   configured filter, and every non-matching device is hidden from the
+#   enumeration. If no filters are configured (both lists empty) filtering is
+#   ignored and every device is shown unchanged.
+#
+#     Enabled - true to apply the filters below, false (default) to disable.
+#
+#     Classes - Device classes to allow. Names are case-insensitive, and an
+#               unrecognized class is reported in the log and ignored.
+#
+#                 Mouse           Mice and other pointing devices
+#                 Keyboard        Keyboards
+#                 Joystick        Joysticks
+#                 Gamepad         Gamepads and game controllers
+#                 Driving         Steering wheels and pedal sets*
+#                 Flight          Flight sticks, yokes and throttles*
+#                 FirstPerson     Controllers built for first-person games*
+#                 ScreenPointer   Light guns, touch screens and digitizers*
+#                 Remote          Remote controls*
+#                 DeviceControl   Devices that control other devices, such as
+#                                 a hardware control panel*
+#                 Supplemental    Add-ons that supplement another device, such
+#                                 as separate rudder pedals or a throttle
+#                                 quadrant*
+#                 Device          Anything that fits no other class*
+#
+#               * Only available to games that implement DirectInput 8
+#
+#     Names   - Case-insensitive ECMAScript regex matched against each device's
+#               instance name and product name. Partial matches count - anchor
+#               with ^ and $ for exact matching.
+#               e.g. ['^Wireless Controller$', 'X-?Box']
+#
+#   In some cases, only listing Mouse and Keyboard may cause some games to
+#   enumerate devices 4-6x faster as no actual device enumeration is required.
+#
+#   Set Logging.DirectInput to true and Logging.Level to Debug to see every
+#   device an enumeration turned up and why each was kept or hidden.
+# ---------------------------------------------------------------------------
+DirectInput:
+  FixLegacyDeviceEnumeration: false
+
+  DeviceFilter:
+    Enabled: false
+    Classes: []   # e.g. ['Mouse', 'Keyboard']
+    Names:   []   # case-insensitive ECMAScript regex vs instance/product name
 
 # ---------------------------------------------------------------------------
 # NetworkAdapters

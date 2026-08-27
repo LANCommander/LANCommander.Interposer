@@ -1,5 +1,6 @@
 #include "hooks.h"
 #include "config.h"
+#include "dinput.h"
 #include "fastdl.h"
 #include "files.h"
 #include "identity.h"
@@ -32,6 +33,7 @@ void InstallHooks()
     InitFastDL();
     InstallNetworkHooks();
     InstallIdentityHooks();
+    InstallDirectInputHooks();
 
     MH_EnableHook(MH_ALL_HOOKS);
 
@@ -53,6 +55,7 @@ void OnLibraryLoaded(HMODULE hModule)
     const wchar_t* name  = slash ? slash + 1 : path;
 
     LateInstallNetworkHooks(name);
+    LateInstallDirectInputHooks(name);
 }
 
 void RemoveHooks()
@@ -62,6 +65,7 @@ void RemoveHooks()
     ShutdownRichPresence();
     RemoveRegistryHooks();
     RemoveNetworkHooks();
+    RemoveDirectInputHooks();
     ShutdownFastDL();
     MH_DisableHook(MH_ALL_HOOKS);
     MH_Uninitialize();

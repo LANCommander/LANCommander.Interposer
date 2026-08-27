@@ -196,7 +196,15 @@ static void WriteInterposerYaml(const std::wstring& yamlPath,
         "Logging:\n"
         "  Files: true\n"
         "  Registry: true\n"
+        "  DirectInput: true\n"
         "  Level: Trace\n"
+        "\n"
+        "DirectInput:\n"
+        "  FixLegacyDeviceEnumeration: true\n"
+        "  DeviceFilter:\n"
+        "    Enabled: true\n"
+        "    Classes: ['Mouse', 'Keyboard']\n"
+        "    Names: []\n"
         "\n"
         "Player:\n"
         "  Username: TestPlayer\n"
@@ -722,6 +730,27 @@ static void RunLogTests(const std::wstring& logPath)
     ASSERT(log.find("not in virtual space") != std::string::npos,
         L"L-20: [REG MISS] reports why the key was not redirected");
 
+    // --- DirectInput (DirectInput.FixLegacyDeviceEnumeration + DeviceFilter + Logging.DirectInput) ---
+
+    ASSERT(log.find("dinput.dll!DirectInputCreateA") != std::string::npos,
+        L"L-DI-1: Log records the dinput.dll!DirectInputCreateA hook installation");
+    ASSERT(log.find("[DINPUT BRIDGE]") != std::string::npos,
+        L"L-DI-2: Log contains [DINPUT BRIDGE] entry");
+    ASSERT(log.find("[DINPUT ENUM]") != std::string::npos,
+        L"L-DI-3: Log contains [DINPUT ENUM] entry");
+    ASSERT(log.find("[DINPUT DEVICE]") != std::string::npos,
+        L"L-DI-4: Log contains [DINPUT DEVICE] entry");
+    ASSERT(log.find("dinput8.dll!DirectInput8Create") != std::string::npos,
+        L"L-DI-5: Log records the dinput8.dll!DirectInput8Create hook installation");
+
+    // Logging.Level is Trace in the fixture, so the per-device listing is on.
+    ASSERT(log.find("[DINPUT FOUND]") != std::string::npos,
+        L"L-DI-6: Log lists devices found in enumeration at Debug level");
+    ASSERT(log.find("class=Mouse") != std::string::npos,
+        L"L-DI-7: [DINPUT FOUND] reports the device class");
+    ASSERT(log.find("found,") != std::string::npos,
+        L"L-DI-8: [DINPUT ENUM] summarises how many devices were found and shown");
+
     // R-06 queries NoSuchValue under a key that IS virtual — the partial-miss case
     // that is indistinguishable from a successful read at Info level.
     ASSERT(log.find("[REG PARTIAL]") != std::string::npos,
@@ -761,6 +790,265 @@ static void RunPersistenceTests(const std::wstring& regPath)
         L"P-05: VirtualRegistry.reg still contains 'PLAYERNAME'");
 }
 
+
+// ============================================================
+// DirectInput bridge tests
+// ============================================================
+
+// Minimal slices of the DirectInput ABI. The full SDK header is not needed and
+// dinput.h would collide with the DLL's own subsystem header.
+struct TestDeviceInstanceA
+{
+    DWORD dwSize;
+    GUID  guidInstance;
+    GUID  guidProduct;
+    DWORD dwDevType;
+    CHAR  tszInstanceName[MAX_PATH];
+    CHAR  tszProductName[MAX_PATH];
+    GUID  guidFFDriver;
+    WORD  wUsagePage;
+    WORD  wUsage;
+};
+
+struct TestDeviceInstanceW
+{
+    DWORD dwSize;
+    GUID  guidInstance;
+    GUID  guidProduct;
+    DWORD dwDevType;
+    WCHAR tszInstanceName[MAX_PATH];
+    WCHAR tszProductName[MAX_PATH];
+    GUID  guidFFDriver;
+    WORD  wUsagePage;
+    WORD  wUsage;
+};
+
+using TestPfnCreateA  = HRESULT (WINAPI*)(HINSTANCE, DWORD, void**, void*);
+using TestPfnCreate8  = HRESULT (WINAPI*)(HINSTANCE, DWORD, const GUID*, void**, void*);
+using TestPfnRelease  = ULONG   (WINAPI*)(void*);
+using TestPfnEnumCb   = BOOL    (WINAPI*)(const TestDeviceInstanceA*, void*);
+using TestPfnEnum     = HRESULT (WINAPI*)(void*, DWORD, TestPfnEnumCb, void*, DWORD);
+using TestPfnEnumCbW  = BOOL    (WINAPI*)(const TestDeviceInstanceW*, void*);
+using TestPfnEnumW    = HRESULT (WINAPI*)(void*, DWORD, TestPfnEnumCbW, void*, DWORD);
+using TestPfnCreateDev = HRESULT (WINAPI*)(void*, const GUID*, void**, void*);
+using TestPfnQI       = HRESULT (WINAPI*)(void*, const GUID*, void**);
+
+static const GUID kTestGuidSysMouse =
+    { 0x6F1D2B60, 0xD5A0, 0x11CF, { 0xBF, 0xC7, 0x44, 0x45, 0x53, 0x54, 0x00, 0x00 } };
+static const GUID kTestGuidSysKeyboard =
+    { 0x6F1D2B61, 0xD5A0, 0x11CF, { 0xBF, 0xC7, 0x44, 0x45, 0x53, 0x54, 0x00, 0x00 } };
+// The IID a DirectInput 7 game asks a fresh device for, because that is where
+// Poll() lives. A DirectInput 8 object answers E_NOINTERFACE without the bridge.
+static const GUID kTestIidDevice2A =
+    { 0x5944E682, 0xC92E, 0x11CF, { 0xBF, 0xC7, 0x44, 0x45, 0x53, 0x54, 0x00, 0x00 } };
+static const GUID kTestIidDirectInput8A =
+    { 0xBF798030, 0x483A, 0x4DA2, { 0xAA, 0x99, 0x5D, 0x64, 0xED, 0x36, 0x97, 0x00 } };
+static const GUID kTestIidDirectInput8W =
+    { 0xBF798031, 0x483A, 0x4DA2, { 0xAA, 0x99, 0x5D, 0x64, 0xED, 0x36, 0x97, 0x00 } };
+
+struct EnumTally
+{
+    int  count               = 0;
+    bool sawMouse            = false;
+    bool sawKeyboard         = false;
+    bool onlyMouseOrKeyboard = true;
+};
+
+// Low byte of dwDevType: DirectInput 3/7 numbers mouse 2 / keyboard 3, and
+// DirectInput 8 numbers them 0x12 / 0x13.
+static bool IsMouseOrKeyboardType(DWORD devType)
+{
+    const DWORD type = devType & 0xFF;
+
+    return type == 2 || type == 3 || type == 0x12 || type == 0x13;
+}
+
+static BOOL WINAPI TestEnumCallback(const TestDeviceInstanceA* instance, void* ref)
+{
+    EnumTally* tally = static_cast<EnumTally*>(ref);
+
+    if (!instance || instance->dwSize != sizeof(TestDeviceInstanceA))
+        return TRUE;
+
+    ++tally->count;
+
+    if (memcmp(&instance->guidInstance, &kTestGuidSysMouse, sizeof(GUID)) == 0)
+        tally->sawMouse = true;
+    else if (memcmp(&instance->guidInstance, &kTestGuidSysKeyboard, sizeof(GUID)) == 0)
+        tally->sawKeyboard = true;
+
+    if (!IsMouseOrKeyboardType(instance->dwDevType))
+        tally->onlyMouseOrKeyboard = false;
+
+    return TRUE; // DIENUM_CONTINUE
+}
+
+static BOOL WINAPI TestEnumCallbackW(const TestDeviceInstanceW* instance, void* ref)
+{
+    EnumTally* tally = static_cast<EnumTally*>(ref);
+
+    if (!instance || instance->dwSize != sizeof(TestDeviceInstanceW))
+        return TRUE;
+
+    ++tally->count;
+
+    if (!IsMouseOrKeyboardType(instance->dwDevType))
+        tally->onlyMouseOrKeyboard = false;
+
+    return TRUE;
+}
+
+static void* TestVtSlot(void* object, int index)
+{
+    return (*static_cast<void***>(object))[index];
+}
+
+static void RunDirectInputTests(HMODULE hDInput)
+{
+    wprintf(L"\n--- DirectInput Bridge Tests ---\n");
+
+    if (!hDInput)
+    {
+        wprintf(L"  SKIP  dinput.dll could not be loaded; bridge tests skipped\n");
+        return;
+    }
+
+    TestPfnCreateA create = reinterpret_cast<TestPfnCreateA>(
+        reinterpret_cast<void*>(GetProcAddress(hDInput, "DirectInputCreateA")));
+
+    if (!create)
+    {
+        wprintf(L"  SKIP  dinput.dll has no DirectInputCreateA; bridge tests skipped\n");
+        return;
+    }
+
+    // D-01: a DirectInput 7 request is served by the bridge instead of the
+    // legacy implementation. Without the hook this call is what hangs.
+    void* di = nullptr;
+    HRESULT hr = create(GetModuleHandleW(nullptr), 0x0700, &di, nullptr);
+
+    ASSERT(SUCCEEDED(hr) && di != nullptr, L"D-01: DirectInputCreateA(0x0700) succeeds");
+
+    if (FAILED(hr) || !di)
+        return;
+
+    // D-02/D-03: EnumDevices is synthesized, so it returns immediately with
+    // exactly the system mouse and keyboard rather than walking the HID stack.
+    EnumTally tally;
+    TestPfnEnum enumDevices = reinterpret_cast<TestPfnEnum>(TestVtSlot(di, 4));
+
+    hr = enumDevices(di, 0 /* all classes */, TestEnumCallback, &tally, 0);
+
+    ASSERT(SUCCEEDED(hr), L"D-02: EnumDevices succeeds");
+    ASSERT(tally.sawMouse && tally.sawKeyboard && tally.count == 2,
+        L"D-03: EnumDevices reports exactly the system mouse and keyboard");
+
+    // D-04: CreateDevice still goes to DirectInput 8 for real.
+    void* device = nullptr;
+    TestPfnCreateDev createDevice = reinterpret_cast<TestPfnCreateDev>(TestVtSlot(di, 3));
+
+    hr = createDevice(di, &kTestGuidSysMouse, &device, nullptr);
+
+    ASSERT(SUCCEEDED(hr) && device != nullptr, L"D-04: CreateDevice(GUID_SysMouse) succeeds");
+
+    if (SUCCEEDED(hr) && device)
+    {
+        // D-05: the pre-DX8 device IID is aliased back to the same object. If
+        // this regresses, a real game keeps working menus and loses all
+        // in-game input.
+        void* device2 = nullptr;
+        TestPfnQI deviceQI = reinterpret_cast<TestPfnQI>(TestVtSlot(device, 0));
+
+        hr = deviceQI(device, &kTestIidDevice2A, &device2);
+
+        ASSERT(SUCCEEDED(hr) && device2 == device,
+            L"D-05: QueryInterface(IID_IDirectInputDevice2A) aliases the same object");
+
+        if (SUCCEEDED(hr) && device2)
+            reinterpret_cast<TestPfnRelease>(TestVtSlot(device2, 2))(device2);
+
+        reinterpret_cast<TestPfnRelease>(TestVtSlot(device, 2))(device);
+    }
+
+    // Released before the Interposer unloads: the bridge reverts its vtable
+    // patches on detach, but the object itself belongs to dinput8.
+    reinterpret_cast<TestPfnRelease>(TestVtSlot(di, 2))(di);
+}
+
+// A game that uses DirectInput 8 natively never touches the bridge, but the
+// device filter still applies to it — DirectInput8Create is hooked separately.
+static void RunDirectInput8Tests(HMODULE hDInput8)
+{
+    wprintf(L"\n--- DirectInput 8 Filter Tests ---\n");
+
+    if (!hDInput8)
+    {
+        wprintf(L"  SKIP  dinput8.dll could not be loaded; filter tests skipped\n");
+        return;
+    }
+
+    TestPfnCreate8 create = reinterpret_cast<TestPfnCreate8>(
+        reinterpret_cast<void*>(GetProcAddress(hDInput8, "DirectInput8Create")));
+
+    if (!create)
+    {
+        wprintf(L"  SKIP  dinput8.dll has no DirectInput8Create; filter tests skipped\n");
+        return;
+    }
+
+    // DF-01/DF-02: ANSI. The fixture's filter admits only Mouse and Keyboard, so
+    // the enumeration is answered directly rather than run.
+    void* di = nullptr;
+    HRESULT hr = create(GetModuleHandleW(nullptr), 0x0800, &kTestIidDirectInput8A, &di, nullptr);
+
+    ASSERT(SUCCEEDED(hr) && di != nullptr, L"DF-01: DirectInput8Create(IID_IDirectInput8A) succeeds");
+
+    if (SUCCEEDED(hr) && di)
+    {
+        EnumTally tally;
+        TestPfnEnum enumDevices = reinterpret_cast<TestPfnEnum>(TestVtSlot(di, 4));
+
+        hr = enumDevices(di, 0, TestEnumCallback, &tally, 0);
+
+        ASSERT(SUCCEEDED(hr) && tally.sawMouse && tally.sawKeyboard && tally.count == 2,
+            L"DF-02: native DX8 ANSI enumeration is filtered to mouse and keyboard");
+
+        reinterpret_cast<TestPfnRelease>(TestVtSlot(di, 2))(di);
+    }
+
+    // DF-03/DF-04: Unicode. There is no shortcut for the W interface, so this
+    // runs a real DirectInput 8 enumeration and filters the results — the path
+    // that exercises class matching against live devices.
+    //
+    // This is the slow test. A real enumeration opens and classifies the whole
+    // HID stack and can take ~20 s on a machine with many devices, which is
+    // precisely the cost the mouse/keyboard-only shortcut exists to avoid. It
+    // is kept because it is the only end-to-end proof that filtering works
+    // against real hardware rather than a synthesised pair.
+    void* diW = nullptr;
+
+    hr = create(GetModuleHandleW(nullptr), 0x0800, &kTestIidDirectInput8W, &diW, nullptr);
+
+    ASSERT(SUCCEEDED(hr) && diW != nullptr, L"DF-03: DirectInput8Create(IID_IDirectInput8W) succeeds");
+
+    if (SUCCEEDED(hr) && diW)
+    {
+        EnumTally tally;
+        TestPfnEnumW enumDevices = reinterpret_cast<TestPfnEnumW>(TestVtSlot(diW, 4));
+
+        hr = enumDevices(diW, 0, TestEnumCallbackW, &tally, 0);
+
+        // Every surviving device must be a mouse or keyboard. The machine may
+        // legitimately have none of one kind, so the count is not asserted.
+        ASSERT(SUCCEEDED(hr) && tally.onlyMouseOrKeyboard,
+            L"DF-04: native DX8 Unicode enumeration yields only mouse/keyboard class devices");
+
+        wprintf(L"        (%d devices passed the filter)\n", tally.count);
+
+        reinterpret_cast<TestPfnRelease>(TestVtSlot(diW, 2))(diW);
+    }
+}
+
 // ============================================================
 // Entry point
 // ============================================================
@@ -798,6 +1086,15 @@ int wmain()
     // (InstallRegistryHooks → LoadRegFile runs before MH_EnableHook)
     WriteVirtualReg(regPath);
 
+    // dinput.dll has to be in the process before the Interposer loads, or
+    // InstallDirectInputHooks finds no module to hook. A real game gets this
+    // for free by importing it statically.
+    HMODULE hDInput = LoadLibraryW(L"dinput.dll");
+
+    // Likewise for dinput8.dll, whose DirectInput8Create carries the device
+    // filter for games that never touch the legacy API.
+    HMODULE hDInput8 = LoadLibraryW(L"dinput8.dll");
+
     // ── Load DLL ─────────────────────────────────────────────────────────────
     HMODULE hDll = LoadLibraryW(dllPath.c_str());
     if (!hDll)
@@ -813,12 +1110,26 @@ int wmain()
     RunFileTests(exeDir, testTmpDir);
     RunRegistryTests();
     RunIdentityTests();
+    RunDirectInputTests(hDInput);
+    RunDirectInput8Tests(hDInput8);
 
     // ── Unload DLL ───────────────────────────────────────────────────────────
     // DLL_PROCESS_DETACH fires: RemoveRegistryHooks (SaveRegFile if dirty),
     // then MH_DisableHook + MH_Uninitialize, then CloseLog.
     FreeLibrary(hDll);
     hDll = nullptr;
+
+    if (hDInput)
+    {
+        FreeLibrary(hDInput);
+        hDInput = nullptr;
+    }
+
+    if (hDInput8)
+    {
+        FreeLibrary(hDInput8);
+        hDInput8 = nullptr;
+    }
 
     // ── Post-unload tests ─────────────────────────────────────────────────────
     // Discover the timestamped log created by LoadConfig during DLL_PROCESS_ATTACH.
