@@ -9,6 +9,7 @@ on:
 jobs:
   release:
     runs-on: windows-latest
+    environment: release
     permissions:
       contents: write
       id-token: write   # required for the OIDC federated credential used by azure/login
@@ -131,10 +132,9 @@ jobs:
       # skipped and the job still produces a complete (unsigned) release, so forks
       # without the Azure setup keep working.
       #
-      # NOTE: if these secrets and variables are scoped to a GitHub *environment*
-      # rather than the repository, they resolve empty here and signing is silently
-      # skipped. Add a matching `environment:` key to this job in that case — but be
-      # aware that gates the entire release job, not just signing.
+      # These resolve from the `release` environment as well as the repository,
+      # because the job declares that environment (see the top of the job).
+      # Environment-scoped values win over repository-scoped ones.
       - name: Report signing configuration
         shell: pwsh
         run: |
