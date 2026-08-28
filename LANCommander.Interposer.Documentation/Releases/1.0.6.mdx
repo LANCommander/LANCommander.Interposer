@@ -1,0 +1,67 @@
+---
+sidebar_label: 1.0.6
+sidebar_position: 7
+---
+
+import ReleaseDownloads from '@site/src/components/ReleaseDownloads';
+
+# Interposer 1.0.6 Release Notes
+
+## Downloads
+
+<ReleaseDownloads repo="LANCommander/LANCommander.Interposer" release="v1.0.6" />
+
+## What's Changed
+
+### .NET Bindings
+
+A managed `LANCommander.Interposer` library is now published as a NuGet package, giving .NET applications a first-class API for driving the Interposer instead of shelling out to the injector. Everything is exposed through a single `InterposerService`:
+
+```csharp
+using System.Diagnostics;
+using LANCommander.Interposer;
+
+using var interposer = new InterposerService();
+interposer.Username = "Player1";
+interposer.ComputerName = "GAMEPC";
+interposer.FastDlUrl = "http://fastdl.lan/";
+
+// Launch suspended, inject the DLL, resume - returns a standard Process
+var startInfo = new ProcessStartInfo(@"C:\Games\game.exe", "-fullscreen");
+Process game = interposer.Start(startInfo);
+
+// Or inject into an already-running process
+interposer.Inject(existingProcess);
+interposer.Inject(1234);  // by PID
+```
+
+The DLL is located automatically next to the host application (`interposer.dll` or `LANCommander.Interposer.dll`), or you can pass an explicit path. The package targets .NET 8.0, 9.0, and 10.0.
+
+Beyond injection, `InterposerService` wraps the in-process plugin API (logging, config reads, virtual registry writes, and rich presence) so host code loaded inside an injected process can call the same exports a native plugin would.
+
+### Cross-Process Hook Events
+
+The file, registry, DNS, network, and identity callbacks are now exposed **across process boundaries** over a named pipe, so a host application no longer has to run inside the game to observe what the game is doing. The DLL fires each event down the pipe as it happens; the managed side surfaces them as ordinary C# events:
+
+```csharp
+using LANCommander.Interposer;
+using LANCommander.Interposer.Events;
+
+using var interposer = new InterposerService();
+interposer.EnableEvents();
+
+interposer.FileAccessed += (s, e) =>
+    Console.WriteLine($"{e.Verb}: {e.Path}");
+interposer.RegistryAccessed += (s, e) =>
+    Console.WriteLine($"{e.Verb}: {e.KeyPath} -> {e.ValueName}");
+interposer.DnsResolved += (s, e) =>
+    Console.WriteLine($"DNS: {e.Hostname} -> {e.RedirectedHostname}");
+interposer.NetworkConnection += (s, e) =>
+    Console.WriteLine($"Connect: {e.Address}:{e.Port}");
+interposer.IdentityQueried += (s, e) =>
+    Console.WriteLine($"{e.IdentityType}: {e.Value}");
+```
+
+The event callbacks fire **before** the logging gate is checked, so a subscriber sees every file, registry, DNS, network, and identity event regardless of whether the corresponding `Logging` flag is enabled. Turning logging off quiets the on-disk log without starving your subscribers.
+
+See the [.NET bindings README](https://github.com/LANCommander/LANCommander.Interposer/blob/main/LANCommander.Interposer.NET/README.md) for the full API reference.

@@ -1,0 +1,20 @@
+---
+sidebar_label: 1.0.7
+sidebar_position: 8
+---
+
+import ReleaseDownloads from '@site/src/components/ReleaseDownloads';
+
+# Interposer 1.0.7 Release Notes
+
+## Downloads
+
+<ReleaseDownloads repo="LANCommander/LANCommander.Interposer" release="v1.0.7" />
+
+## What's Changed
+
+### Named Pipe Diagnostics
+
+This release hardens the cross-process event channel introduced in 1.0.6. The named-pipe connection between an injected game and a subscribed .NET host now surfaces clearer diagnostics when a pipe is slow to appear, drops, or reconnects, and the connect/read loop in `InterposerService` recovers more gracefully instead of silently going quiet.
+
+If you build on the cross-process `FileAccessed` / `RegistryAccessed` / `DnsResolved` / `NetworkConnection` / `IdentityQueried` events, this makes it much easier to tell the difference between "the game isn't doing anything" and "the pipe never connected."

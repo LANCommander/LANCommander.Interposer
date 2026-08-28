@@ -1,0 +1,44 @@
+---
+sidebar_label: 1.0.8
+sidebar_position: 9
+---
+
+import ReleaseDownloads from '@site/src/components/ReleaseDownloads';
+
+# Interposer 1.0.8 Release Notes
+
+## Downloads
+
+<ReleaseDownloads repo="LANCommander/LANCommander.Interposer" release="v1.0.8" />
+
+## What's Changed
+
+### Network Adapter Filtering
+
+Many games naively pick the first network adapter Windows reports, which breaks LAN play when a VPN, Hamachi, or other virtual adapter shadows the real LAN NIC. The new `NetworkAdapters` section presents the game a filtered view of the machine's adapters so it lands on the one you want.
+
+Add a `NetworkAdapters` section to `.interposer\Config.yml`:
+
+```yaml
+NetworkAdapters:
+  Enabled: true
+  Subnets: ['192.168.1.0/24', '10.0.0.0/8']   # IPv4 CIDR
+  Names:   ['^Ethernet', 'Realtek']           # regex vs FriendlyName/Description
+  MACs:    ['00:11:22:33:44:55']              # colon or dash separated
+```
+
+This is an **allow-list**: an adapter is kept if it matches **any** configured filter, and every non-matching adapter is hidden from the enumeration APIs. If all three lists are empty the feature is a no-op and every adapter is shown unchanged.
+
+The three filters have different reach:
+
+| Filter | Matched against | Covered APIs |
+|---|---|---|
+| `Subnets` | Each of the adapter's IPv4 addresses | `GetAdaptersInfo`, `GetAdaptersAddresses`, `gethostbyname` (local host), `WSAIoctl SIO_GET_INTERFACE_LIST` |
+| `Names` | `FriendlyName` and `Description` (case-insensitive ECMAScript regex) | `GetAdaptersInfo`, `GetAdaptersAddresses` |
+| `MACs` | Physical address, colon- or dash-separated, case-insensitive | `GetAdaptersInfo`, `GetAdaptersAddresses` |
+
+Hidden-adapter activity is written to the session log when `Logging.Network` is `true`. Plugins and host applications can enumerate the canonical adapter list via `InterposerEnumNetworkAdapters`, surfaced in .NET as `NetworkAdapterInfo`.
+
+### Redistributable Packaging Fixes
+
+The LANCommander redistributable (`.lcx`) package layout and its Install / Name Change / Uninstall scripts were corrected so it imports cleanly, and the release workflow and `OptionSchema` were updated to cover the new `NetworkAdapters` options.

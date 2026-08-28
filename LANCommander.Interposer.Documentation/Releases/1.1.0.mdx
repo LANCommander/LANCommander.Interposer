@@ -1,0 +1,65 @@
+---
+sidebar_label: 1.1.0
+sidebar_position: 10
+---
+
+import ReleaseDownloads from '@site/src/components/ReleaseDownloads';
+
+# Interposer 1.1.0 Release Notes
+
+## Downloads
+
+<ReleaseDownloads repo="LANCommander/LANCommander.Interposer" release="v1.1.0" />
+
+## What's Changed
+
+### Legacy DirectInput Fix
+
+The `dinput.dll` that ships with Windows has a long-standing bug that overflows while enumerating HID devices on some machines, which can hang or crash DirectInput 3/7 games on startup. DirectInput 8 has a nearly identical API, so the new `FixLegacyDeviceEnumeration` option serves those legacy games from DirectInput 8 instead:
+
+```yaml
+DirectInput:
+  FixLegacyDeviceEnumeration: true
+```
+
+To reach a game that imports `dinput.dll` directly (most titles from this era, and often the only proxyable DLL they import) install the Interposer using the `dinput.dll` load method.
+
+### DirectInput Device Filtering
+
+A new `DeviceFilter` controls which devices a game is allowed to see when it enumerates them. It applies both to games bridged by the fix above and to games that use DirectInput 8 natively:
+
+```yaml
+DirectInput:
+  FixLegacyDeviceEnumeration: true
+  DeviceFilter:
+    Enabled: true
+    Classes: ['Mouse', 'Keyboard']
+    Names:   ['^Wireless Controller$', 'X-?Box']
+```
+
+Like the network adapter filter, this is an **allow-list**: a device is kept if it matches **any** configured filter. `Classes` accepts names like `Mouse`, `Keyboard`, `Joystick`, and `Gamepad` (plus DirectInput 8-only classes such as `Driving` and `Flight`); `Names` is a case-insensitive regex matched against each device's instance and product name.
+
+Filtering down to just `Mouse` and `Keyboard` can also make some games enumerate devices several times faster, because a synthesized pair is returned without running a real enumeration.
+
+Set `Logging.DirectInput: true` and `Logging.Level: Debug` to see every device an enumeration turned up and why each was kept or hidden. See the [DirectInput](../DirectInput) documentation for the full reference.
+
+### Mouse Transform Plugin
+
+A new bundled `LANCommander.Interposer.Plugin.Mouse` plugin can rewrite the system mouse's buffered input stream through legacy versions of DirectInput. This should fix mouse input for some games that experience inaccurate tracking, especially with mice that have a high polling rate. This plugin was written to fix mouse inputs with games built using early versions of the LithTech game engine.
+
+Like the other bundled plugins, it ships in `Plugins\` but is not enabled until you move it into `.interposer\Plugins\`. See the [Mouse Plugin](../Plugins/Mouse) documentation to get started.
+
+### Log Levels
+
+`Logging` gains a `Level` key that controls verbosity **within** whichever subsystems are already enabled:
+
+```yaml
+Logging:
+  Level: Info   # Info | Debug | Trace
+```
+
+A new `Logging.DirectInput` flag gates the DirectInput bridge activity described above. Debug and Trace log levels can end up creating large log files, so it's recommended to only use this for authoring and debugging purposes.
+
+### Unified Release Package
+
+The proxy variants are now a single unified binary. `version.dll`, `dinput8.dll`, `dinput.dll`, and the `.asi` are byte-identical copies of one signed `LANCommander.Interposer.dll`. Releases will now be provided as a LANCommander-ready LCX import package and manual installation ZIP file. Both contains builds for x86 and 64-bit flavors. Additionally, all binaries are now digitally signed; this should hopefully prevent the Interposer from being improperly flagged by antivirus software.
