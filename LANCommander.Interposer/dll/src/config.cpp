@@ -56,6 +56,9 @@ bool         g_logDirectInput  = false;
 
 std::vector<DnsRedirect> g_dnsRedirects;
 
+std::vector<std::wstring> g_registryFiles;
+bool                      g_registryIsolated = false;
+
 bool                       g_diFixLegacyEnum = false;
 bool                       g_diFilterEnabled = false;
 std::vector<DiDeviceClass> g_diFilterClasses;
@@ -169,6 +172,18 @@ static void TrimTrailingSlash(std::wstring& path)
 
         path.pop_back();
     }
+}
+
+// True for a path that already names its own root: a drive-qualified path
+// ("C:\Games\..."), a UNC share, or a rooted path. Everything else is taken
+// as relative to the DLL's own directory, which is what makes the historical
+// '.interposer\Registry.reg' spelling keep working.
+static bool IsAbsolutePath(const std::wstring& path)
+{
+    if (path.size() >= 2 && path[1] == L':')
+        return true;
+
+    return !path.empty() && (path[0] == L'\\' || path[0] == L'/');
 }
 
 static std::wstring UpperCase(const std::wstring& s)
@@ -1505,6 +1520,59 @@ void LoadConfig()
         }
     }
 
+    // ── Registry ────────────────────────────────────────────────────────────────
+    //
+    // Files is an overlay stack, applied in the order written: a later file
+    // wins wherever it names the same key and value as an earlier one, and the
+    // last entry is the only one ever written back to. Anything not
+    // drive-qualified or rooted is resolved against the DLL's directory, so the
+    // historical '.interposer\Registry.reg' stays spelled the way it always was.
+    //
+    // Warnings are deferred for the same reason as OsVersion's: the session log
+    // does not exist yet.
+    std::vector<std::wstring> registryWarnings;
+
+    if (YAML::Node registry = root["Registry"])
+    {
+        if (registry["Isolated"])
+            g_registryIsolated = registry["Isolated"].as<bool>(false);
+
+        YAML::Node files = registry["Files"];
+
+        if (files && files.IsSequence())
+        {
+            for (const auto& item : files)
+            {
+                std::wstring entry = Utf8ToWide(item.as<std::string>(""));
+
+                if (entry.empty())
+                    continue;
+
+                std::vector<std::wstring> unresolved;
+                std::wstring resolved = ExpandPathTokens(entry, /*escapeForRegex=*/false, &unresolved);
+
+                for (const std::wstring& name : unresolved)
+                {
+                    registryWarnings.push_back(
+                        L"unresolved %" + name + L"% in Registry.Files entry: " + entry);
+                }
+
+                if (!IsAbsolutePath(resolved))
+                    resolved = dllDirectory + resolved;
+
+                g_registryFiles.push_back(std::move(resolved));
+            }
+        }
+
+        // A Files list that was written but produced nothing usable would leave
+        // the game with an empty store and nowhere to persist, which is worse
+        // than the default. An absent Files key is not an error — it is how you
+        // set Isolated without moving the file.
+        if (files && g_registryFiles.empty())
+            registryWarnings.push_back(
+                L"Registry.Files yielded no usable paths; using the default .interposer\\Registry.reg");
+    }
+
     // ── DnsRedirects ──────────────────────────────────────────────────────────
     if (YAML::Node dns = root["DnsRedirects"])
     {
@@ -1929,4 +1997,7 @@ void LoadConfig()
 
     for (const std::wstring& warning : redirectWarnings)
         InterposerLog(L"FILEREDIRECT", warning.c_str());
+
+    for (const std::wstring& warning : registryWarnings)
+        InterposerLog(L"REGISTRY", warning.c_str());
 }

@@ -96,9 +96,10 @@ Only written at `Level: Debug` or higher, and only for a subsystem that is alrea
 | `[REDIRECT HIT]` | Debug | A `FileRedirects` rule matched. The line shows the source path and, after the `->`, the 1-based rule number and its pattern. When the pattern contained a `%TOKEN%`, the rule as written follows in parentheses. |
 | `[REDIRECT MISS]` | Debug | No rule matched this path. The line shows either `no rules configured` or how many rules were evaluated. |
 | `[REDIRECT RULE]` | Trace | One line per redirect pattern that was evaluated and rejected, for working out why a regex did not match. |
-| `[REG HIT]` | Debug | The key was found in the virtual registry, so the request is served from `Registry.reg`. |
+| `[REG HIT]` | Debug | The key was found in the virtual registry, so the request is served from the `.reg` store. Under `Registry.Isolated` the reason reads `served from virtual store (isolated)`, meaning the key was virtualized because isolation is on rather than because a file names it. |
 | `[REG MISS]` | Debug | The key was passed through to the real registry, with the reason — `not in virtual space`, `handle not resolvable`, or `virtual key not in store`. |
 | `[REG PARTIAL]` | Debug | The key exists in the virtual store but the requested value name does not. The game receives `ERROR_FILE_NOT_FOUND` and there is **no** fallback to the real registry. |
+| `[REG LAYER]` | Debug | One line per `.reg` file in [`Registry.Files`](/Interposer/RegistryEmulation#stacking-several-reg-files) as it loads, marked `read-only` or `writable`. An extra line reports that `Registry.Isolated` is on. |
 
 `[REG PARTIAL]` is worth calling out: it is the signature of a `Registry.reg` that has the right key but is missing a value the game reads. At `Info` level this looks like an ordinary successful `[REG READ]`.
 

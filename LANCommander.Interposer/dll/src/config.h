@@ -106,6 +106,21 @@ extern bool         g_logDirectInput;   // true = log DirectInput bridge activit
 
 extern std::vector<DnsRedirect> g_dnsRedirects; // DNS hostname redirects (case-insensitive)
 
+// Registry — the .reg files that back the virtual registry, and whether that
+// store is authoritative for every key rather than only the ones it contains.
+//
+// g_registryFiles is the overlay stack in Config.yml order: each file is loaded
+// on top of the previous one, so a later file wins for any key/value the two
+// share. The LAST entry is the writable layer — every runtime write lands
+// there, and the earlier files are never modified. Paths are absolute, with
+// %TOKEN% already expanded and relative entries resolved against the DLL's own
+// directory. Empty means the historical default, <dlldir>\.interposer\Registry.reg.
+extern std::vector<std::wstring> g_registryFiles;
+
+// Registry.Isolated — when true every key is treated as virtual, so a game
+// never reads or writes the real registry even for keys absent from the files.
+extern bool                      g_registryIsolated;
+
 // A DirectInput device class, taken from the low byte of DIDEVICEINSTANCE::dwDevType.
 // Covers both encodings: DirectInput 3/7 numbers its types 1..4 and DirectInput 8
 // numbers its own 0x11..0x1C, and the two ranges do not overlap, so one mapping

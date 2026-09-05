@@ -603,7 +603,14 @@ void InitFastDL()
 
         addBlocked(dllPath);                                               // interposer DLL itself
         addBlocked(dllDir + L".interposer\\Config.yml");                   // config file
-        addBlocked(dllDir + L".interposer\\Registry.reg");                 // virtual registry file
+
+        // The virtual registry store: the default location, plus wherever
+        // Registry.Files moved the overlay to.
+        addBlocked(dllDir + L".interposer\\Registry.reg");
+
+        for (const std::wstring& registryFile : g_registryFiles)
+            addBlocked(registryFile);
+
         addBlocked(dllDir + L"LANCommander.Interposer.Injector.exe");
         addBlocked(dllDir + L"Injector.exe");
 

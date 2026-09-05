@@ -170,6 +170,21 @@ OptionSchema: |
             - { Value: "Debug", DisplayName: "Debug (redirect hits and misses)" }
             - { Value: "Trace", DisplayName: "Trace (also list every rule tried)" }
 
+    Registry:
+      DisplayName: Registry
+      Description: Where the virtual registry lives and how much of the registry it owns
+      Options:
+        Files:
+          Type: list
+          ItemType: string
+          DisplayName: Registry Files
+          Description: The .reg files backing the virtual registry, in overlay order - each is loaded on top of the one before it, and the LAST one takes every write the game makes. Paths may be absolute or relative to the DLL, and support the same %TOKEN% expansion as File Redirects. Leave empty for a single .interposer\Registry.reg.
+        Isolated:
+          Type: bool
+          DisplayName: Isolated
+          Description: Treat every key as virtual rather than only those the files contain, so the game never reads or writes the real registry. Also hides genuine system configuration, so enable registry logging at Debug level when trying it.
+          Default: "false"
+
     FileRedirects:
       Type: list
       DisplayName: File Redirects

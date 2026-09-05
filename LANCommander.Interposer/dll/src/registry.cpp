@@ -6,8 +6,10 @@
 #include <algorithm>
 #include <map>
 #include <mutex>
+#include <set>
 #include <shared_mutex>
 #include <string>
+#include <utility>
 #include <vector>
 
 // ============================================================
@@ -19,8 +21,43 @@ using StoreMap = std::map<std::wstring, ValueMap>;  // uppercase keyPath  → va
 
 static StoreMap          g_store;
 static std::shared_mutex g_storeMutex;
-static std::wstring      g_filePath;
 static bool              g_dirty = false;
+
+// The overlay stack in load order, and the one layer of it that is writable.
+// Each file is loaded on top of the last, so a later file wins wherever two
+// name the same value; g_writeFile is the final entry and the only one this
+// process ever writes to.
+static std::vector<std::wstring> g_regFiles;
+static std::wstring              g_writeFile;
+
+// What the writable layer owns. g_store is the merged view every read is served
+// from; g_writable is the subset serialized back out. Keeping them apart is what
+// stops a value inherited from a base file being copied into the write file just
+// because the game touched the key next to it — the base file stays the shared
+// template and the write file stays the per-user delta.
+static StoreMap g_writable;
+
+// Values the base layers define, and the deletes recorded against them. Dropping
+// a base-layer value from g_writable would not stick: the base file hands it back
+// on the next launch. It is written as a regedit `"Name"=-` tombstone instead.
+// With a single file — the default — g_baseValues is empty, no tombstone is
+// ever produced, and the written file is byte-identical to what it always was.
+static std::set<std::pair<std::wstring, std::wstring>> g_baseValues;
+static std::map<std::wstring, std::set<std::wstring>>  g_tombstones;
+
+// Drop a tombstone once the value is written again. Caller holds g_storeMutex.
+static void ClearTombstone(const std::wstring& keyPath, const std::wstring& valueName)
+{
+    auto it = g_tombstones.find(keyPath);
+
+    if (it == g_tombstones.end())
+        return;
+
+    it->second.erase(valueName);
+
+    if (it->second.empty())
+        g_tombstones.erase(it);
+}
 
 // ============================================================
 // Virtual handle table
@@ -250,6 +287,12 @@ static bool InVirtualSpace(const std::wstring& upperPath)
 {
     if (upperPath.empty()) return false;
 
+    // Isolated makes the store authoritative for the whole registry rather than
+    // just the keys it happens to contain: a key it has never heard of is still
+    // virtual, so the read fails instead of falling through and the write lands
+    // in the file instead of in HKLM.
+    if (g_registryIsolated) return true;
+
     std::shared_lock lock(g_storeMutex);
     
     for (auto& [key, _] : g_store)
@@ -289,7 +332,9 @@ static void LogVirtualSpaceVerdict(const std::wstring& path, bool inVirtualSpace
         LogRegistryDiag(L"REG MISS", L"(unknown)", L"handle not resolvable");
     }
     else if (inVirtualSpace)
-        LogRegistryDiag(L"REG HIT", path.c_str(), L"served from virtual store");
+        LogRegistryDiag(L"REG HIT", path.c_str(),
+            g_registryIsolated ? L"served from virtual store (isolated)"
+                               : L"served from virtual store");
     else
         LogRegistryDiag(L"REG MISS", path.c_str(), L"not in virtual space");
 }
@@ -427,12 +472,16 @@ static std::wstring EscapeString(const std::wstring& input)
 // ============================================================
 // File I/O
 // ============================================================
-static void LoadRegFile()
+// Load one layer of the overlay on top of whatever is already in g_store.
+// writeLayer marks the last file in the stack: its contents are recorded in
+// g_writable so SaveRegFile can reproduce them, while an earlier file's are
+// recorded in g_baseValues instead and are never written back out.
+static void LoadRegFile(const std::wstring& path, bool writeLayer)
 {
-    if (g_filePath.empty())
+    if (path.empty())
         return;
 
-    HANDLE fileHandle = CreateFileW(g_filePath.c_str(), GENERIC_READ, FILE_SHARE_READ,
+    HANDLE fileHandle = CreateFileW(path.c_str(), GENERIC_READ, FILE_SHARE_READ,
         nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
     
     if (fileHandle == INVALID_HANDLE_VALUE)
@@ -541,6 +590,11 @@ static void LoadRegFile()
                 currentKey = ToUpper(line.substr(1, end - 1));
                 std::unique_lock lk(g_storeMutex);
                 g_store.emplace(currentKey, ValueMap{});
+
+                // A bare key header carries meaning -- it is what puts the key
+                // in the virtual space -- so the write layer keeps its own.
+                if (writeLayer)
+                    g_writable.emplace(currentKey, ValueMap{});
             }
             
             continue;
@@ -585,6 +639,24 @@ static void LoadRegFile()
         }
         else
         {
+            continue;
+        }
+
+        // "Name"=- is regedit's delete marker. In an overlay it is how the write
+        // layer suppresses a value an earlier file in the stack defines.
+        if (valueData == L"-")
+        {
+            std::unique_lock lock(g_storeMutex);
+
+            if (auto kit = g_store.find(currentKey); kit != g_store.end())
+                kit->second.erase(valueName);
+
+            if (auto wit = g_writable.find(currentKey); wit != g_writable.end())
+                wit->second.erase(valueName);
+
+            if (writeLayer)
+                g_tombstones[currentKey].insert(valueName);
+
             continue;
         }
 
@@ -639,14 +711,26 @@ static void LoadRegFile()
             continue; // unknown type
 
         std::unique_lock lock(g_storeMutex);
-        
+
+        if (writeLayer)
+        {
+            g_writable[currentKey][valueName] = registryValue;
+            ClearTombstone(currentKey, valueName);
+        }
+        else
+            g_baseValues.insert({ currentKey, valueName });
+
         g_store[currentKey][valueName] = std::move(registryValue);
     }
 }
 
+// Serialize the writable layer — not the merged store — to the last file in
+// the stack. Values inherited from an earlier file are deliberately absent: they
+// already live there, and copying them out would freeze a stale duplicate on top
+// of the file they came from.
 static void SaveRegFile()
 {
-    if (g_filePath.empty())
+    if (g_writeFile.empty())
         return;
 
     // Build the output string while holding a shared lock
@@ -659,13 +743,44 @@ static void SaveRegFile()
     {
         std::shared_lock lock(g_storeMutex);
 
-        for (auto& [key, values] : g_store)
+        // A key whose every value came from a base layer still needs a section
+        // of its own when one of them was deleted, so the two maps are walked
+        // together rather than just g_writable.
+        std::set<std::wstring> keys;
+
+        for (const auto& [key, values] : g_writable)
+            keys.insert(key);
+
+        for (const auto& [key, names] : g_tombstones)
+            keys.insert(key);
+
+        for (const std::wstring& key : keys)
         {
             output += L"\r\n[";
             output += key;
             output += L"]\r\n";
 
-            for (auto& [name, rv] : values)
+            if (auto tombIt = g_tombstones.find(key); tombIt != g_tombstones.end())
+            {
+                for (const std::wstring& name : tombIt->second)
+                {
+                    if (name.empty())
+                        output += L"@=-\r\n";
+                    else
+                    {
+                        output += L'"';
+                        output += name;
+                        output += L"\"=-\r\n";
+                    }
+                }
+            }
+
+            auto keyIt = g_writable.find(key);
+
+            if (keyIt == g_writable.end())
+                continue;
+
+            for (auto& [name, rv] : keyIt->second)
             {
                 if (name.empty())
                     output += L"@=";
@@ -735,7 +850,7 @@ static void SaveRegFile()
     }
 
     // Write UTF-16 LE with BOM
-    HANDLE fileHandle = CreateFileW(g_filePath.c_str(), GENERIC_WRITE, 0,
+    HANDLE fileHandle = CreateFileW(g_writeFile.c_str(), GENERIC_WRITE, 0,
         nullptr, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
     
     if (fileHandle == INVALID_HANDLE_VALUE)
@@ -868,6 +983,11 @@ static LSTATUS WINAPI HookRegCreateKeyExW(HKEY hKey, LPCWSTR lpSubKey, DWORD Res
             bool existed     = g_store.count(path) > 0;
             g_store.emplace(path, ValueMap{});
             disposition      = existed ? REG_OPENED_EXISTING_KEY : REG_CREATED_NEW_KEY;
+
+            // A key the game invented belongs to the writable layer even before
+            // a value lands in it, so an empty key still round-trips.
+            if (!existed)
+                g_writable.emplace(path, ValueMap{});
         }
         
         if (phkResult)
@@ -909,6 +1029,11 @@ static LSTATUS WINAPI HookRegCreateKeyExA(HKEY hKey, LPCSTR lpSubKey, DWORD Rese
             bool existed     = g_store.count(path) > 0;
             g_store.emplace(path, ValueMap{});
             disposition      = existed ? REG_OPENED_EXISTING_KEY : REG_CREATED_NEW_KEY;
+
+            // A key the game invented belongs to the writable layer even before
+            // a value lands in it, so an empty key still round-trips.
+            if (!existed)
+                g_writable.emplace(path, ValueMap{});
         }
         
         if (phkResult)
@@ -1147,10 +1272,16 @@ static LSTATUS WINAPI HookRegSetValueExW(HKEY hKey, LPCWSTR lpValueName, DWORD /
     if (lpData && cbData > 0)
         registryValue.data.assign(lpData, lpData + cbData);
 
+    std::wstring upperName = ToUpper(lpValueName ? lpValueName : L"");
+
     {
         std::unique_lock lock(g_storeMutex);
-        
-        g_store[path][ToUpper(lpValueName ? lpValueName : L"")] = std::move(registryValue);
+
+        g_writable[path][upperName] = registryValue;
+        g_store[path][upperName]    = std::move(registryValue);
+
+        ClearTombstone(path, upperName);
+
         g_dirty = true;
     }
     
@@ -1198,9 +1329,16 @@ static LSTATUS WINAPI HookRegSetValueExA(HKEY hKey, LPCSTR lpValueName, DWORD /*
         registryValue.data.assign(lpData, lpData + cbData);
     }
 
+    std::wstring upperName = ToUpper(wideRegistyValueName);
+
     {
         std::unique_lock lock(g_storeMutex);
-        g_store[path][ToUpper(wideRegistyValueName)] = std::move(registryValue);
+
+        g_writable[path][upperName] = registryValue;
+        g_store[path][upperName]    = std::move(registryValue);
+
+        ClearTombstone(path, upperName);
+
         g_dirty = true;
     }
     
@@ -1251,6 +1389,17 @@ static LSTATUS WINAPI HookRegDeleteValueW(HKEY hKey, LPCWSTR lpValueName)
         }
 
         kit->second.erase(vit);
+
+        if (auto wit = g_writable.find(path); wit != g_writable.end())
+            wit->second.erase(upperName);
+
+        // A base layer would hand the value straight back on the next launch,
+        // so the delete has to be recorded rather than just applied. With one
+        // file there is no base layer, nothing is recorded, and the written file
+        // looks exactly as it always did.
+        if (g_baseValues.count({ path, upperName }))
+            g_tombstones[path].insert(upperName);
+
         g_dirty = true;
     }
     
@@ -1678,12 +1827,34 @@ static LSTATUS WINAPI HookRegQueryInfoKeyA(HKEY hKey, LPSTR lpClass, LPDWORD lpc
         lpcbMaxValueLen, lpcbSecurityDescriptor, lpftLastWriteTime);
 }
 
+// Create every missing directory above filePath. SaveRegFile opens the write
+// file with CREATE_ALWAYS, which will not create directories, and a
+// Registry.Files entry may point somewhere that does not exist yet.
+static void EnsureParentDirectory(const std::wstring& filePath)
+{
+    size_t slash = filePath.find_last_of(L"\\/");
+
+    if (slash == std::wstring::npos)
+        return;
+
+    std::wstring directory = filePath.substr(0, slash);
+
+    for (size_t i = 3; i <= directory.size(); ++i)
+    {
+        // i == size() closes out the final segment, which has no separator.
+        if (i != directory.size() && directory[i] != L'\\' && directory[i] != L'/')
+            continue;
+
+        CreateDirectoryW(directory.substr(0, i).c_str(), nullptr);
+    }
+}
+
 // ============================================================
 // Public API
 // ============================================================
 void InstallRegistryHooks()
 {
-    // Locate .interposer\Registry.reg next to our DLL
+    // Locate the default store, .interposer\Registry.reg, next to our DLL
     HMODULE hSelf = nullptr;
 
     GetModuleHandleExW(
@@ -1704,9 +1875,33 @@ void InstallRegistryHooks()
     std::wstring interposerDir = directory + L".interposer\\";
     CreateDirectoryW(interposerDir.c_str(), nullptr);
 
-    g_filePath = interposerDir + L"Registry.reg";
+    // Config.yml may replace the single default file with an overlay stack. The
+    // last entry is the writable layer — everything before it is a read-only
+    // template loaded underneath it.
+    g_regFiles = g_registryFiles;
 
-    LoadRegFile();
+    if (g_regFiles.empty())
+        g_regFiles.push_back(interposerDir + L"Registry.reg");
+
+    g_writeFile = g_regFiles.back();
+
+    // Only the writable layer needs somewhere to land; a base file that is not
+    // there is simply an empty layer.
+    EnsureParentDirectory(g_writeFile);
+
+    for (size_t i = 0; i < g_regFiles.size(); ++i)
+    {
+        const bool writeLayer = (i + 1 == g_regFiles.size());
+
+        LoadRegFile(g_regFiles[i], writeLayer);
+
+        LogRegistryDiag(L"REG LAYER", g_regFiles[i].c_str(),
+            writeLayer ? L"writable" : L"read-only");
+    }
+
+    if (g_registryIsolated)
+        LogRegistryDiag(L"REG LAYER", g_writeFile.c_str(),
+            L"isolated: every key is served from the virtual store");
 
     // Install the 17 advapi32 hooks (no MH_Initialize / MH_EnableHook here —
     // those are owned by dllmain.cpp)

@@ -236,6 +236,15 @@ static void WriteInterposerYaml(const std::wstring& yamlPath,
         "  Version: 'windows server 2003'\n"
         "  ServicePack: 'Service Pack 1'\n"
         "\n"
+        // Two-file overlay: RegistryBase.reg is a read-only template and
+        // Registry.reg layers on top of it and takes every write. Both entries
+        // are relative, so this covers resolution against the DLL's directory
+        // as well as the overlay itself.
+        "Registry:\n"
+        "  Files:\n"
+        "    - '.interposer\\RegistryBase.reg'\n"
+        "    - '.interposer\\Registry.reg'\n"
+        "\n"
         "Player:\n"
         "  Username: TestPlayer\n"
         "  ComputerName: TestMachine\n"
@@ -273,8 +282,32 @@ static void WriteVirtualReg(const std::wstring& regPath)
         "\"BinaryData\"=hex:DE,AD,BE,EF\r\n"
         "\r\n"
         "[HKEY_LOCAL_MACHINE\\SOFTWARE\\TestGame\\1.0\\SubKey]\r\n"
-        "\"SubValue\"=\"InSubKey\"\r\n";
+        "\"SubValue\"=\"InSubKey\"\r\n"
+        "\r\n"
+        // The write layer's half of the overlay key. Shared is defined in both
+        // files, so a read of it must come back with this one.
+        "[HKEY_LOCAL_MACHINE\\SOFTWARE\\TestGame\\Overlay]\r\n"
+        "\"Shared\"=\"FromWrite\"\r\n"
+        "\"WriteOnly\"=\"OnlyInWriteLayer\"\r\n";
     WriteTextFile(regPath, content);
+}
+
+// RegistryBase.reg -- the read-only first layer of the overlay, loaded
+// underneath Registry.reg. Deliberately kept out of the 1.0 key: R-09 and R-10
+// count that key's subkeys and values exactly.
+static void WriteRegistryBaseReg(const std::wstring& basePath)
+{
+    const std::string content =
+        "Windows Registry Editor Version 5.00\r\n"
+        "\r\n"
+        "[HKEY_LOCAL_MACHINE\\SOFTWARE\\TestGame\\Overlay]\r\n"
+        "\"BaseOnly\"=\"FromBase\"\r\n"
+        "\"Shared\"=\"FromBase\"\r\n"
+        "\"Doomed\"=\"DeleteMe\"\r\n"
+        "\r\n"
+        "[HKEY_LOCAL_MACHINE\\SOFTWARE\\TestGame\\BaseKey]\r\n"
+        "\"Marker\"=\"OnlyInBaseLayer\"\r\n";
+    WriteTextFile(basePath, content);
 }
 
 // ============================================================
@@ -352,6 +385,9 @@ static void RunFileTests(const std::wstring& exeDir, const std::wstring& testTmp
         ASSERT(attr != INVALID_FILE_ATTRIBUTES,
             L"F-07: GetFileAttributesA redirect returns valid attributes");
     }
+
+    // F-08: a %TOKEN% inside a Pattern expands before the regex is compiled
+    {
         std::wstring tokenPath = testTmpDir + L"TokenSource\\profile.dat";
         HANDLE h = CreateFileW(tokenPath.c_str(), GENERIC_READ,
             FILE_SHARE_READ, nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
@@ -655,6 +691,132 @@ static void RunRegistryTests()
             L"R-18: real registry key HKLM\\SOFTWARE\\Microsoft opens (passthrough)");
         if (hReal) RegCloseKey(hReal);
     }
+}
+
+// ============================================================
+// Registry overlay tests  (run while DLL is loaded → hooks active)
+// ============================================================
+// Registry.Files stacks RegistryBase.reg (read-only) under Registry.reg
+// (writable). These cover the read-side merge and set up the mutations that
+// RunOverlayPersistenceTests checks against both files after unload.
+
+static void RunOverlayTests()
+{
+    wprintf(L"\n--- Registry Overlay Tests ---\n");
+
+    HKEY hk = nullptr;
+
+    LSTATUS st = RegOpenKeyExW(HKEY_LOCAL_MACHINE,
+        L"SOFTWARE\\TestGame\\Overlay", 0, KEY_READ | KEY_WRITE, &hk);
+
+    ASSERT(st == ERROR_SUCCESS && hk != nullptr,
+        L"O-01: a key defined only by the base layer opens as virtual");
+
+    if (!hk)
+    {
+        wprintf(L"  SKIP remaining overlay tests: key open failed\n");
+        return;
+    }
+
+    auto readString = [&](const wchar_t* name, std::wstring& out) -> LSTATUS
+    {
+        wchar_t buf[256]{};
+        DWORD cb = sizeof(buf);
+        LSTATUS r = RegQueryValueExW(hk, name, nullptr, nullptr,
+            reinterpret_cast<LPBYTE>(buf), &cb);
+        if (r == ERROR_SUCCESS) out = buf;
+        return r;
+    };
+
+    // O-02: a value only the base layer defines is still readable.
+    {
+        std::wstring value;
+        LSTATUS r = readString(L"BaseOnly", value);
+        ASSERT(r == ERROR_SUCCESS && value == L"FromBase",
+            L"O-02: a value only the base layer defines reads back");
+    }
+
+    // O-03: the whole point of the ordering -- the last file wins.
+    {
+        std::wstring value;
+        LSTATUS r = readString(L"Shared", value);
+        ASSERT(r == ERROR_SUCCESS && value == L"FromWrite",
+            L"O-03: a value both layers define reads back from the last file");
+    }
+
+    // O-04: and the writable layer's own values are unaffected by the merge.
+    {
+        std::wstring value;
+        LSTATUS r = readString(L"WriteOnly", value);
+        ASSERT(r == ERROR_SUCCESS && value == L"OnlyInWriteLayer",
+            L"O-04: a value only the write layer defines reads back");
+    }
+
+    // O-05: a key that exists in no other layer is virtual too.
+    {
+        HKEY hBase = nullptr;
+        LSTATUS r = RegOpenKeyExW(HKEY_LOCAL_MACHINE,
+            L"SOFTWARE\\TestGame\\BaseKey", 0, KEY_READ, &hBase);
+        ASSERT(r == ERROR_SUCCESS && hBase != nullptr,
+            L"O-05: a key present only in the base layer is in the virtual space");
+        if (hBase) RegCloseKey(hBase);
+    }
+
+    // Mutations checked after unload by RunOverlayPersistenceTests.
+    {
+        const wchar_t* written = L"WrittenIntoOverlay";
+        DWORD cb = static_cast<DWORD>((wcslen(written) + 1) * sizeof(wchar_t));
+        LSTATUS r = RegSetValueExW(hk, L"RuntimeValue", 0, REG_SZ,
+            reinterpret_cast<const BYTE*>(written), cb);
+        ASSERT(r == ERROR_SUCCESS,
+            L"O-06: writing into a base-layer key succeeds");
+    }
+
+    // O-07: deleting a base-layer value hides it for the rest of the session.
+    {
+        LSTATUS r = RegDeleteValueW(hk, L"Doomed");
+        ASSERT(r == ERROR_SUCCESS,
+            L"O-07a: deleting a value inherited from the base layer succeeds");
+
+        DWORD sz = 0;
+        r = RegQueryValueExW(hk, L"Doomed", nullptr, nullptr, nullptr, &sz);
+        ASSERT(r == ERROR_FILE_NOT_FOUND,
+            L"O-07b: the deleted base-layer value no longer reads back");
+    }
+
+    RegCloseKey(hk);
+}
+
+// Post-unload: the base layer must be untouched and the write layer must carry
+// the session's changes -- and only those.
+static void RunOverlayPersistenceTests(const std::wstring& basePath,
+                                       const std::wstring& regPath)
+{
+    wprintf(L"\n--- Registry Overlay Persistence Tests ---\n");
+
+    std::wstring base  = ReadFileAsWide(basePath);
+    std::wstring write = ReadFileAsWide(regPath);
+
+    ASSERT(base.find(L"\"Doomed\"") != std::wstring::npos
+        && base.find(L"FromBase") != std::wstring::npos,
+        L"O-08: the base layer is left exactly as it was found");
+
+    ASSERT(base.find(L"RuntimeValue") == std::wstring::npos,
+        L"O-09: nothing written at runtime lands in the base layer");
+
+    ASSERT(write.find(L"WRITTENINTOOVERLAY") != std::wstring::npos
+        || write.find(L"WrittenIntoOverlay") != std::wstring::npos,
+        L"O-10: the runtime write lands in the last file");
+
+    // The merged store still holds BaseOnly, but serializing it here would
+    // freeze a stale duplicate on top of the file it came from.
+    ASSERT(write.find(L"BASEONLY") == std::wstring::npos,
+        L"O-11: a value inherited from the base layer is not copied down");
+
+    // Dropping it silently would not stick -- the base file hands it back on
+    // the next load -- so it is recorded as a regedit delete marker instead.
+    ASSERT(write.find(L"\"DOOMED\"=-") != std::wstring::npos,
+        L"O-12: deleting a base-layer value writes a tombstone to the last file");
 }
 
 // ============================================================
@@ -1443,14 +1605,240 @@ static void RunDirectInput8Tests(HMODULE hDInput8)
 }
 
 // ============================================================
+// Isolated-mode tests  (separate process)
+// ============================================================
+// Registry.Isolated is process-global: it makes every key virtual, which is
+// flatly incompatible with R-18's real-registry passthrough. Two DLL instances
+// cannot share a process either -- both would detour the same advapi32 exports
+// -- so the mode is exercised by re-running this EXE with --isolated against a
+// second copy of the DLL in a directory of its own, and therefore an
+// .interposer tree of its own.
+
+// A key that exists in the real registry on every Windows install, with a value
+// under it. Isolated mode must hide both.
+static const wchar_t* kRealKey   = L"SOFTWARE\\Microsoft\\Windows\\CurrentVersion";
+static const wchar_t* kRealValue = L"ProgramFilesDir";
+
+// A key no machine has, used to prove a write went to the file and not to HKCU.
+static const wchar_t* kNovelKey  = L"Software\\LANCommanderInterposerIsolationProbe";
+
+// Written by the parent before the child starts. Files names one relative path,
+// so the child's store resolves to <childDir>\\.interposer\\Registry.reg.
+static void WriteIsolatedFixtures(const std::wstring& childInterposerDir)
+{
+    WriteTextFile(childInterposerDir + L"Config.yml",
+        "Logging:\n"
+        "  Registry: true\n"
+        "  Level: Debug\n"
+        "\n"
+        "Registry:\n"
+        "  Isolated: true\n"
+        "  Files:\n"
+        "    - '.interposer\\Registry.reg'\n");
+
+    // Deliberately does not mention either key the child probes: the point is
+    // what happens to keys the file has never heard of.
+    WriteTextFile(childInterposerDir + L"Registry.reg",
+        "Windows Registry Editor Version 5.00\r\n"
+        "\r\n"
+        "[HKEY_CURRENT_USER\\Software\\IsolationSeed]\r\n"
+        "\"Seeded\"=\"yes\"\r\n");
+}
+
+// Runs in the child process. Returns the number of failed assertions.
+static int RunIsolatedChild(const wchar_t* childDirArg)
+{
+    // The parent passes the directory without a trailing separator: one at the
+    // end of a quoted command-line argument escapes the closing quote instead.
+    std::wstring childDir(childDirArg);
+
+    if (!childDir.empty() && childDir.back() != L'\\')
+        childDir += L'\\';
+
+    std::wstring dllPath = childDir + L"LANCommander.Interposer.dll";
+    std::wstring regPath = childDir + L".interposer\\Registry.reg";
+
+    wprintf(L"\n--- Registry Isolation Tests (child process) ---\n");
+
+    HMODULE hDll = LoadLibraryW(dllPath.c_str());
+
+    if (!hDll)
+    {
+        wprintf(L"  FAIL  S-00: child could not load %ls (GLE=%lu)\n",
+            dllPath.c_str(), GetLastError());
+        return 1;
+    }
+
+    // S-01: the store has never heard of this key, but isolation makes it
+    // virtual anyway, so the open is served rather than passed through.
+    {
+        HKEY hk = nullptr;
+        LSTATUS st = RegOpenKeyExW(HKEY_LOCAL_MACHINE, kRealKey, 0, KEY_READ, &hk);
+        ASSERT(st == ERROR_SUCCESS,
+            L"S-01: a key absent from the file still opens under Isolated");
+
+        // S-02: and nothing leaks out of the real hive behind it.
+        if (hk)
+        {
+            wchar_t buf[512]{};
+            DWORD cb = sizeof(buf);
+            LSTATUS r = RegQueryValueExW(hk, kRealValue, nullptr, nullptr,
+                reinterpret_cast<LPBYTE>(buf), &cb);
+            ASSERT(r == ERROR_FILE_NOT_FOUND,
+                L"S-02: a real registry value is not served under Isolated");
+            RegCloseKey(hk);
+        }
+        else
+            ASSERT(false, L"S-02: a real registry value is not served under Isolated");
+    }
+
+    // S-03: the seeded key still reads normally -- isolation widens the virtual
+    // space, it does not empty it.
+    {
+        HKEY hk = nullptr;
+        RegOpenKeyExW(HKEY_CURRENT_USER, L"Software\\IsolationSeed", 0, KEY_READ, &hk);
+
+        wchar_t buf[64]{};
+        DWORD cb = sizeof(buf);
+        LSTATUS r = hk ? RegQueryValueExW(hk, L"Seeded", nullptr, nullptr,
+            reinterpret_cast<LPBYTE>(buf), &cb) : ERROR_INVALID_HANDLE;
+
+        ASSERT(r == ERROR_SUCCESS && wcscmp(buf, L"yes") == 0,
+            L"S-03: a key the file does define still reads back under Isolated");
+
+        if (hk) RegCloseKey(hk);
+    }
+
+    // S-04: a key nothing has ever defined is created in the store, and its
+    // value reads back.
+    {
+        HKEY hk = nullptr;
+        DWORD disp = 0;
+        LSTATUS st = RegCreateKeyExW(HKEY_CURRENT_USER, kNovelKey, 0, nullptr,
+            REG_OPTION_NON_VOLATILE, KEY_ALL_ACCESS, nullptr, &hk, &disp);
+
+        ASSERT(st == ERROR_SUCCESS && hk != nullptr,
+            L"S-04a: creating a brand-new key succeeds under Isolated");
+
+        if (hk)
+        {
+            const wchar_t* written = L"IsolatedWrite";
+            DWORD cb = static_cast<DWORD>((wcslen(written) + 1) * sizeof(wchar_t));
+
+            LSTATUS r = RegSetValueExW(hk, L"Probe", 0, REG_SZ,
+                reinterpret_cast<const BYTE*>(written), cb);
+            ASSERT(r == ERROR_SUCCESS,
+                L"S-04b: writing into that key succeeds");
+
+            wchar_t buf[64]{};
+            DWORD rcb = sizeof(buf);
+            r = RegQueryValueExW(hk, L"Probe", nullptr, nullptr,
+                reinterpret_cast<LPBYTE>(buf), &rcb);
+            ASSERT(r == ERROR_SUCCESS && wcscmp(buf, written) == 0,
+                L"S-04c: the written value reads back");
+
+            RegCloseKey(hk);
+        }
+    }
+
+    FreeLibrary(hDll);
+
+    // Hooks are gone now, so the last two assertions see the real world.
+
+    // S-05: the write went to the file.
+    {
+        std::wstring persisted = ReadFileAsWide(regPath);
+        ASSERT(persisted.find(L"IsolatedWrite") != std::wstring::npos,
+            L"S-05: the isolated write is persisted to the configured file");
+    }
+
+    // S-06: and not to HKCU.
+    {
+        HKEY hk = nullptr;
+        LSTATUS st = RegOpenKeyExW(HKEY_CURRENT_USER, kNovelKey, 0, KEY_READ, &hk);
+        ASSERT(st != ERROR_SUCCESS,
+            L"S-06: the isolated write never reached the real registry");
+
+        if (hk)
+        {
+            RegCloseKey(hk);
+            RegDeleteKeyW(HKEY_CURRENT_USER, kNovelKey);
+        }
+    }
+
+    return g_fail;
+}
+
+// Runs in the parent. Stages the child's directory, runs it, and folds the
+// outcome into this process's tally so there is still one summary at the end.
+static void RunIsolatedTests(const std::wstring& exeDir, const std::wstring& testTmpDir)
+{
+    std::wstring childDir        = testTmpDir + L"Isolated\\";
+    std::wstring childInterposer = childDir + L".interposer\\";
+
+    CreateDirs(childInterposer);
+
+    if (!CopyFileW((exeDir + L"LANCommander.Interposer.dll").c_str(),
+                   (childDir + L"LANCommander.Interposer.dll").c_str(), FALSE))
+    {
+        ASSERT(false, L"S-00: staging the isolated child's copy of the DLL");
+        return;
+    }
+
+    WriteIsolatedFixtures(childInterposer);
+
+    std::wstring exePath = exeDir + L"LANCommander.Interposer.Tests.exe";
+    // childDir's trailing separator has to come off: inside a quoted argument it
+    // would escape the closing quote. RunIsolatedChild puts it back.
+    std::wstring childArg = childDir.substr(0, childDir.size() - 1);
+    std::wstring command  = L"\"" + exePath + L"\" --isolated \"" + childArg + L"\"";
+
+    STARTUPINFOW si{};
+    si.cb = sizeof(si);
+    PROCESS_INFORMATION pi{};
+
+    // Handles are inherited so the child's PASS/FAIL lines land on this console.
+    BOOL launched = CreateProcessW(exePath.c_str(), command.data(), nullptr, nullptr,
+        TRUE, 0, nullptr, nullptr, &si, &pi);
+
+    if (!launched)
+    {
+        ASSERT(false, L"S-00: launching the isolated-mode child process");
+        return;
+    }
+
+    WaitForSingleObject(pi.hProcess, 120 * 1000);
+
+    DWORD exitCode = 1;
+    GetExitCodeProcess(pi.hProcess, &exitCode);
+    CloseHandle(pi.hThread);
+    CloseHandle(pi.hProcess);
+
+    ASSERT(exitCode == 0, L"S-00: the isolated-mode child process reported no failures");
+
+    DeleteFileW((childInterposer + L"Config.yml").c_str());
+    DeleteFileW((childInterposer + L"Registry.reg").c_str());
+    DeleteFileW((childDir + L"LANCommander.Interposer.dll").c_str());
+    ClearLogFiles(childInterposer + L"Logs\\");
+    RemoveDirectoryW((childInterposer + L"Logs").c_str());
+    RemoveDirectoryW(childInterposer.c_str());
+    RemoveDirectoryW(childDir.c_str());
+}
+
+// ============================================================
 // Entry point
 // ============================================================
 
-int wmain()
+int wmain(int argc, wchar_t** argv)
 {
     // Unbuffered: a crash mid-run otherwise discards everything still sitting in
     // the buffer, which is exactly the output needed to locate it.
     setvbuf(stdout, nullptr, _IONBF, 0);
+
+    // Re-entry from RunIsolatedTests. Registry.Isolated cannot share a process
+    // with the rest of the suite, so it gets one of its own.
+    if (argc >= 3 && wcscmp(argv[1], L"--isolated") == 0)
+        return RunIsolatedChild(argv[2]);
 
     std::wstring exeDir        = GetExeDir();
     std::wstring testTmpDir    = GetTestTempDir();
@@ -1458,6 +1846,7 @@ int wmain()
     std::wstring logsDir       = interposerDir + L"Logs\\";
     std::wstring yamlPath      = interposerDir + L"Config.yml";
     std::wstring regPath       = interposerDir + L"Registry.reg";
+    std::wstring baseRegPath   = interposerDir + L"RegistryBase.reg";
     std::wstring dllPath       = exeDir + L"LANCommander.Interposer.dll";
 
     wprintf(L"LANCommander.Interposer Integration Tests\n");
@@ -1488,6 +1877,9 @@ int wmain()
     // (InstallRegistryHooks → LoadRegFile runs before MH_EnableHook)
     WriteVirtualReg(regPath);
 
+    // The read-only layer Registry.Files stacks underneath it.
+    WriteRegistryBaseReg(baseRegPath);
+
     // dinput.dll has to be in the process before the Interposer loads, or
     // InstallDirectInputHooks finds no module to hook. A real game gets this
     // for free by importing it statically.
@@ -1511,6 +1903,7 @@ int wmain()
     // ── Tests (hooks active) ─────────────────────────────────────────────────
     RunFileTests(exeDir, testTmpDir);
     RunRegistryTests();
+    RunOverlayTests();
     RunIdentityTests();
     RunOsVersionTests();
     RunDirectInputTests(hDInput);
@@ -1540,6 +1933,11 @@ int wmain()
     std::wstring logPath = FindFirstLogFile(logsDir);
     RunLogTests(logPath);
     RunPersistenceTests(regPath);
+    RunOverlayPersistenceTests(baseRegPath, regPath);
+
+    // Last, because it spawns a second process that loads its own copy of the
+    // DLL -- nothing after it should depend on this process's hooks.
+    RunIsolatedTests(exeDir, testTmpDir);
 
     // ── Cleanup ──────────────────────────────────────────────────────────────
     DeleteFileW(redirectTarget.c_str());
@@ -1561,7 +1959,8 @@ int wmain()
     if (!logPath.empty()) DeleteFileW(logPath.c_str());
     RemoveDirectoryW(logsDir.c_str());
     RemoveDirectoryW(testTmpDir.c_str());
-    // Leave .interposer/Config.yml and .interposer/Registry.reg for post-run inspection
+    // Leave .interposer/Config.yml, Registry.reg and RegistryBase.reg for
+    // post-run inspection
 
     // ── Summary ──────────────────────────────────────────────────────────────
     wprintf(L"\n=== Results: %d passed, %d failed ===\n", g_pass, g_fail);

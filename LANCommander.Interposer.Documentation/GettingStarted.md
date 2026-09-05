@@ -14,7 +14,7 @@ The DLL itself is placed next to the game executable. Runtime configuration live
 |---|---|
 | `LANCommander.Interposer.dll` | The hook DLL |
 | `.interposer\Config.yml` | Settings, file redirect rules, and FastDL configuration |
-| `.interposer\Registry.reg` | Virtual registry initial state (only needed for registry emulation) |
+| `.interposer\Registry.reg` | Virtual registry initial state (only needed for registry emulation; `Registry.Files` can move it or stack several) |
 | `.interposer\Logs\` | Session log files — created automatically, one file per session |
 | `.interposer\Downloads\` | FastDL overlay cache — created automatically |
 

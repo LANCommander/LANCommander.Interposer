@@ -345,6 +345,18 @@ $lines.Add("  Level: $level")
 
 $lines.Add('')
 
+$lines.Add('Registry:')
+
+# The default is written out explicitly rather than left to the DLL: an empty
+# Files list would be reported as a misconfiguration in the session log.
+$registryFiles = @(Get-ListOption $Options 'Registry.Files' | Where-Object { -not [string]::IsNullOrWhiteSpace($_) })
+
+if ($registryFiles.Count -eq 0) { $registryFiles = @('.interposer\Registry.reg') }
+
+Add-ScalarList $lines '  ' 'Files' $registryFiles
+$lines.Add("  Isolated: $(Format-YamlBool (Get-BoolOption $Options 'Registry.Isolated' $false))")
+$lines.Add('')
+
 Add-CompositeList $lines '' 'FileRedirects' (Get-ListOption $Options 'FileRedirects') @('Pattern', 'Replacement')
 $lines.Add('')
 

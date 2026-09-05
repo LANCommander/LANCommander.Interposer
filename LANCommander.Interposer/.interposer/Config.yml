@@ -90,6 +90,63 @@ Logging:
   Level: Info
 
 # ---------------------------------------------------------------------------
+# Registry
+#
+# Where the virtual registry lives, and how much of the registry it owns.
+#
+#   Files    - The .reg files backing the virtual registry, listed in overlay
+#              order.  Each file is loaded on top of the one before it, so a
+#              later file wins wherever two of them define the same value.
+#
+#              The LAST file in the list is the writable layer: every registry
+#              write the game makes is saved there, and the files above it are
+#              never modified.  That is what lets a shared template live in one
+#              file and per-user state accumulate in another.
+#
+#              A value deleted at runtime that came from an earlier file is
+#              recorded in the writable layer as regedit's delete marker
+#              ("Name"=-) so the deletion survives the next launch.
+#
+#              Paths may be absolute or relative to the directory holding the
+#              DLL, and %TOKEN% works exactly as it does in FileRedirects
+#              (environment variable, then known folder, then %GAMEDIR% /
+#              %INTERPOSERDIR%).  Omit the key entirely for the default,
+#              a single .interposer\Registry.reg.
+#
+#   Isolated - false (default) to virtualize only the keys the files above
+#              actually contain, passing everything else through to the real
+#              registry.
+#
+#              true to treat EVERY key as virtual.  A key the files have never
+#              heard of is then served from the store as well: reads of it fail
+#              with ERROR_FILE_NOT_FOUND rather than falling through, and
+#              writes land in the writable layer rather than in HKLM or HKCU.
+#              Nothing the game does touches the real registry.
+#
+#              This is the setting for a game you want fully self-contained on
+#              a shared or locked-down machine.  Be aware that it also hides
+#              genuine system configuration the game may expect to find, so
+#              turn on Logging.Registry with Level: Debug and watch for
+#              [REG PARTIAL] to see what it went looking for and did not get.
+#
+# Examples:
+#
+#   A read-only template shipped with the game, with per-user writes on top:
+#   Registry:
+#     Files:
+#       - '.interposer\Registry.reg'
+#       - '%SAVEDGAMES%\MyGame\Registry.reg'
+#
+#   A fully self-contained game that never touches the real registry:
+#   Registry:
+#     Isolated: true
+# ---------------------------------------------------------------------------
+Registry:
+  Files:
+    - '.interposer\Registry.reg'
+  Isolated: false
+
+# ---------------------------------------------------------------------------
 # FileRedirects
 #
 # Redirect file paths at the CreateFile / GetFileAttributes level.
