@@ -1,0 +1,71 @@
+---
+sidebar_label: 1.2.0
+sidebar_position: 11
+---
+
+import ReleaseDownloads from '@site/src/components/ReleaseDownloads';
+
+# Interposer 1.2.0 Release Notes
+
+## Downloads
+
+<ReleaseDownloads repo="LANCommander/LANCommander.Interposer" release="v1.2.0" />
+
+## What's Changed
+
+### OS Version Spoofing
+
+For certain games that require a specific Windows version can now be spoofed. The new `OsVersion` section of the config reports a version of your choosing:
+
+```yaml
+OsVersion:
+  Version: WindowsXP
+```
+
+Presets cover Windows 2000 through Windows 11, each carrying the last shipped build and service pack of that release. Names are matched loosely, so `Windows 8.1`, `windows8.1` and `Windows81` all select the same entry. `Major`, `Minor`, `Build`, `ServicePack` and `ProductType` override individual fields of the preset, or supply all of them with `Version: Custom`:
+
+```yaml
+OsVersion:
+  Version: WindowsXP
+  Build: 2180        # Windows XP as it shipped, before any service pack
+```
+
+Only `GetVersion`, `GetVersionExA`, `GetVersionExW` and `ntdll!RtlGetVersion` are hooked. This allows the spoofing of a specific version of Windows without having to rely on the built-in app compatiblity layer which might introduce unwanted compatiblity shims or force elevated execution.
+
+Set `Logging.OsVersion: true` to see what will be reported and which API asked for it. See the [OS Version](../OsVersion) documentation for the full reference.
+
+### Path Tokens in File Redirects
+
+`%TOKEN%` now works in a redirect's `Pattern` as well as its `Replacement`, and resolves more than just environment variables. Tokens are looked up in order: any Windows environment variable (`%APPDATA%`, `%USERPROFILE%`, `%TEMP%`, …), then a known folder that Windows tracks but the environment does not (`%SAVEDGAMES%`, `%DOCUMENTS%`, `%MYDOCUMENTS%`, `%MYGAMES%`, `%DESKTOP%`, `%PICTURES%`, `%MUSIC%`, `%VIDEOS%`), then `%GAMEDIR%` for the running executable's directory and `%INTERPOSERDIR%` for the directory holding the DLL:
+
+```yaml
+FileRedirects:
+  - Pattern: '%APPDATA%\\My Game\\(.+)'
+    Replacement: '%SAVEDGAMES%\My Game\$1'
+```
+
+For more information, see [File Redirection](../FileRedirection) for the full reference.
+
+### Layered Registry Files
+
+`Registry.Files` replaces the single `.interposer\Registry.reg` with an ordered stack. Each file is loaded on top of the one before it, so a later file wins wherever two of them define the same value:
+
+```yaml
+Registry:
+  Files:
+    - '.interposer\Registry.reg'
+    - '%SAVEDGAMES%\MyGame\Registry.reg'
+```
+
+See [Registry Emulation](../RegistryEmulation) for details.
+
+### Isolated Registry Mode
+
+By default the virtual store owns only the keys the `.reg` files actually name, and everything else passes through to the real Windows registry. `Registry.Isolated` makes the store authoritative for the whole registry instead:
+
+```yaml
+Registry:
+  Isolated: true
+```
+
+ See [Registry Emulation](../RegistryEmulation) for details.
