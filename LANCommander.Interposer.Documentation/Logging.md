@@ -34,6 +34,7 @@ Logging:
 | `DnsRedirects` | bool | `true` | Log DNS redirect matches. Enabled by default because DNS redirects are deliberate user-configured actions. |
 | `Network` | bool | `false` | Log socket connections and DNS lookups. |
 | `DirectInput` | bool | `false` | Log DirectInput object and device creation, enumeration, and interface aliasing. At `Debug` also lists every device an enumeration found and every device the filter hid. |
+| `OsVersion` | bool | `false` | Log the Windows version reported to the game, and which API each caller used to ask for it. Each entry point is reported only the first time it is called. |
 | `Level` | choice | `Info` | Verbosity within the subsystems enabled above. One of `Info`, `Debug`, `Trace`. |
 
 ## Log Level
@@ -119,6 +120,12 @@ Only written at `Level: Debug` or higher, and only for a subsystem that is alrea
 | Verb | Meaning |
 |---|---|
 | `[IDENTITY]` | An identity override was applied or a hooked `GetUserName`/`GetComputerName` call returned the configured override value. |
+
+### OS Version Operations
+
+| Verb | Meaning |
+|---|---|
+| `[OSVERSION]` | The version being reported to the game, written once at startup, and then once per entry point the first time the game calls it. Also carries configuration warnings, such as an unrecognized `OsVersion.Version`, which are written regardless of the flag. |
 
 ### Rich Presence Operations
 

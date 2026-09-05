@@ -5,6 +5,7 @@
 #include "files.h"
 #include "identity.h"
 #include "network.h"
+#include "osversion.h"
 #include "pipe_events.h"
 #include "plugins.h"
 #include "registry.h"
@@ -33,6 +34,7 @@ void InstallHooks()
     InitFastDL();
     InstallNetworkHooks();
     InstallIdentityHooks();
+    InstallOsVersionHooks();
     InstallDirectInputHooks();
 
     MH_EnableHook(MH_ALL_HOOKS);

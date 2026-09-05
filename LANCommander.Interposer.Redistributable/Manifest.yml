@@ -155,6 +155,11 @@ OptionSchema: |
           DisplayName: DirectInput
           Description: Log DirectInput bridge object creation, device creation, and enumeration
           Default: "false"
+        OsVersion:
+          Type: bool
+          DisplayName: OS Version
+          Description: Log the Windows version reported to the game and which API asked for it
+          Default: "false"
         Level:
           Type: choice
           DisplayName: Level
@@ -221,6 +226,53 @@ OptionSchema: |
               ItemType: string
               DisplayName: Names
               Description: Case-insensitive ECMAScript regex matched against each device's instance name and product name. Partial matches count, so anchor the pattern for exact names.
+
+    OsVersion:
+      DisplayName: OS Version
+      Description: The version of Windows reported to the game. The hook equivalent of a compatibility mode, without the AppCompat shim engine - it lives beside the game rather than in per-user registry state, so it survives a reinstall, and it does not force the game to run elevated the way the pre-Vista layers do.
+      Options:
+        Version:
+          Type: choice
+          DisplayName: Version
+          Description: Games from the XP era often branch on the OS version and have no case for anything newer. Windows reports 6.2 to any executable without a compatibility manifest, so those branches fall through - sometimes leaving an output buffer unwritten, which crashes on the next read. Hooks GetVersion, GetVersionExA/W and RtlGetVersion; VerifyVersionInfo is deliberately left alone.
+          Default: "None"
+          Choices:
+            - { Value: "None", DisplayName: "None (report the real Windows version)" }
+            - { Value: "Windows2000", DisplayName: "Windows 2000 (5.0.2195 SP4)" }
+            - { Value: "WindowsXP", DisplayName: "Windows XP (5.1.2600 SP3)" }
+            - { Value: "WindowsXPx64", DisplayName: "Windows XP x64 (5.2.3790 SP2)" }
+            - { Value: "WindowsServer2003", DisplayName: "Windows Server 2003 (5.2.3790 SP2)" }
+            - { Value: "WindowsVista", DisplayName: "Windows Vista (6.0.6002 SP2)" }
+            - { Value: "Windows7", DisplayName: "Windows 7 (6.1.7601 SP1)" }
+            - { Value: "Windows8", DisplayName: "Windows 8 (6.2.9200)" }
+            - { Value: "Windows81", DisplayName: "Windows 8.1 (6.3.9600)" }
+            - { Value: "Windows10", DisplayName: "Windows 10 (10.0.19045)" }
+            - { Value: "Windows11", DisplayName: "Windows 11 (10.0.22631)" }
+            - { Value: "Custom", DisplayName: "Custom (use the fields below)" }
+        Major:
+          Type: int
+          DisplayName: Major Version
+          Description: Overrides the major version of the selection above. Required when the version is Custom - a Custom version with no major number is ignored rather than reporting 0.0.0.
+        Minor:
+          Type: int
+          DisplayName: Minor Version
+          Description: Overrides the minor version of the selection above
+        Build:
+          Type: int
+          DisplayName: Build Number
+          Description: Overrides the build number of the selection above
+        ServicePack:
+          Type: string
+          DisplayName: Service Pack
+          Description: Overrides the service pack name, for example Service Pack 3. The trailing number also sets wServicePackMajor. Leave blank to keep the one that comes with the selection above.
+        ProductType:
+          Type: choice
+          DisplayName: Product Type
+          Description: Only worth changing for a game that takes a different code path on server SKUs
+          Default: "Workstation"
+          Choices:
+            - "Workstation"
+            - "Server"
 
     NetworkAdapters:
       DisplayName: Network Adapters

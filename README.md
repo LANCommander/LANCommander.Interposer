@@ -11,6 +11,7 @@ A Windows DLL that hooks into game processes to provide virtual registry, file r
 - **FastDL** - Automatically download missing game files from an HTTP server on first access. Supports auto-discovery by probing game server addresses.
 - **Rich Presence** - Push game activity to Discord via local IPC. Configurable from `Config.yml` or at runtime from plugins.
 - **DirectInput** - Serve DirectInput 3/7 from `dinput8.dll`, working around the record-array overrun in the legacy Windows `dinput.dll` that makes affected games hang or crash on startup. Filter enumerated devices by class or name so a game binds to the right one.
+- **OS Version** - Report an older version of Windows to the game, for titles whose version checks have no case for anything newer than what shipped with them. Does the job of a compatibility mode without the AppCompat shim engine, so it travels with the game directory and never forces the process to run elevated.
 - **Plugin System** - Drop custom DLLs into `.interposer\Plugins\` to extend functionality. Plugins resolve Interposer exports at runtime (no link-time dependency). Ships with a CD key generator and a mouse smoothing/scaling plugin.
 
 ## Quick Start
@@ -120,6 +121,7 @@ All configuration lives in `.interposer\Config.yml` next to the DLL. See the [sa
 | `FileRedirects` | Regex-based file path redirection rules |
 | `DnsRedirects` | Regex-based DNS hostname redirection rules |
 | `DirectInput` | Legacy enumeration fix and device filtering by class or name |
+| `OsVersion` | Report an older version of Windows to the game |
 | `FastDL` | HTTP content delivery with auto-discovery |
 | `RichPresence` | Discord activity display with configurable defaults |
 | `Plugins` | Arbitrary key-value config for plugins |

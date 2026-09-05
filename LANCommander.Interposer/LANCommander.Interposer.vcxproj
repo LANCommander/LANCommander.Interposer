@@ -189,6 +189,7 @@
     <ClCompile Include="dll\src\pipe_events.cpp" />
     <ClCompile Include="dll\src\identity.cpp" />
     <ClCompile Include="dll\src\network.cpp" />
+    <ClCompile Include="dll\src\osversion.cpp" />
     <ClCompile Include="dll\src\plugins.cpp" />
     <ClCompile Include="dll\src\registry.cpp" />
     <ClCompile Include="dll\src\richpresence.cpp" />
@@ -205,6 +206,7 @@
     <ClInclude Include="dll\src\pipe_events.h" />
     <ClInclude Include="dll\src\identity.h" />
     <ClInclude Include="dll\src\network.h" />
+    <ClInclude Include="dll\src\osversion.h" />
     <ClInclude Include="dll\src\plugins.h" />
     <ClInclude Include="dll\src\registry.h" />
     <ClInclude Include="dll\src\richpresence.h" />

@@ -197,6 +197,7 @@ static void WriteInterposerYaml(const std::wstring& yamlPath,
         "  Files: true\n"
         "  Registry: true\n"
         "  DirectInput: true\n"
+        "  OsVersion: true\n"
         "  Level: Trace\n"
         "\n"
         "DirectInput:\n"
@@ -205,6 +206,13 @@ static void WriteInterposerYaml(const std::wstring& yamlPath,
         "    Enabled: true\n"
         "    Classes: ['Mouse', 'Keyboard']\n"
         "    Names: []\n"
+        "\n"
+        // Spaces and case are deliberate: the name should still resolve to the
+        // WindowsServer2003 preset. ServicePack overrides just that one field,
+        // and the number in it should carry into wServicePackMajor.
+        "OsVersion:\n"
+        "  Version: 'windows server 2003'\n"
+        "  ServicePack: 'Service Pack 1'\n"
         "\n"
         "Player:\n"
         "  Username: TestPlayer\n"
@@ -662,6 +670,138 @@ static void RunIdentityTests()
 }
 
 // ============================================================
+// OS version hook tests  (run while DLL is loaded → hooks active)
+// ============================================================
+//
+// The fixture asks for "windows server 2003" — spaced and lowercased, so this
+// also covers the loose name matching — and overrides ServicePack alone. Every
+// entry point therefore has to agree on 5.2.3790, server product type, with the
+// numbers coming from the preset and the service pack from the override.
+
+// RtlGetVersion is not declared in <windows.h>; RTL_OSVERSIONINFOEXW is
+// layout-identical to OSVERSIONINFOEXW, which is what the hook relies on too.
+using TestPfnRtlGetVersion = LONG(NTAPI*)(OSVERSIONINFOEXW*);
+
+// GetVersion and GetVersionEx are deprecated, and this project builds warnings
+// as errors. Spoofing them is the entire point of the subsystem under test.
+#pragma warning(push)
+#pragma warning(disable : 4996)
+
+static void RunOsVersionTests()
+{
+    wprintf(L"\n--- OS Version Hook Tests ---\n");
+
+    // V-01: GetVersionExA fills a plain OSVERSIONINFOA
+    {
+        OSVERSIONINFOA info{};
+        info.dwOSVersionInfoSize = sizeof(info);
+
+        BOOL ok = GetVersionExA(&info);
+
+        ASSERT(ok == TRUE,
+            L"V-01a: GetVersionExA returns TRUE");
+        ASSERT(info.dwMajorVersion == 5 && info.dwMinorVersion == 2,
+            L"V-01b: GetVersionExA reports 5.2");
+        ASSERT(info.dwBuildNumber == 3790,
+            L"V-01c: GetVersionExA reports build 3790 from the preset");
+        ASSERT(info.dwPlatformId == VER_PLATFORM_WIN32_NT,
+            L"V-01d: GetVersionExA reports VER_PLATFORM_WIN32_NT");
+        ASSERT(strcmp(info.szCSDVersion, "Service Pack 1") == 0,
+            L"V-01e: GetVersionExA reports the overridden service pack name");
+    }
+
+    // V-02: GetVersionExA fills the EX fields when given the larger struct.
+    // This is the shape the crash in BFME2 came from - a caller that reads
+    // szCSDVersion out of a struct the OS never wrote.
+    {
+        OSVERSIONINFOEXA info{};
+        info.dwOSVersionInfoSize = sizeof(info);
+
+        BOOL ok = GetVersionExA(reinterpret_cast<LPOSVERSIONINFOA>(&info));
+
+        ASSERT(ok == TRUE,
+            L"V-02a: GetVersionExA (EX) returns TRUE");
+        ASSERT(info.wServicePackMajor == 1 && info.wServicePackMinor == 0,
+            L"V-02b: GetVersionExA (EX) derives wServicePackMajor from the overridden name");
+        ASSERT(info.wProductType == VER_NT_SERVER,
+            L"V-02c: GetVersionExA (EX) reports the configured product type");
+    }
+
+    // V-03: GetVersionExW agrees with the ANSI variant
+    {
+        OSVERSIONINFOEXW info{};
+        info.dwOSVersionInfoSize = sizeof(info);
+
+        BOOL ok = GetVersionExW(reinterpret_cast<LPOSVERSIONINFOW>(&info));
+
+        ASSERT(ok == TRUE,
+            L"V-03a: GetVersionExW returns TRUE");
+        ASSERT(info.dwMajorVersion == 5 && info.dwMinorVersion == 2 && info.dwBuildNumber == 3790,
+            L"V-03b: GetVersionExW reports 5.2.3790");
+        ASSERT(wcscmp(info.szCSDVersion, L"Service Pack 1") == 0,
+            L"V-03c: GetVersionExW reports the overridden service pack name");
+        ASSERT(info.wServicePackMajor == 1,
+            L"V-03d: GetVersionExW reports service pack major 1");
+    }
+
+    // V-04: GetVersion returns the packed form of the same version.
+    // 3790 = 0x0ECE, so the expected value is 0x0ECE0205 with the top bit
+    // clear to mark the platform as NT.
+    {
+        DWORD packed = GetVersion();
+
+        ASSERT(LOBYTE(LOWORD(packed)) == 5,
+            L"V-04a: GetVersion packs major version 5");
+        ASSERT(HIBYTE(LOWORD(packed)) == 2,
+            L"V-04b: GetVersion packs minor version 2");
+        ASSERT(HIWORD(packed) == 3790,
+            L"V-04c: GetVersion packs build 3790");
+        ASSERT((packed & 0x80000000) == 0,
+            L"V-04d: GetVersion leaves the top bit clear (NT platform)");
+    }
+
+    // V-05: RtlGetVersion is spoofed too, which an AppCompat layer does not do
+    {
+        HMODULE ntdll = GetModuleHandleW(L"ntdll.dll");
+        auto rtlGetVersion = reinterpret_cast<TestPfnRtlGetVersion>(
+            ntdll ? GetProcAddress(ntdll, "RtlGetVersion") : nullptr);
+
+        ASSERT(rtlGetVersion != nullptr,
+            L"V-05a: RtlGetVersion resolves from ntdll");
+
+        if (rtlGetVersion)
+        {
+            OSVERSIONINFOEXW info{};
+            info.dwOSVersionInfoSize = sizeof(info);
+
+            LONG status = rtlGetVersion(&info);
+
+            ASSERT(status == 0,
+                L"V-05b: RtlGetVersion returns STATUS_SUCCESS");
+            ASSERT(info.dwMajorVersion == 5 && info.dwMinorVersion == 2 && info.dwBuildNumber == 3790,
+                L"V-05c: RtlGetVersion reports 5.2.3790");
+        }
+    }
+
+    // V-06: a struct sized for neither shape falls through to the real API
+    // rather than being filled with a guess.
+    {
+        OSVERSIONINFOW info{};
+        info.dwOSVersionInfoSize = 12; // neither sizeof(OSVERSIONINFOW) nor the EX size
+
+        SetLastError(0);
+        BOOL ok = GetVersionExW(&info);
+
+        ASSERT(ok == FALSE,
+            L"V-06a: GetVersionExW rejects a bad dwOSVersionInfoSize");
+        ASSERT(info.dwMajorVersion == 0,
+            L"V-06b: GetVersionExW leaves a rejected struct untouched");
+    }
+}
+
+#pragma warning(pop)
+
+// ============================================================
 // Log verification tests  (run AFTER FreeLibrary flushes log)
 // ============================================================
 
@@ -757,6 +897,19 @@ static void RunLogTests(const std::wstring& logPath)
         L"L-DI-9: Log records the mouse data format at Debug level");
     ASSERT(log.find("X=0  Y=4  Z=8") != std::string::npos,
         L"L-DI-10: [DINPUT FORMAT] reports the axis offsets the game declared");
+
+    ASSERT(log.find("kernel32!GetVersionExA") != std::string::npos,
+        L"L-OV-1: Log records the kernel32!GetVersionExA hook installation");
+    ASSERT(log.find("ntdll!RtlGetVersion") != std::string::npos,
+        L"L-OV-2: Log records the ntdll!RtlGetVersion hook installation");
+    ASSERT(log.find("[OSVERSION]") != std::string::npos,
+        L"L-OV-3: Log contains [OSVERSION] entry");
+    // The startup line names the preset the loose name resolved to, which is
+    // the only place that resolution is visible to the user.
+    ASSERT(log.find("WindowsServer2003") != std::string::npos,
+        L"L-OV-4: [OSVERSION] names the resolved preset");
+    ASSERT(log.find("5.2.3790 Service Pack 1") != std::string::npos,
+        L"L-OV-5: [OSVERSION] reports the version the game is being given");
 
     // R-06 queries NoSuchValue under a key that IS virtual — the partial-miss case
     // that is indistinguishable from a successful read at Info level.
@@ -1266,6 +1419,7 @@ int wmain()
     RunFileTests(exeDir, testTmpDir);
     RunRegistryTests();
     RunIdentityTests();
+    RunOsVersionTests();
     RunDirectInputTests(hDInput);
     RunDirectInput8Tests(hDInput8);
     RunMouseTransformTests(hDll, hDInput);

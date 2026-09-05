@@ -80,8 +80,23 @@ extern std::wstring              g_fastdlProbePath;          // HTTP path to pro
 extern int                       g_fastdlProbeTimeout;       // probe request timeout in ms (default 2000)
 extern std::vector<PortRange>    g_fastdlFilteredPorts;      // port ranges to skip when collecting addresses
 
+// OsVersion — the version of Windows reported to the game. OsVersion.Version
+// names a preset in kOsVersions (config.cpp); the individual Major/Minor/Build/
+// ServicePack/ProductType keys then override single fields of it. Nothing is
+// hooked unless g_osVersionEnabled, so the feature is inert by default.
+extern bool         g_osVersionEnabled;    // OsVersion.Version selected something other than None
+extern std::wstring g_osVersionName;       // resolved preset name, for logging
+extern DWORD        g_osMajorVersion;
+extern DWORD        g_osMinorVersion;
+extern DWORD        g_osBuildNumber;
+extern std::wstring g_osServicePack;       // szCSDVersion, e.g. "Service Pack 2"
+extern WORD         g_osServicePackMajor;  // derived from the preset or parsed off ServicePack
+extern WORD         g_osSuiteMask;         // wSuiteMask, derived from the product type
+extern BYTE         g_osProductType;       // VER_NT_WORKSTATION or VER_NT_SERVER
+
 extern bool         g_logPlugins;       // true = log plugin load/unload/config events
 extern bool         g_logIdentity;     // true = log identity override operations
+extern bool         g_logOsVersion;     // true = log the reported OS version and which APIs asked
 extern bool         g_logRichPresence;  // true = log rich presence updates
 extern bool         g_logDnsRedirects;  // true = log DNS redirect matches
 extern bool         g_logNetwork;       // true = log connection/DNS events
@@ -188,6 +203,10 @@ void LogNetworkAccess(const wchar_t* verb, const wchar_t* address, const wchar_t
 // Log DirectInput bridge activity. Gated by the Logging.DirectInput flag (default false).
 // Log-only: deliberately does not fire plugin or named-pipe callbacks.
 void LogDirectInput(const wchar_t* verb, const wchar_t* info, const wchar_t* detail = nullptr);
+
+// Log the OS version reported to the game. Gated by the Logging.OsVersion flag
+// (default false). Log-only, for the same reason as LogDirectInput.
+void LogOsVersion(const wchar_t* verb, const wchar_t* info, const wchar_t* detail = nullptr);
 
 // Per-device enumeration diagnostics. Additionally requires Logging.Level Debug
 // (or Trace), because a busy HID stack produces a line per device per call.

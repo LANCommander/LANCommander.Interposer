@@ -7,8 +7,10 @@
 #include <vector>
 #include <array>
 #include <cctype>
+#include <cwctype>
 #include <cstdint>
 #include <cstdio>
+#include <cstdlib>
 #include <yaml-cpp/yaml.h>
 
 // ---------------------------------------------------------------------------
@@ -34,8 +36,19 @@ std::wstring              g_fastdlProbePath           = L"/";
 int                       g_fastdlProbeTimeout        = 2000;
 std::vector<PortRange>    g_fastdlFilteredPorts       = {{ 23000, 23009 }};
 
+bool         g_osVersionEnabled   = false;
+std::wstring g_osVersionName;
+DWORD        g_osMajorVersion     = 0;
+DWORD        g_osMinorVersion     = 0;
+DWORD        g_osBuildNumber      = 0;
+std::wstring g_osServicePack;
+WORD         g_osServicePackMajor = 0;
+WORD         g_osSuiteMask        = 0;
+BYTE         g_osProductType      = VER_NT_WORKSTATION;
+
 bool         g_logPlugins       = false;
 bool         g_logIdentity     = false;
+bool         g_logOsVersion    = false;
 bool         g_logRichPresence  = false;
 bool         g_logDnsRedirects = true;
 bool         g_logNetwork      = false;
@@ -537,6 +550,95 @@ const wchar_t* DiClassName(DiDeviceClass deviceClass)
     }
 }
 
+// ---------------------------------------------------------------------------
+// OS version presets
+// ---------------------------------------------------------------------------
+
+namespace {
+
+struct OsVersionEntry {
+    const char*    name;             // as written in OsVersion.Version
+    DWORD          major;
+    DWORD          minor;
+    DWORD          build;
+    const wchar_t* servicePack;      // szCSDVersion
+    WORD           servicePackMajor;
+    BYTE           productType;
+};
+
+// Build numbers are the last shipped build of each version, which is what a
+// fully patched machine of that era would have reported.
+//
+// Windows XP x64 and Server 2003 are both 5.2.3790 and differ only in product
+// type; both are listed because a game that special-cases servers needs the
+// distinction, and a game that only reads the version number does not care.
+constexpr OsVersionEntry kOsVersions[] = {
+    { "Windows2000",       5,  0,  2195, L"Service Pack 4", 4, VER_NT_WORKSTATION },
+    { "WindowsXP",         5,  1,  2600, L"Service Pack 3", 3, VER_NT_WORKSTATION },
+    { "WindowsXPx64",      5,  2,  3790, L"Service Pack 2", 2, VER_NT_WORKSTATION },
+    { "WindowsServer2003", 5,  2,  3790, L"Service Pack 2", 2, VER_NT_SERVER      },
+    { "WindowsVista",      6,  0,  6002, L"Service Pack 2", 2, VER_NT_WORKSTATION },
+    { "Windows7",          6,  1,  7601, L"Service Pack 1", 1, VER_NT_WORKSTATION },
+    { "Windows8",          6,  2,  9200, L"",               0, VER_NT_WORKSTATION },
+    { "Windows81",         6,  3,  9600, L"",               0, VER_NT_WORKSTATION },
+    { "Windows10",        10,  0, 19045, L"",               0, VER_NT_WORKSTATION },
+    { "Windows11",        10,  0, 22631, L"",               0, VER_NT_WORKSTATION },
+    // Zeroes on purpose: Custom means "take everything from the explicit keys".
+    { "Custom",            0,  0,     0, L"",               0, VER_NT_WORKSTATION },
+};
+
+// Lowercase and drop everything that is not a letter or digit, so that
+// "Windows 8.1", "windows8.1" and "Windows81" all name the same preset. Also
+// used for the ProductType value, which tolerates the same sloppiness.
+std::string NormalizeOsToken(const std::string& name)
+{
+    std::string out;
+    out.reserve(name.size());
+
+    for (unsigned char c : name)
+    {
+        if (std::isalnum(c))
+            out += static_cast<char>(std::tolower(c));
+    }
+
+    return out;
+}
+
+const OsVersionEntry* OsVersionFromName(const std::string& name)
+{
+    const std::string wanted = NormalizeOsToken(name);
+
+    for (const OsVersionEntry& entry : kOsVersions)
+    {
+        if (NormalizeOsToken(entry.name) == wanted)
+            return &entry;
+    }
+
+    return nullptr;
+}
+
+// "Service Pack 2" -> 2. Anything without a trailing number yields 0, which is
+// also the correct answer for the versions that shipped without one.
+WORD ServicePackMajorFromName(const std::wstring& servicePack)
+{
+    size_t end = servicePack.size();
+
+    while (end > 0 && !iswdigit(servicePack[end - 1]))
+        --end;
+
+    size_t start = end;
+
+    while (start > 0 && iswdigit(servicePack[start - 1]))
+        --start;
+
+    if (start == end)
+        return 0;
+
+    return static_cast<WORD>(_wtoi(servicePack.substr(start, end - start).c_str()));
+}
+
+} // namespace
+
 void LogDirectInputDiag(const wchar_t* verb, const wchar_t* info, const wchar_t* detail)
 {
     if (!g_logDirectInput || g_logLevel < LogLevel::Debug)
@@ -548,6 +650,14 @@ void LogDirectInputDiag(const wchar_t* verb, const wchar_t* info, const wchar_t*
 void LogDirectInput(const wchar_t* verb, const wchar_t* info, const wchar_t* detail)
 {
     if (!g_logDirectInput)
+        return;
+
+    WriteLogLine(verb, info, detail);
+}
+
+void LogOsVersion(const wchar_t* verb, const wchar_t* info, const wchar_t* detail)
+{
+    if (!g_logOsVersion)
         return;
 
     WriteLogLine(verb, info, detail);
@@ -1035,6 +1145,8 @@ void LoadConfig()
             g_logNetwork = logging["Network"].as<bool>(false);
         if (logging["DirectInput"])
             g_logDirectInput = logging["DirectInput"].as<bool>(false);
+        if (logging["OsVersion"])
+            g_logOsVersion = logging["OsVersion"].as<bool>(false);
 
         // Verbosity within whichever subsystems are enabled above. Unrecognized
         // values fall back to Info so a typo never silently suppresses output.
@@ -1167,6 +1279,98 @@ void LoadConfig()
                             (L"malformed regex in DeviceFilter.Names: " + Utf8ToWide(pat)).c_str());
                     }
                 }
+            }
+        }
+    }
+
+    // ── OsVersion ───────────────────────────────────────────────────────────────
+    //
+    // Version names a preset; the individual keys below then override single
+    // fields of it. Presence is what counts, not the value, so `Major: 0` is an
+    // explicit zero rather than "unset".
+    //
+    // Warnings are collected rather than logged inline: the session log is not
+    // opened until the end of LoadConfig, and a misconfiguration here is exactly
+    // the thing the user needs to see.
+    std::vector<std::wstring> osVersionWarnings;
+
+    if (YAML::Node osVersion = root["OsVersion"])
+    {
+        std::string requested = osVersion["Version"] ? osVersion["Version"].as<std::string>("") : "";
+        std::string normalized = NormalizeOsToken(requested);
+
+        // Anything that reads as "off" leaves the feature inert, and so does an
+        // absent Version — overriding Major alone should not silently start
+        // lying about the OS.
+        const bool disabled = normalized.empty() ||
+                              normalized == "none" ||
+                              normalized == "off"  ||
+                              normalized == "false";
+
+        if (!disabled)
+        {
+            if (const OsVersionEntry* preset = OsVersionFromName(requested))
+            {
+                g_osVersionEnabled   = true;
+                g_osVersionName      = Utf8ToWide(preset->name);
+                g_osMajorVersion     = preset->major;
+                g_osMinorVersion     = preset->minor;
+                g_osBuildNumber      = preset->build;
+                g_osServicePack      = preset->servicePack;
+                g_osServicePackMajor = preset->servicePackMajor;
+                g_osProductType      = preset->productType;
+
+                if (osVersion["Major"])
+                    g_osMajorVersion = osVersion["Major"].as<unsigned int>(g_osMajorVersion);
+                if (osVersion["Minor"])
+                    g_osMinorVersion = osVersion["Minor"].as<unsigned int>(g_osMinorVersion);
+                if (osVersion["Build"])
+                    g_osBuildNumber = osVersion["Build"].as<unsigned int>(g_osBuildNumber);
+
+                // An explicit service pack string carries its own number, so
+                // wServicePackMajor follows it rather than the preset's.
+                if (osVersion["ServicePack"])
+                {
+                    g_osServicePack      = Utf8ToWide(osVersion["ServicePack"].as<std::string>(""));
+                    g_osServicePackMajor = ServicePackMajorFromName(g_osServicePack);
+                }
+
+                if (osVersion["ProductType"])
+                {
+                    std::string productType =
+                        NormalizeOsToken(osVersion["ProductType"].as<std::string>(""));
+
+                    if (productType == "server")
+                        g_osProductType = VER_NT_SERVER;
+                    else if (productType == "workstation")
+                        g_osProductType = VER_NT_WORKSTATION;
+                    else
+                        osVersionWarnings.push_back(
+                            L"unknown ProductType (expected Workstation or Server): " +
+                            Utf8ToWide(osVersion["ProductType"].as<std::string>("")));
+                }
+
+                // Every client SKU since XP reports VER_SUITE_SINGLEUSERTS; a
+                // plain server SKU reports nothing.
+                g_osSuiteMask = (g_osProductType == VER_NT_WORKSTATION)
+                    ? static_cast<WORD>(VER_SUITE_SINGLEUSERTS)
+                    : 0;
+
+                // A preset with no numbers of its own (Custom) and no overrides
+                // would report 0.0.0, which is worse than telling the truth.
+                if (g_osMajorVersion == 0)
+                {
+                    g_osVersionEnabled = false;
+
+                    osVersionWarnings.push_back(
+                        L"OsVersion.Version resolved to major version 0; reporting the real OS version instead");
+                }
+            }
+            else
+            {
+                // Always reported: a typo here means the game silently keeps
+                // seeing the real version, which is the bug the user was fixing.
+                osVersionWarnings.push_back(L"unknown OsVersion.Version: " + Utf8ToWide(requested));
             }
         }
     }
@@ -1407,4 +1611,10 @@ void LoadConfig()
                 static_cast<DWORD>(utf8.size()), &w, nullptr);
         }
     }
+
+    // Deferred from the OsVersion parse above, which ran before the log existed.
+    // InterposerLog writes regardless of the logging flags, which is what a
+    // misconfiguration warrants.
+    for (const std::wstring& warning : osVersionWarnings)
+        InterposerLog(L"OSVERSION", warning.c_str());
 }

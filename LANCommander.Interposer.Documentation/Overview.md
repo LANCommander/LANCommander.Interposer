@@ -39,6 +39,7 @@ Configuration and use of the Interposer is broken down on this site under the fo
 - [Registry Emulation](/Interposer/RegistryEmulation)
 - [FastDL](/Interposer/FastDL)
 - [Player Identity](/Interposer/PlayerIdentity)
+- [OS Version](/Interposer/OsVersion)
 - [Rich Presence](/Interposer/RichPresence)
 - [DirectInput](/Interposer/DirectInput)
 - [Plugins](/Interposer/Plugins/Overview)

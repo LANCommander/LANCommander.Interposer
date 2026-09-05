@@ -325,6 +325,7 @@ $loggingDefaults = [ordered]@{
     DnsRedirects = $true
     Network      = $false
     DirectInput  = $false
+    OsVersion    = $false
 }
 
 $lines.Add('Logging:')
@@ -356,6 +357,34 @@ $lines.Add('  DeviceFilter:')
 $lines.Add("    Enabled: $(Format-YamlBool (Get-BoolOption $Options 'DirectInput.DeviceFilter.Enabled' $false))")
 Add-ScalarList $lines '    ' 'Classes' (Get-ListOption $Options 'DirectInput.DeviceFilter.Classes')
 Add-ScalarList $lines '    ' 'Names' (Get-ListOption $Options 'DirectInput.DeviceFilter.Names')
+$lines.Add('')
+
+$lines.Add('OsVersion:')
+
+$osVersion = Get-StringOption $Options 'OsVersion.Version' 'None'
+
+if ([string]::IsNullOrWhiteSpace($osVersion)) { $osVersion = 'None' }
+
+$lines.Add("  Version: $(Format-YamlString $osVersion)")
+
+# Only rendered when the admin actually set one. An absent key means "keep the
+# value that comes with the selected version", which is not the same thing as
+# an explicit 0.
+foreach ($field in @('Major', 'Minor', 'Build')) {
+    if ($null -ne (Get-Option $Options "OsVersion.$field")) {
+        $lines.Add("  $($field): $(Get-IntOption $Options "OsVersion.$field" 0)")
+    }
+}
+
+if ($null -ne (Get-Option $Options 'OsVersion.ServicePack')) {
+    $lines.Add("  ServicePack: $(Format-YamlString (Get-StringOption $Options 'OsVersion.ServicePack'))")
+}
+
+$productType = Get-StringOption $Options 'OsVersion.ProductType' 'Workstation'
+
+if ($productType -notin @('Workstation', 'Server')) { $productType = 'Workstation' }
+
+$lines.Add("  ProductType: $productType")
 $lines.Add('')
 
 $lines.Add('NetworkAdapters:')

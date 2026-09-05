@@ -50,6 +50,10 @@ Player:
 #                 device creation, enumeration, interface aliasing), false to
 #                 disable (default).
 #
+#   OsVersion - true to log the Windows version reported to the game and which
+#               API each caller used to ask for it, false to disable (default).
+#               Each entry point is reported only the first time it is called.
+#
 #   Level     - Verbosity within whichever subsystems are enabled above.
 #               Unrecognized values fall back to Info.
 #
@@ -82,6 +86,7 @@ Logging:
   DnsRedirects: true
   Network: false
   DirectInput: false
+  OsVersion: false
   Level: Info
 
 # ---------------------------------------------------------------------------
@@ -228,6 +233,57 @@ DirectInput:
     Enabled: false
     Classes: []   # e.g. ['Mouse', 'Keyboard']
     Names:   []   # case-insensitive ECMAScript regex vs instance/product name
+
+# ---------------------------------------------------------------------------
+# OsVersion
+#
+# Controls the version of Windows reported to the game. This is the hook
+# equivalent of ticking a compatibility mode on the game executable, but
+# without the AppCompat shim engine.
+#
+#   Version - Which version to report. None (the default) disables the feature
+#             entirely and nothing is hooked. Names are matched loosely, so
+#             'Windows 8.1', 'windows8.1' and 'Windows81' are all the same.
+#
+#               None                (default) report the real Windows version
+#               Windows2000         5.0.2195  Service Pack 4
+#               WindowsXP           5.1.2600  Service Pack 3
+#               WindowsXPx64        5.2.3790  Service Pack 2, workstation
+#               WindowsServer2003   5.2.3790  Service Pack 2, server
+#               WindowsVista        6.0.6002  Service Pack 2
+#               Windows7            6.1.7601  Service Pack 1
+#               Windows8            6.2.9200
+#               Windows81           6.3.9600
+#               Windows10          10.0.19045
+#               Windows11          10.0.22631
+#               Custom              take every field from the keys below
+#
+#   The keys below are optional. Each one overrides a single field of the
+#   version selected above, so 'Version: WindowsXP' with 'Build: 2180' reports
+#   5.1.2180. With 'Version: Custom' they supply everything, and a Custom
+#   version with no Major is ignored rather than reporting 0.0.0.
+#
+#   Major       - Major version number, e.g. 5.
+#   Minor       - Minor version number, e.g. 1.
+#   Build       - Build number, e.g. 2600.
+#   ServicePack - szCSDVersion string, e.g. 'Service Pack 3'. The trailing
+#                 number also sets wServicePackMajor. Use '' for none.
+#   ProductType - Workstation (default) or Server. Games that take a different
+#                 code path on server SKUs are the only reason to change it.
+#
+# Hooked: kernel32!GetVersion, GetVersionExA, GetVersionExW, and
+# ntdll!RtlGetVersion.
+#
+# Set Logging.OsVersion to true to confirm the value the game is being given
+# and which API asked for it.
+# ---------------------------------------------------------------------------
+OsVersion:
+  Version: None    # e.g. WindowsXP, WindowsServer2003, Custom
+  # Major: 5
+  # Minor: 1
+  # Build: 2600
+  # ServicePack: 'Service Pack 3'
+  # ProductType: Workstation
 
 # ---------------------------------------------------------------------------
 # NetworkAdapters
