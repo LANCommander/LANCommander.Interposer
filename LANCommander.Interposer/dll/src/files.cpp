@@ -126,6 +126,11 @@ static std::wstring RedirectWithDiag(const std::wstring& path)
     {
         std::wstring detail = L"rule #" + std::to_wstring(match.ruleIndex + 1) + L"  " + match.pattern;
 
+        // Only worth showing when %TOKEN% substitution rewrote the rule: the
+        // author needs to see both what they wrote and what the regex compiled.
+        if (!match.source.empty() && match.source != match.pattern)
+            detail += L"  (as written: " + match.source + L")";
+
         LogFileDiag(L"REDIRECT HIT", path.c_str(), detail.c_str());
     }
     else

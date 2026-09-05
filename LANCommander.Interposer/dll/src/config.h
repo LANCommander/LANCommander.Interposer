@@ -11,9 +11,10 @@
 
 // A compiled file-redirect rule loaded from FileRedirects in Config.yml.
 struct FileRedirect {
-    std::wregex  pattern;     // ECMAScript regex, case-insensitive
-    std::wstring patternText; // original pattern source; std::wregex does not retain it
-    std::wstring replacement; // ECMAScript format string; %ENVVAR% expanded after substitution
+    std::wregex  pattern;       // ECMAScript regex, case-insensitive
+    std::wstring patternText;   // pattern as compiled, %TOKEN% already substituted
+    std::wstring patternSource; // pattern as written in Config.yml, before substitution
+    std::wstring replacement;   // ECMAScript format string; %TOKEN% expanded after substitution
 };
 
 // Verbosity of the session log. Info reproduces the historical output exactly;
@@ -31,6 +32,7 @@ struct FileRedirectMatch {
     size_t       ruleIndex = 0;     // 0-based index of the rule that fired
     size_t       ruleCount = 0;     // rules configured
     std::wstring pattern;           // pattern of the rule that fired; populated at Debug+
+    std::wstring source;            // that rule as written, when %TOKEN% substitution changed it
     std::vector<std::wstring> tried; // patterns evaluated and rejected; populated at Trace
 };
 
@@ -180,6 +182,17 @@ void CloseLog();
 
 // Expand %VARNAME% tokens using Windows environment variables.
 std::wstring ExpandEnvVars(const std::wstring& input);
+
+// Expand %TOKEN% references: environment variables first, then the known-folder
+// tokens (%SAVEDGAMES%, %DOCUMENTS%, %MYGAMES%, ...) and %GAMEDIR% /
+// %INTERPOSERDIR%. Unresolved tokens are left verbatim, delimiters included, and
+// their names appended to `unresolved` when it is non-null.
+//
+// Set escapeForRegex when the result is spliced into a regular expression: it
+// escapes the substituted *value* only, leaving the surrounding pattern intact.
+std::wstring ExpandPathTokens(const std::wstring& input,
+                              bool escapeForRegex = false,
+                              std::vector<std::wstring>* unresolved = nullptr);
 
 // Return the redirected path if any rule matches, otherwise return path unchanged.
 // Pass outMatch to learn whether a rule actually fired and which one — the return

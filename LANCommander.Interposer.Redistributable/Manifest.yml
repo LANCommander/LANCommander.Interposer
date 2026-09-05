@@ -178,11 +178,11 @@ OptionSchema: |
         Pattern:
           Type: string
           DisplayName: Pattern
-          Description: Case-insensitive ECMAScript regex matched against the full file path
+          Description: Case-insensitive ECMAScript regex matched against the full file path. Supports %TOKEN% expansion (environment variables, %SAVEDGAMES%, %DOCUMENTS%, %MYGAMES%, %GAMEDIR%, %INTERPOSERDIR%); separators you write yourself still need doubling.
         Replacement:
           Type: string
           DisplayName: Replacement
-          Description: Target path. Supports regex capture groups and environment variable expansion.
+          Description: Target path. Supports $1-$9 regex capture groups and the same %TOKEN% expansion as Pattern.
 
     DnsRedirects:
       Type: list

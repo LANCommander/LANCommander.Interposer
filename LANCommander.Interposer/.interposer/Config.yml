@@ -102,7 +102,27 @@ Logging:
 #
 #   Replacement : Target path.  Supports:
 #                 - $1 .. $9   for regex capture groups
-#                 - %ENVVAR%   expanded after capture-group substitution
+#                 - %TOKEN%    expanded after capture-group substitution
+#
+# %TOKEN% works in BOTH keys.  A token is, in order:
+#
+#   - any environment variable        %APPDATA%, %USERPROFILE%, %TEMP% ...
+#   - a known folder Windows tracks   %SAVEDGAMES%, %DOCUMENTS%, %MYDOCUMENTS%,
+#     but the environment does not    %MYGAMES%, %DESKTOP%, %PICTURES%,
+#                                     %MUSIC%, %VIDEOS%
+#   - %GAMEDIR%                       directory of the running executable
+#   - %INTERPOSERDIR%                 directory holding this DLL
+#
+# None of them include a trailing backslash, so always write your own.  A token
+# that resolves to nothing is left as-is and reported in the log under
+# [FILEREDIRECT], so the rule simply never matches.
+#
+# In a Pattern the expanded value is regex-escaped for you, so never double the
+# backslashes inside a token.  The rest of the Pattern is still your own regex,
+# so the separators you write yourself DO need doubling:
+#
+#   '%APPDATA%\\My Game\\(.+)'   correct
+#   '%APPDATA%\My Game\(.+)'     WRONG - \M is a regex escape, not a separator
 #
 # Examples:
 #
@@ -113,6 +133,11 @@ Logging:
 #   Redirect a hard-coded config path to a portable location:
 #   - Pattern: 'C:\\Program Files.*\\MyGame\\config\.ini'
 #     Replacement: '%APPDATA%\MyGame\config.ini'
+#
+#   Move an AppData save folder into Saved Games.  (.*) with no separator in
+#   front of it matches the folder itself as well as the files under it:
+#   - Pattern: '%APPDATA%\\My Game Files(.*)'
+#     Replacement: '%SAVEDGAMES%\My Game$1'
 #
 # The legacy key name "Redirects" is still accepted for backwards
 # compatibility but "FileRedirects" is preferred.

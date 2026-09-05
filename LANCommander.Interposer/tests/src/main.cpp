@@ -14,6 +14,7 @@
 #define WIN32_LEAN_AND_MEAN
 #define NOMINMAX
 #include <windows.h>
+#include <shlobj.h>          // SHGetKnownFolderPath / FOLDERID_SavedGames (F-09)
 #include <string>
 #include <vector>
 #include <cstdio>
@@ -48,6 +49,27 @@ static std::wstring GetExeDir()
     auto p = s.rfind(L'\\');
     if (p != std::wstring::npos) s.resize(p + 1);
     return s;
+}
+
+// Environment variable the fixture's %TOKEN% pattern refers to. Set before the
+// DLL loads so LoadConfig sees it. A purpose-made variable keeps the test off
+// %TEMP%, whose value GetTempPathW does not always agree with.
+static const wchar_t* kTokenEnvVar = L"INTERPOSER_TEST_ROOT";
+
+// Independent oracle for %SAVEDGAMES%. The DLL resolves that token out of User
+// Shell Folders because it runs under the loader lock; the test EXE is under no
+// such constraint, so asking Windows directly is a real cross-check rather than
+// a re-implementation of the same lookup.
+static std::wstring GetSavedGamesDir()
+{
+    PWSTR raw = nullptr;
+
+    if (FAILED(SHGetKnownFolderPath(FOLDERID_SavedGames, 0, nullptr, &raw)) || !raw)
+        return {};
+
+    std::wstring out(raw);
+    CoTaskMemFree(raw);
+    return out;
 }
 
 // Base directory for temp test artifacts: %TEMP%\InterposerTest
@@ -220,7 +242,21 @@ static void WriteInterposerYaml(const std::wstring& yamlPath,
         "\n"
         "Redirects:\n"
         "  - Pattern: 'C:\\\\TestGame\\\\Saves\\\\(.+)'\n"
-        "    Replacement: '" + WideToUtf8(redirectBaseDir) + "$1'\n";
+        "    Replacement: '" + WideToUtf8(redirectBaseDir) + "$1'\n"
+        // Pattern-side %TOKEN%. wmain sets INTERPOSER_TEST_ROOT to the test temp
+        // directory before LoadLibraryW, so the DLL resolves it at parse time and the
+        // compiled regex matches the expanded path the caller actually passes.
+        "  - Pattern: '%INTERPOSER_TEST_ROOT%\\\\TokenSource\\\\(.+)'\n"
+        "    Replacement: '" + WideToUtf8(redirectBaseDir) + "$1'\n"
+        // Known-folder token on the replacement side. F-09 checks where this lands
+        // against SHGetKnownFolderPath, which the test EXE may call freely -- the DLL
+        // cannot, because LoadConfig runs under the loader lock.
+        "  - Pattern: 'C:\\\\TestGame\\\\Tokens\\\\(.+)'\n"
+        "    Replacement: '%SAVEDGAMES%\\LANCommanderTest\\$1'\n"
+        // A token that resolves to nothing is left literal and warned about rather
+        // than dropped, so the rule simply never matches (L-21).
+        "  - Pattern: '%NOSUCHTOKEN%\\\\Nowhere\\\\(.+)'\n"
+        "    Replacement: 'C:\\Nowhere\\$1'\n";
     WriteTextFile(yamlPath, content);
 }
 
@@ -315,6 +351,43 @@ static void RunFileTests(const std::wstring& exeDir, const std::wstring& testTmp
         DWORD attr = GetFileAttributesA("C:\\TestGame\\Saves\\profile.dat");
         ASSERT(attr != INVALID_FILE_ATTRIBUTES,
             L"F-07: GetFileAttributesA redirect returns valid attributes");
+    }
+        std::wstring tokenPath = testTmpDir + L"TokenSource\\profile.dat";
+        HANDLE h = CreateFileW(tokenPath.c_str(), GENERIC_READ,
+            FILE_SHARE_READ, nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+        ASSERT(h != INVALID_HANDLE_VALUE,
+            L"F-08: %%TOKEN%% in a Pattern expands and matches the expanded path");
+        if (h != INVALID_HANDLE_VALUE) CloseHandle(h);
+    }
+
+    {
+        std::wstring savedGames = GetSavedGamesDir();
+
+        HANDLE h = CreateFileW(L"C:\\TestGame\\Tokens\\probe.dat", GENERIC_WRITE,
+            0, nullptr, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
+        ASSERT(h != INVALID_HANDLE_VALUE,
+            L"F-09a: write through a %%SAVEDGAMES%% redirect succeeds");
+        if (h != INVALID_HANDLE_VALUE) CloseHandle(h);
+
+        ASSERT(!savedGames.empty(),
+            L"F-09b: SHGetKnownFolderPath resolves FOLDERID_SavedGames");
+
+        if (!savedGames.empty())
+        {
+            std::wstring expected = savedGames + L"\\LANCommanderTest\\probe.dat";
+            DWORD attr = GetFileAttributesW(expected.c_str());
+            ASSERT(attr != INVALID_FILE_ATTRIBUTES,
+                L"F-09c: %%SAVEDGAMES%% resolves to the real Saved Games folder");
+        }
+    }
+
+    {
+        SetLastError(0);
+        HANDLE h = CreateFileW(L"C:\\Nowhere\\unresolved.dat", GENERIC_READ,
+            FILE_SHARE_READ, nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+        ASSERT(h == INVALID_HANDLE_VALUE,
+            L"F-10: rule with an unresolved %%TOKEN%% does not redirect");
+        if (h != INVALID_HANDLE_VALUE) CloseHandle(h);
     }
 }
 
@@ -860,6 +933,21 @@ static void RunLogTests(const std::wstring& logPath)
     ASSERT(log.find("[REDIRECT RULE]") != std::string::npos,
         L"L-17: Log contains [REDIRECT RULE] entry at Trace level");
 
+    // A pattern rewritten by %TOKEN% substitution reports both forms, so the
+    // author can see what they wrote next to what the regex actually compiled.
+    ASSERT(log.find("as written:") != std::string::npos,
+        L"L-25: [REDIRECT HIT] shows the pattern as written when a token expanded");
+    ASSERT(log.find("%INTERPOSER_TEST_ROOT%") != std::string::npos,
+        L"L-26: the as-written form still carries the unexpanded token");
+
+    // The fixture's last rule names a token nothing can resolve. LoadConfig
+    // defers the warning until the log exists, then emits it regardless of the
+    // logging flags.
+    ASSERT(log.find("[FILEREDIRECT]") != std::string::npos,
+        L"L-27: Log contains [FILEREDIRECT] entry");
+    ASSERT(log.find("unresolved %NOSUCHTOKEN%") != std::string::npos,
+        L"L-28: unresolved token is reported by name");
+
     // R-01 opens HKLM\SOFTWARE\TestGame\1.0, which is in the virtual store.
     ASSERT(log.find("[REG HIT]") != std::string::npos,
         L"L-18: Log contains [REG HIT] entry");
@@ -1386,6 +1474,11 @@ int wmain()
     CreateDirs(redirectDir);
     WriteTextFile(redirectTarget, "redirect_target_content");
 
+    // The fixture's %INTERPOSER_TEST_ROOT% pattern resolves against the process
+    // environment, which LoadConfig reads during DLL_PROCESS_ATTACH -- so this
+    // has to be set before LoadLibraryW, not just before the test that uses it.
+    SetEnvironmentVariableW(kTokenEnvVar, testTmpDir.c_str());
+
     // .interposer\Config.yml must be in place before LoadLibraryW
     // (LoadConfig runs in DLL_PROCESS_ATTACH, before MH_EnableHook)
     CreateDirs(interposerDir);
@@ -1451,6 +1544,20 @@ int wmain()
     // ── Cleanup ──────────────────────────────────────────────────────────────
     DeleteFileW(redirectTarget.c_str());
     RemoveDirectoryW(redirectDir.c_str());
+
+    // F-09 wrote through the %SAVEDGAMES% rule into the real Saved Games folder.
+    {
+        std::wstring savedGames = GetSavedGamesDir();
+
+        if (!savedGames.empty())
+        {
+            std::wstring probeDir = savedGames + L"\\LANCommanderTest";
+            DeleteFileW((probeDir + L"\\probe.dat").c_str());
+            RemoveDirectoryW(probeDir.c_str());
+        }
+    }
+
+    SetEnvironmentVariableW(kTokenEnvVar, nullptr);
     if (!logPath.empty()) DeleteFileW(logPath.c_str());
     RemoveDirectoryW(logsDir.c_str());
     RemoveDirectoryW(testTmpDir.c_str());

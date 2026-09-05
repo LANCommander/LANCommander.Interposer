@@ -116,6 +116,266 @@ std::wstring ExpandEnvVars(const std::wstring& input)
 }
 
 // ---------------------------------------------------------------------------
+// Path tokens
+// ---------------------------------------------------------------------------
+// Captured by LoadConfig() so %GAMEDIR% / %INTERPOSERDIR% resolve without
+// walking the module list again on every rule.
+static std::wstring g_gameDirectory;
+static std::wstring g_interposerDirectory;
+
+// Known folders that have no environment variable equivalent, resolved from
+// HKCU\...\Explorer\User Shell Folders rather than SHGetKnownFolderPath:
+// LoadConfig() runs from DllMain under the loader lock, and pulling shell32 and
+// ole32 in at that point invites a deadlock. advapi32 is already loaded, and
+// our own registry hooks are not installed until after LoadConfig returns, so
+// these reads cannot re-enter them.
+//
+// Names that already exist as environment variables — APPDATA, LOCALAPPDATA,
+// USERPROFILE, PROGRAMDATA, PROGRAMFILES — are deliberately absent. The
+// environment is consulted first, so listing them here would only shadow
+// behaviour that existing configs already depend on.
+struct PathTokenEntry {
+    const wchar_t* name;      // token spelling, uppercase
+    const wchar_t* regValue;  // value name under User Shell Folders
+    const wchar_t* suffix;    // appended to the resolved folder
+    const wchar_t* fallback;  // relative to %USERPROFILE% when the value is absent
+};
+
+constexpr PathTokenEntry kPathTokens[] = {
+    { L"SAVEDGAMES",  L"{4C5C32FF-BB9D-43b0-B5B4-2D72E54EAAA4}", L"",           L"Saved Games"         },
+    { L"DOCUMENTS",   L"Personal",                               L"",           L"Documents"           },
+    { L"MYDOCUMENTS", L"Personal",                               L"",           L"Documents"           },
+    { L"MYGAMES",     L"Personal",                               L"\\My Games", L"Documents\\My Games" },
+    { L"DESKTOP",     L"Desktop",                                L"",           L"Desktop"             },
+    { L"PICTURES",    L"My Pictures",                            L"",           L"Pictures"            },
+    { L"MUSIC",       L"My Music",                               L"",           L"Music"               },
+    { L"VIDEOS",      L"My Video",                               L"",           L"Videos"              },
+};
+
+// Resolved once by ResolveKnownFolders(), which LoadConfig calls before any hook
+// is enabled. Caching is not just an optimization: the replacement side of a rule
+// expands tokens on every redirected file open, and a registry read from inside
+// the CreateFileW hook would re-enter our own advapi32 hooks.
+static std::wstring g_pathTokenValues[8];
+
+// Drop trailing separators so a token always concatenates cleanly with the
+// backslash the config author wrote after it. "C:\" keeps its slash.
+static void TrimTrailingSlash(std::wstring& path)
+{
+    while (path.size() > 1 && (path.back() == L'\\' || path.back() == L'/'))
+    {
+        if (path.size() == 3 && path[1] == L':')
+            break;
+
+        path.pop_back();
+    }
+}
+
+static std::wstring UpperCase(const std::wstring& s)
+{
+    std::wstring out;
+    out.reserve(s.size());
+
+    for (wchar_t c : s)
+        out += static_cast<wchar_t>(std::towupper(c));
+
+    return out;
+}
+
+// Read one REG_SZ / REG_EXPAND_SZ from User Shell Folders. Values there are
+// normally REG_EXPAND_SZ holding things like %USERPROFILE%\Saved Games, hence
+// the ExpandEnvVars pass on the way out.
+static bool ReadUserShellFolder(const wchar_t* valueName, std::wstring& out)
+{
+    HKEY key = nullptr;
+
+    if (RegOpenKeyExW(HKEY_CURRENT_USER,
+            L"Software\\Microsoft\\Windows\\CurrentVersion\\Explorer\\User Shell Folders",
+            0, KEY_QUERY_VALUE, &key) != ERROR_SUCCESS)
+        return false;
+
+    DWORD type  = 0;
+    DWORD bytes = 0;
+    LONG  status = RegQueryValueExW(key, valueName, nullptr, &type, nullptr, &bytes);
+
+    if (status != ERROR_SUCCESS || bytes < sizeof(wchar_t) ||
+        (type != REG_SZ && type != REG_EXPAND_SZ))
+    {
+        RegCloseKey(key);
+        return false;
+    }
+
+    std::wstring raw(bytes / sizeof(wchar_t), L'\0');
+
+    status = RegQueryValueExW(key, valueName, nullptr, &type,
+        reinterpret_cast<LPBYTE>(raw.data()), &bytes);
+
+    RegCloseKey(key);
+
+    if (status != ERROR_SUCCESS)
+        return false;
+
+    // The stored byte count includes the terminator; std::wstring supplies its own.
+    while (!raw.empty() && raw.back() == L'\0')
+        raw.pop_back();
+
+    if (raw.empty())
+        return false;
+
+    out = ExpandEnvVars(raw);
+    TrimTrailingSlash(out);
+    return !out.empty();
+}
+
+// Resolve one %NAME%. Environment first, so the feature can never change the
+// meaning of a token that already worked. Returns false if nothing matches, in
+// which case the caller leaves the token text alone.
+static bool ResolvePathToken(const std::wstring& name, std::wstring& out)
+{
+    if (name.empty())
+        return false;
+
+    DWORD needed = GetEnvironmentVariableW(name.c_str(), nullptr, 0);
+
+    if (needed > 0)
+    {
+        std::wstring value(needed, L'\0');
+        DWORD written = GetEnvironmentVariableW(name.c_str(), value.data(), needed);
+
+        if (written > 0)
+        {
+            value.resize(written);
+            TrimTrailingSlash(value);
+            out = value;
+            return true;
+        }
+    }
+
+    const std::wstring wanted = UpperCase(name);
+
+    if (wanted == L"GAMEDIR" && !g_gameDirectory.empty())
+    {
+        out = g_gameDirectory;
+        return true;
+    }
+
+    if (wanted == L"INTERPOSERDIR" && !g_interposerDirectory.empty())
+    {
+        out = g_interposerDirectory;
+        return true;
+    }
+
+    for (size_t i = 0; i < std::size(kPathTokens); ++i)
+    {
+        if (wanted != kPathTokens[i].name || g_pathTokenValues[i].empty())
+            continue;
+
+        out = g_pathTokenValues[i];
+        return true;
+    }
+
+    return false;
+}
+
+// Populate g_pathTokenValues. Called from LoadConfig, which runs before
+// InstallRegistryHooks, so these reads cannot reach our own hooks.
+static void ResolveKnownFolders()
+{
+    static_assert(std::size(kPathTokens) == std::size(g_pathTokenValues),
+        "g_pathTokenValues must have one slot per kPathTokens entry");
+
+    std::wstring profile;
+    ResolvePathToken(L"USERPROFILE", profile);
+
+    for (size_t i = 0; i < std::size(kPathTokens); ++i)
+    {
+        const PathTokenEntry& entry = kPathTokens[i];
+
+        std::wstring folder;
+
+        if (ReadUserShellFolder(entry.regValue, folder))
+            g_pathTokenValues[i] = folder + entry.suffix;
+        else if (!profile.empty())
+            g_pathTokenValues[i] = profile + L"\\" + entry.fallback;
+    }
+}
+
+// Escape every ECMAScript metacharacter so a substituted path is matched
+// literally. Backslash is the one that actually bites: an unescaped
+// C:\Users\Pat\AppData would read as the escapes \U, \P and \A.
+static std::wstring RegexEscape(const std::wstring& s)
+{
+    static const std::wstring kMeta = L"\\^$.|?*+()[]{}";
+
+    std::wstring out;
+    out.reserve(s.size() * 2);
+
+    for (wchar_t c : s)
+    {
+        if (kMeta.find(c) != std::wstring::npos)
+            out += L'\\';
+
+        out += c;
+    }
+
+    return out;
+}
+
+// Substitute %NAME% tokens. Unresolved tokens are copied through verbatim,
+// delimiters included, so a typo degrades to "rule never matches" rather than
+// silently deleting part of the path; the names are reported via `unresolved`
+// so LoadConfig can warn about them once the log exists.
+//
+// `escapeForRegex` escapes the substituted *value* only — the surrounding text
+// is the author's regex and must stay untouched.
+std::wstring ExpandPathTokens(const std::wstring& input,
+                              bool escapeForRegex,
+                              std::vector<std::wstring>* unresolved)
+{
+    std::wstring out;
+    out.reserve(input.size());
+
+    size_t i = 0;
+
+    while (i < input.size())
+    {
+        if (input[i] != L'%')
+        {
+            out += input[i++];
+            continue;
+        }
+
+        size_t close = input.find(L'%', i + 1);
+
+        // A lone % with no partner is just a character.
+        if (close == std::wstring::npos)
+        {
+            out += input.substr(i);
+            break;
+        }
+
+        std::wstring name = input.substr(i + 1, close - i - 1);
+        std::wstring value;
+
+        if (ResolvePathToken(name, value))
+        {
+            out += escapeForRegex ? RegexEscape(value) : value;
+        }
+        else
+        {
+            out += input.substr(i, close - i + 1);
+
+            if (unresolved && !name.empty())
+                unresolved->push_back(name);
+        }
+
+        i = close + 1;
+    }
+
+    return out;
+}
+
+// ---------------------------------------------------------------------------
 // Utf8ToWide
 // ---------------------------------------------------------------------------
 static std::wstring Utf8ToWide(const std::string& s)
@@ -262,10 +522,17 @@ std::wstring ApplyFileRedirects(const std::wstring& path, FileRedirectMatch* out
                 outMatch->ruleIndex = i;
 
                 if (g_logLevel >= LogLevel::Debug)
+                {
                     outMatch->pattern = redirect.patternText;
+                    outMatch->source  = redirect.patternSource;
+                }
             }
 
-            return NormalizeBackslashes(ExpandEnvVars(result));
+            // ExpandPathTokens handles the known-folder tokens and leaves
+            // anything it does not recognize alone; ExpandEnvVars then gets its
+            // usual shot at the remainder, so existing configs are unaffected.
+            return NormalizeBackslashes(
+                ExpandEnvVars(ExpandPathTokens(result, /*escapeForRegex=*/false, nullptr)));
         }
 
         if (outMatch && g_logLevel >= LogLevel::Trace)
@@ -1071,6 +1338,28 @@ void LoadConfig()
 
     g_configFilePath = yamlPath;
 
+    // Backing values for %INTERPOSERDIR% and %GAMEDIR%. Captured here, before
+    // any rule is parsed, and stored without a trailing separator so the config
+    // author's own backslash is the only one in the result.
+    g_interposerDirectory = dllDirectory;
+    TrimTrailingSlash(g_interposerDirectory);
+
+    wchar_t exePathBuffer[MAX_PATH] = {};
+
+    if (GetModuleFileNameW(nullptr, exePathBuffer, MAX_PATH) > 0)
+    {
+        std::wstring exeDirectory(exePathBuffer);
+        auto exeSlash = exeDirectory.find_last_of(L"\\/");
+
+        if (exeSlash != std::wstring::npos)
+        {
+            exeDirectory.resize(exeSlash);
+            g_gameDirectory = exeDirectory;
+        }
+    }
+
+    ResolveKnownFolders();
+
     HANDLE fileHandle = CreateFileW(yamlPath.c_str(), GENERIC_READ, FILE_SHARE_READ,
         nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
 
@@ -1167,6 +1456,8 @@ void LoadConfig()
     }
 
     // ── FileRedirects (legacy: "Redirects") ──────────────────────────────────
+    std::vector<std::wstring> redirectWarnings;
+
     YAML::Node redirects = root["FileRedirects"];
     if (!redirects)
         redirects = root["Redirects"];
@@ -1184,14 +1475,32 @@ void LoadConfig()
                 
                 try
                 {
+                    std::vector<std::wstring> unresolved;
+
                     FileRedirect redirect;
-                    redirect.replacement = Utf8ToWide(replacement);
-                    redirect.patternText = Utf8ToWide(pattern);
-                    redirect.pattern     = std::wregex(redirect.patternText,
+                    redirect.replacement   = Utf8ToWide(replacement);
+                    redirect.patternSource = Utf8ToWide(pattern);
+
+                    redirect.patternText   = ExpandPathTokens(redirect.patternSource,
+                        /*escapeForRegex=*/true, &unresolved);
+
+                    redirect.pattern       = std::wregex(redirect.patternText,
                         std::regex_constants::ECMAScript | std::regex_constants::icase);
+
+                    for (const std::wstring& name : unresolved)
+                    {
+                        redirectWarnings.push_back(
+                            L"unresolved %" + name + L"% in FileRedirects pattern: "
+                            + redirect.patternSource);
+                    }
+
                     g_redirects.push_back(std::move(redirect));
                 }
-                catch (const std::regex_error&) { /* skip malformed patterns */ }
+                catch (const std::regex_error&)
+                {
+                    redirectWarnings.push_back(
+                        L"malformed regex in FileRedirects, rule skipped: " + Utf8ToWide(pattern));
+                }
             }
         }
     }
@@ -1617,4 +1926,7 @@ void LoadConfig()
     // misconfiguration warrants.
     for (const std::wstring& warning : osVersionWarnings)
         InterposerLog(L"OSVERSION", warning.c_str());
+
+    for (const std::wstring& warning : redirectWarnings)
+        InterposerLog(L"FILEREDIRECT", warning.c_str());
 }

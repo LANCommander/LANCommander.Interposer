@@ -85,6 +85,7 @@ The `->` portion only appears when a path was changed — for example, when a fi
 | `[FILE FIND]` | `FindFirstFileW/A` was called on a path. |
 | `[DLL LOAD]` | A DLL was loaded via `LoadLibraryW/A` or `LoadLibraryExW/A`. |
 | `[FILE OVERLAY]` | A file open was served from the FastDL overlay cache instead of the game directory. |
+| `[FILEREDIRECT]` | A `FileRedirects` configuration warning: an unresolved `%TOKEN%` in a pattern, or a rule skipped for a malformed regex. Written once at startup regardless of `Logging.Files`, because a rule that never loads is otherwise invisible. |
 
 ### Redirect Diagnostics
 
@@ -92,7 +93,7 @@ Only written at `Level: Debug` or higher, and only for a subsystem that is alrea
 
 | Verb | Level | Meaning |
 |---|---|---|
-| `[REDIRECT HIT]` | Debug | A `FileRedirects` rule matched. The line shows the source path and, after the `->`, the 1-based rule number and its pattern. |
+| `[REDIRECT HIT]` | Debug | A `FileRedirects` rule matched. The line shows the source path and, after the `->`, the 1-based rule number and its pattern. When the pattern contained a `%TOKEN%`, the rule as written follows in parentheses. |
 | `[REDIRECT MISS]` | Debug | No rule matched this path. The line shows either `no rules configured` or how many rules were evaluated. |
 | `[REDIRECT RULE]` | Trace | One line per redirect pattern that was evaluated and rejected, for working out why a regex did not match. |
 | `[REG HIT]` | Debug | The key was found in the virtual registry, so the request is served from `Registry.reg`. |
