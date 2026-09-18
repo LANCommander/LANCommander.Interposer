@@ -5,7 +5,7 @@ sidebar_position: 4
 
 # File Redirection
 
-File redirection intercepts calls to `CreateFileW/A`, `GetFileAttributesW/A`, `FindFirstFileW/A`, and the `LoadLibrary` family, replacing path arguments on the fly before the call reaches Windows. The game opens and reads the redirected file without any knowledge that its path was changed.
+File redirection intercepts calls to `CreateFileW/A` and `CreateFile2`, the `GetFileAttributes` and `FindFirstFile` families, the delete/move/copy functions, and the `LoadLibrary` family, replacing path arguments on the fly before the call reaches Windows. The game opens and reads the redirected file without any knowledge that its path was changed.
 
 ## Why Use It
 
@@ -222,7 +222,10 @@ File redirection applies to the following Windows API functions:
 | Function | Notes |
 |---|---|
 | `CreateFileW` / `CreateFileA` | Applies redirect before opening; ANSI variant converts to wide first. |
+| `CreateFile2` | The modern open, used by `std::filesystem`. Extended parameters pass through untouched. |
 | `GetFileAttributesW` / `GetFileAttributesA` | Applies redirect before querying attributes. |
+| `GetFileAttributesExW` / `GetFileAttributesExA` | The form the CRT's `stat`/`access` and `std::filesystem::exists` / `file_size` call. |
 | `FindFirstFileW` / `FindFirstFileA` | Applies redirect before beginning enumeration. |
+| `FindFirstFileExW` / `FindFirstFileExA` | As above, for the extended enumeration form. |
 | `LoadLibraryW` / `LoadLibraryA` | Applies redirect before loading a DLL. |
 | `LoadLibraryExW` / `LoadLibraryExA` | Applies redirect before loading a DLL with flags. |

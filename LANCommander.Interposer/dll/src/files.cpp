@@ -18,8 +18,11 @@ static thread_local bool g_inFastDLHook = false;
 // ---------------------------------------------------------------------------
 using FnCreateFileW        = HANDLE(WINAPI*)(LPCWSTR, DWORD, DWORD, LPSECURITY_ATTRIBUTES, DWORD, DWORD, HANDLE);
 using FnCreateFileA        = HANDLE(WINAPI*)(LPCSTR,  DWORD, DWORD, LPSECURITY_ATTRIBUTES, DWORD, DWORD, HANDLE);
+using FnCreateFile2        = HANDLE(WINAPI*)(LPCWSTR, DWORD, DWORD, DWORD, LPCREATEFILE2_EXTENDED_PARAMETERS);
 using FnGetFileAttributesW = DWORD(WINAPI*)(LPCWSTR);
 using FnGetFileAttributesA = DWORD(WINAPI*)(LPCSTR);
+using FnGetFileAttributesExW = BOOL(WINAPI*)(LPCWSTR, GET_FILEEX_INFO_LEVELS, LPVOID);
+using FnGetFileAttributesExA = BOOL(WINAPI*)(LPCSTR,  GET_FILEEX_INFO_LEVELS, LPVOID);
 using FnFindFirstFileW     = HANDLE(WINAPI*)(LPCWSTR, LPWIN32_FIND_DATAW);
 using FnFindFirstFileA     = HANDLE(WINAPI*)(LPCSTR,  LPWIN32_FIND_DATAA);
 using FnFindFirstFileExW   = HANDLE(WINAPI*)(LPCWSTR, FINDEX_INFO_LEVELS, LPVOID, FINDEX_SEARCH_OPS, LPVOID, DWORD);
@@ -41,8 +44,11 @@ using FnLoadLibraryExA     = HMODULE(WINAPI*)(LPCSTR,  HANDLE, DWORD);
 
 static FnCreateFileW        g_origCreateFileW        = nullptr;
 static FnCreateFileA        g_origCreateFileA        = nullptr;
+static FnCreateFile2        g_origCreateFile2        = nullptr;
 static FnGetFileAttributesW g_origGetFileAttributesW = nullptr;
 static FnGetFileAttributesA g_origGetFileAttributesA = nullptr;
+static FnGetFileAttributesExW g_origGetFileAttributesExW = nullptr;
+static FnGetFileAttributesExA g_origGetFileAttributesExA = nullptr;
 static FnFindFirstFileW     g_origFindFirstFileW     = nullptr;
 static FnFindFirstFileA     g_origFindFirstFileA     = nullptr;
 static FnFindFirstFileExW   g_origFindFirstFileExW   = nullptr;
@@ -62,9 +68,31 @@ static FnLoadLibraryA       g_origLoadLibraryA       = nullptr;
 static FnLoadLibraryExW     g_origLoadLibraryExW     = nullptr;
 static FnLoadLibraryExA     g_origLoadLibraryExA     = nullptr;
 
-// Reentrancy guard for file-management hooks (MoveFile/CopyFile call their
-// Ex counterparts internally — prevent double-redirect and double-logging).
+// Reentrancy guard for file-management hooks. Two chains reach an already-hooked
+// export: KernelBase's own CopyFileW calls the exported CopyFileExW, and the
+// kernel32-only ANSI variants (CopyFileA, CopyFileExA) funnel into KernelBase's
+// CopyFileExW as well. Move does not re-enter — MoveFileW/A and MoveFileExA all
+// go through MoveFileWithProgress[Transacted]W, which we do not hook — but the
+// guard covers the family uniformly.
 static thread_local bool g_inFileOpHook = false;
+
+// Reentrancy guard for the CreateFile family. CreateFile2 calls an internal
+// KernelBase helper rather than the exported CreateFileW on every build checked,
+// so this is insurance: should a future build funnel 2 -> W, the inner call
+// degrades to a plain passthrough instead of logging and redirecting twice.
+static thread_local bool g_inCreateFileHook = false;
+
+// Sets a thread_local flag for the enclosing scope.
+class ScopedFlag
+{
+public:
+    explicit ScopedFlag(bool& flag) : m_flag(flag) { m_flag = true; }
+    ~ScopedFlag() { m_flag = false; }
+    ScopedFlag(const ScopedFlag&) = delete;
+    ScopedFlag& operator=(const ScopedFlag&) = delete;
+private:
+    bool& m_flag;
+};
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -99,6 +127,16 @@ static void EnsureParentDirectoryExists(const std::wstring& filePath)
         }
     }
     CreateDirectoryW(dir.c_str(), nullptr);
+}
+
+static std::wstring AnsiToWide(LPCSTR str)
+{
+    if (!str || !str[0]) return {};
+    int wlen = MultiByteToWideChar(CP_ACP, 0, str, -1, nullptr, 0);
+    if (wlen <= 1) return {};
+    std::wstring result(wlen - 1, L'\0');
+    MultiByteToWideChar(CP_ACP, 0, str, -1, result.data(), wlen);
+    return result;
 }
 
 static const wchar_t* AccessVerb(DWORD access)
@@ -150,21 +188,8 @@ static std::wstring RedirectWithDiag(const std::wstring& path)
     return result;
 }
 
-// Core wide-path implementation shared by both W and A CreateFile hooks.
-static HANDLE CreateFileWImpl(
-    const std::wstring& path,
-    DWORD dwDesiredAccess, DWORD dwShareMode,
-    LPSECURITY_ATTRIBUTES lpSA,
-    DWORD dwCreationDisposition,
-    DWORD dwFlagsAndAttributes,
-    HANDLE hTemplateFile)
+static std::wstring ResolveOpenPath(const std::wstring& path, DWORD dwDesiredAccess)
 {
-    // Suppress all hook logic during internal FastDL operations to avoid
-    // reentrancy, redundant logging, and spurious redirect checks.
-    if (g_inFastDLHook)
-        return g_origCreateFileW(path.c_str(), dwDesiredAccess, dwShareMode,
-            lpSA, dwCreationDisposition, dwFlagsAndAttributes, hTemplateFile);
-
     std::wstring redirected = RedirectWithDiag(path);
 
     if (redirected != path)
@@ -191,13 +216,34 @@ static HANDLE CreateFileWImpl(
         if (!overlayPath.empty())
         {
             LogFileAccess(L"FILE OVERLAY", redirected.c_str(), overlayPath.c_str());
-            return g_origCreateFileW(overlayPath.c_str(), dwDesiredAccess, dwShareMode,
-                lpSA, dwCreationDisposition, dwFlagsAndAttributes, hTemplateFile);
+            return overlayPath;
         }
     }
 
+    return redirected;
+}
+
+// Core wide-path implementation shared by both W and A CreateFile hooks.
+static HANDLE CreateFileWImpl(
+    const std::wstring& path,
+    DWORD dwDesiredAccess, DWORD dwShareMode,
+    LPSECURITY_ATTRIBUTES lpSA,
+    DWORD dwCreationDisposition,
+    DWORD dwFlagsAndAttributes,
+    HANDLE hTemplateFile)
+{
+    // Suppress all hook logic during internal FastDL operations to avoid
+    // reentrancy, redundant logging, and spurious redirect checks.
+    if (g_inFastDLHook || g_inCreateFileHook)
+        return g_origCreateFileW(path.c_str(), dwDesiredAccess, dwShareMode,
+            lpSA, dwCreationDisposition, dwFlagsAndAttributes, hTemplateFile);
+
+    ScopedFlag guard(g_inCreateFileHook);
+
+    std::wstring target = ResolveOpenPath(path, dwDesiredAccess);
+
     return g_origCreateFileW(
-        redirected.c_str(), dwDesiredAccess, dwShareMode,
+        target.c_str(), dwDesiredAccess, dwShareMode,
         lpSA, dwCreationDisposition, dwFlagsAndAttributes, hTemplateFile);
 }
 
@@ -234,10 +280,26 @@ static HANDLE WINAPI HookCreateFileA(
     std::wstring wpath(wlen - 1, L'\0');
     MultiByteToWideChar(CP_ACP, 0, lpFileName, -1, wpath.data(), wlen);
 
-    // CreateFileWImpl always calls g_origCreateFileW (the real kernel32 function),
+    // CreateFileWImpl always calls g_origCreateFileW (the real KernelBase function),
     // which accepts wide paths, so this correctly handles ANSI → wide redirections.
     return CreateFileWImpl(wpath, dwDesiredAccess, dwShareMode,
         lpSA, dwCreationDisposition, dwFlagsAndAttributes, hTemplateFile);
+}
+
+static HANDLE WINAPI HookCreateFile2(
+    LPCWSTR lpFileName, DWORD dwDesiredAccess, DWORD dwShareMode,
+    DWORD dwCreationDisposition, LPCREATEFILE2_EXTENDED_PARAMETERS pCreateExParams)
+{
+    if (!lpFileName || g_inFastDLHook || g_inCreateFileHook)
+        return g_origCreateFile2(lpFileName, dwDesiredAccess, dwShareMode,
+            dwCreationDisposition, pCreateExParams);
+
+    ScopedFlag guard(g_inCreateFileHook);
+
+    std::wstring target = ResolveOpenPath(lpFileName, dwDesiredAccess);
+
+    return g_origCreateFile2(target.c_str(), dwDesiredAccess, dwShareMode,
+        dwCreationDisposition, pCreateExParams);
 }
 
 // ---------------------------------------------------------------------------
@@ -315,7 +377,7 @@ static DWORD WINAPI HookGetFileAttributesA(LPCSTR lpFileName)
 
     LogFileAccess(L"FILE ATTR", wpath.c_str());
 
-    DWORD attrs = g_origGetFileAttributesA(lpFileName);
+    DWORD attrs = g_origGetFileAttributesW(wpath.c_str());
 
     if (attrs == INVALID_FILE_ATTRIBUTES)
     {
@@ -337,6 +399,59 @@ static DWORD WINAPI HookGetFileAttributesA(LPCSTR lpFileName)
     }
 
     return attrs;
+}
+
+// ---------------------------------------------------------------------------
+// Hook implementations — GetFileAttributesEx
+//
+// This is what the CRT's _wstat/_waccess and std::filesystem::exists/file_size
+// actually call. Same [FILE ATTR] verb as the plain form — it answers the same
+// question, and reusing the verb keeps the event vocabulary consumers depend on
+// unchanged.
+// ---------------------------------------------------------------------------
+static BOOL WINAPI HookGetFileAttributesExW(
+    LPCWSTR lpFileName, GET_FILEEX_INFO_LEVELS fInfoLevelId, LPVOID lpFileInformation)
+{
+    if (!lpFileName || g_inFastDLHook)
+        return g_origGetFileAttributesExW(lpFileName, fInfoLevelId, lpFileInformation);
+
+    std::wstring path(lpFileName);
+    std::wstring redirected = RedirectWithDiag(path);
+
+    if (redirected != path)
+    {
+        LogFileAccess(L"FILE REDIRECT", path.c_str(), redirected.c_str());
+        return g_origGetFileAttributesExW(redirected.c_str(), fInfoLevelId, lpFileInformation);
+    }
+
+    LogFileAccess(L"FILE ATTR", path.c_str());
+
+    BOOL ok = g_origGetFileAttributesExW(lpFileName, fInfoLevelId, lpFileInformation);
+
+    if (!ok)
+    {
+        g_inFastDLHook = true;
+        std::wstring overlayPath = GetExistingOverlayPath(path);
+        g_inFastDLHook = false;
+
+        if (!overlayPath.empty())
+            return g_origGetFileAttributesExW(overlayPath.c_str(), fInfoLevelId, lpFileInformation);
+    }
+
+    return ok;
+}
+
+static BOOL WINAPI HookGetFileAttributesExA(
+    LPCSTR lpFileName, GET_FILEEX_INFO_LEVELS fInfoLevelId, LPVOID lpFileInformation)
+{
+    if (!lpFileName || g_inFastDLHook)
+        return g_origGetFileAttributesExA(lpFileName, fInfoLevelId, lpFileInformation);
+
+    std::wstring wpath = AnsiToWide(lpFileName);
+    if (wpath.empty())
+        return g_origGetFileAttributesExA(lpFileName, fInfoLevelId, lpFileInformation);
+
+    return HookGetFileAttributesExW(wpath.c_str(), fInfoLevelId, lpFileInformation);
 }
 
 // ---------------------------------------------------------------------------
@@ -391,19 +506,6 @@ static HANDLE WINAPI HookFindFirstFileA(LPCSTR lpFileName, LPWIN32_FIND_DATAA lp
 
     LogFileAccess(L"FILE FIND", widePath.c_str());
     return g_origFindFirstFileA(lpFileName, lpFindFileData);
-}
-
-// ---------------------------------------------------------------------------
-// Helper — ANSI to wide string conversion
-// ---------------------------------------------------------------------------
-static std::wstring AnsiToWide(LPCSTR str)
-{
-    if (!str || !str[0]) return {};
-    int wlen = MultiByteToWideChar(CP_ACP, 0, str, -1, nullptr, 0);
-    if (wlen <= 1) return {};
-    std::wstring result(wlen - 1, L'\0');
-    MultiByteToWideChar(CP_ACP, 0, str, -1, result.data(), wlen);
-    return result;
 }
 
 // ---------------------------------------------------------------------------
@@ -505,7 +607,8 @@ static BOOL WINAPI HookDeleteFileA(LPCSTR lpFileName)
     }
 
     LogFileAccess(L"FILE DELETE", wpath.c_str());
-    return g_origDeleteFileA(lpFileName);
+
+    return g_origDeleteFileW(wpath.c_str());
 }
 
 // ---------------------------------------------------------------------------
@@ -893,99 +996,56 @@ static HMODULE WINAPI HookLoadLibraryExA(LPCSTR lpLibFileName, HANDLE hFile, DWO
 }
 
 // ---------------------------------------------------------------------------
+// Hook installation
+// ---------------------------------------------------------------------------
+
+// Hooks a file API in KernelBase, falling back to kernel32.
+template <typename Fn>
+static void HookFileApi(const char* name, Fn detour, Fn* orig)
+{
+    MH_STATUS status = MH_CreateHookApi(L"kernelbase", name,
+        reinterpret_cast<LPVOID>(detour), reinterpret_cast<LPVOID*>(orig));
+
+    if (status == MH_OK || status == MH_ERROR_ALREADY_CREATED)
+    {
+        LogHookInit(L"kernelbase", name, status);
+        return;
+    }
+
+    if (status != MH_ERROR_MODULE_NOT_FOUND && status != MH_ERROR_FUNCTION_NOT_FOUND)
+        LogHookInit(L"kernelbase", name, status);
+
+    LogHookInit(L"kernel32", name,
+        MH_CreateHookApi(L"kernel32", name,
+            reinterpret_cast<LPVOID>(detour), reinterpret_cast<LPVOID*>(orig)));
+}
+
+// ---------------------------------------------------------------------------
 // Public API
 // ---------------------------------------------------------------------------
 void InstallFileHooks()
 {
-    LogHookInit(L"kernel32", "CreateFileW",
-        MH_CreateHookApi(L"kernel32", "CreateFileW",
-            reinterpret_cast<LPVOID>(HookCreateFileW),
-            reinterpret_cast<LPVOID*>(&g_origCreateFileW)));
-
-    LogHookInit(L"kernel32", "CreateFileA",
-        MH_CreateHookApi(L"kernel32", "CreateFileA",
-            reinterpret_cast<LPVOID>(HookCreateFileA),
-            reinterpret_cast<LPVOID*>(&g_origCreateFileA)));
-
-    LogHookInit(L"kernel32", "GetFileAttributesW",
-        MH_CreateHookApi(L"kernel32", "GetFileAttributesW",
-            reinterpret_cast<LPVOID>(HookGetFileAttributesW),
-            reinterpret_cast<LPVOID*>(&g_origGetFileAttributesW)));
-
-    LogHookInit(L"kernel32", "GetFileAttributesA",
-        MH_CreateHookApi(L"kernel32", "GetFileAttributesA",
-            reinterpret_cast<LPVOID>(HookGetFileAttributesA),
-            reinterpret_cast<LPVOID*>(&g_origGetFileAttributesA)));
-
-    LogHookInit(L"kernel32", "FindFirstFileW",
-        MH_CreateHookApi(L"kernel32", "FindFirstFileW",
-            reinterpret_cast<LPVOID>(HookFindFirstFileW),
-            reinterpret_cast<LPVOID*>(&g_origFindFirstFileW)));
-
-    LogHookInit(L"kernel32", "FindFirstFileA",
-        MH_CreateHookApi(L"kernel32", "FindFirstFileA",
-            reinterpret_cast<LPVOID>(HookFindFirstFileA),
-            reinterpret_cast<LPVOID*>(&g_origFindFirstFileA)));
-
-    LogHookInit(L"kernel32", "FindFirstFileExW",
-        MH_CreateHookApi(L"kernel32", "FindFirstFileExW",
-            reinterpret_cast<LPVOID>(HookFindFirstFileExW),
-            reinterpret_cast<LPVOID*>(&g_origFindFirstFileExW)));
-
-    LogHookInit(L"kernel32", "FindFirstFileExA",
-        MH_CreateHookApi(L"kernel32", "FindFirstFileExA",
-            reinterpret_cast<LPVOID>(HookFindFirstFileExA),
-            reinterpret_cast<LPVOID*>(&g_origFindFirstFileExA)));
-
-    LogHookInit(L"kernel32", "DeleteFileW",
-        MH_CreateHookApi(L"kernel32", "DeleteFileW",
-            reinterpret_cast<LPVOID>(HookDeleteFileW),
-            reinterpret_cast<LPVOID*>(&g_origDeleteFileW)));
-
-    LogHookInit(L"kernel32", "DeleteFileA",
-        MH_CreateHookApi(L"kernel32", "DeleteFileA",
-            reinterpret_cast<LPVOID>(HookDeleteFileA),
-            reinterpret_cast<LPVOID*>(&g_origDeleteFileA)));
-
-    LogHookInit(L"kernel32", "MoveFileW",
-        MH_CreateHookApi(L"kernel32", "MoveFileW",
-            reinterpret_cast<LPVOID>(HookMoveFileW),
-            reinterpret_cast<LPVOID*>(&g_origMoveFileW)));
-
-    LogHookInit(L"kernel32", "MoveFileA",
-        MH_CreateHookApi(L"kernel32", "MoveFileA",
-            reinterpret_cast<LPVOID>(HookMoveFileA),
-            reinterpret_cast<LPVOID*>(&g_origMoveFileA)));
-
-    LogHookInit(L"kernel32", "MoveFileExW",
-        MH_CreateHookApi(L"kernel32", "MoveFileExW",
-            reinterpret_cast<LPVOID>(HookMoveFileExW),
-            reinterpret_cast<LPVOID*>(&g_origMoveFileExW)));
-
-    LogHookInit(L"kernel32", "MoveFileExA",
-        MH_CreateHookApi(L"kernel32", "MoveFileExA",
-            reinterpret_cast<LPVOID>(HookMoveFileExA),
-            reinterpret_cast<LPVOID*>(&g_origMoveFileExA)));
-
-    LogHookInit(L"kernel32", "CopyFileW",
-        MH_CreateHookApi(L"kernel32", "CopyFileW",
-            reinterpret_cast<LPVOID>(HookCopyFileW),
-            reinterpret_cast<LPVOID*>(&g_origCopyFileW)));
-
-    LogHookInit(L"kernel32", "CopyFileA",
-        MH_CreateHookApi(L"kernel32", "CopyFileA",
-            reinterpret_cast<LPVOID>(HookCopyFileA),
-            reinterpret_cast<LPVOID*>(&g_origCopyFileA)));
-
-    LogHookInit(L"kernel32", "CopyFileExW",
-        MH_CreateHookApi(L"kernel32", "CopyFileExW",
-            reinterpret_cast<LPVOID>(HookCopyFileExW),
-            reinterpret_cast<LPVOID*>(&g_origCopyFileExW)));
-
-    LogHookInit(L"kernel32", "CopyFileExA",
-        MH_CreateHookApi(L"kernel32", "CopyFileExA",
-            reinterpret_cast<LPVOID>(HookCopyFileExA),
-            reinterpret_cast<LPVOID*>(&g_origCopyFileExA)));
+    HookFileApi("CreateFileW",          HookCreateFileW,          &g_origCreateFileW);
+    HookFileApi("CreateFileA",          HookCreateFileA,          &g_origCreateFileA);
+    HookFileApi("CreateFile2",          HookCreateFile2,          &g_origCreateFile2);
+    HookFileApi("GetFileAttributesW",   HookGetFileAttributesW,   &g_origGetFileAttributesW);
+    HookFileApi("GetFileAttributesA",   HookGetFileAttributesA,   &g_origGetFileAttributesA);
+    HookFileApi("GetFileAttributesExW", HookGetFileAttributesExW, &g_origGetFileAttributesExW);
+    HookFileApi("GetFileAttributesExA", HookGetFileAttributesExA, &g_origGetFileAttributesExA);
+    HookFileApi("FindFirstFileW",       HookFindFirstFileW,       &g_origFindFirstFileW);
+    HookFileApi("FindFirstFileA",       HookFindFirstFileA,       &g_origFindFirstFileA);
+    HookFileApi("FindFirstFileExW",     HookFindFirstFileExW,     &g_origFindFirstFileExW);
+    HookFileApi("FindFirstFileExA",     HookFindFirstFileExA,     &g_origFindFirstFileExA);
+    HookFileApi("DeleteFileW",          HookDeleteFileW,          &g_origDeleteFileW);
+    HookFileApi("DeleteFileA",          HookDeleteFileA,          &g_origDeleteFileA);
+    HookFileApi("MoveFileW",            HookMoveFileW,            &g_origMoveFileW);
+    HookFileApi("MoveFileA",            HookMoveFileA,            &g_origMoveFileA);
+    HookFileApi("MoveFileExW",          HookMoveFileExW,          &g_origMoveFileExW);
+    HookFileApi("MoveFileExA",          HookMoveFileExA,          &g_origMoveFileExA);
+    HookFileApi("CopyFileW",            HookCopyFileW,            &g_origCopyFileW);
+    HookFileApi("CopyFileA",            HookCopyFileA,            &g_origCopyFileA);
+    HookFileApi("CopyFileExW",          HookCopyFileExW,          &g_origCopyFileExW);
+    HookFileApi("CopyFileExA",          HookCopyFileExA,          &g_origCopyFileExA);
 
     LogHookInit(L"kernel32", "LoadLibraryW",
         MH_CreateHookApi(L"kernel32", "LoadLibraryW",

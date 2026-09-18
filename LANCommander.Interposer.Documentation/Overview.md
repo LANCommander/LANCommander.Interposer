@@ -12,6 +12,7 @@ The LANCommander Interposer is a set of Windows API hooks designed to make games
 - FastDL support
 - Rich presence (Discord)
 - DirectInput compatibility and device filtering
+- Network adapter filtering
 
 ## Objective
 While this project is under the LANCommander branding, its functionality and codebase live outside the LANCommander client/server. This compatibility shim was created solely to normalize the way games function within a Windows environment. With around 30 years of games released for post-DOS PCs and an endless amount of [standards](https://xkcd.com/927/) implemented by developers, Interposer was created specifically to tackle the following headaches:
@@ -42,4 +43,5 @@ Configuration and use of the Interposer is broken down on this site under the fo
 - [OS Version](/Interposer/OsVersion)
 - [Rich Presence](/Interposer/RichPresence)
 - [DirectInput](/Interposer/DirectInput)
+- [Network Adapters](/Interposer/NetworkAdapters)
 - [Plugins](/Interposer/Plugins/Overview)

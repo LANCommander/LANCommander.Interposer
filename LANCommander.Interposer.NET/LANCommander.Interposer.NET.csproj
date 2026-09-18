@@ -19,8 +19,8 @@
     <Owners>pathartl</Owners>
     <Company>LANCommander</Company>
     <Copyright>Copyright © LANCommander</Copyright>
-    <Description>.NET bindings for LANCommander Interposer; inject the hook DLL into game processes, manage runtime overrides (username, computer name, FastDL URL), and call Interposer plugin APIs (logging, config, virtual registry, rich presence) from managed code.</Description>
-    <PackageTags>lancommander;interposer;game;hook;injection;dll;registry;modding</PackageTags>
+    <Description>.NET bindings for LANCommander Interposer; inject the hook DLL into game processes, manage runtime overrides (username, computer name, FastDL URL), and call Interposer plugin APIs (logging, config, virtual registry, rich presence) from managed code. The injected DLL additionally provides file and DNS redirection, virtual registry emulation, DirectInput fixes, and OS version spoofing, all configured through .interposer\Config.yml.</Description>
+    <PackageTags>lancommander;interposer;game;hook;injection;dll;registry;modding;compatibility</PackageTags>
     <PackageLicenseExpression>MIT</PackageLicenseExpression>
     <PackageProjectUrl>https://github.com/LANCommander/LANCommander.Interposer</PackageProjectUrl>
     <RepositoryUrl>https://github.com/LANCommander/LANCommander.Interposer</RepositoryUrl>

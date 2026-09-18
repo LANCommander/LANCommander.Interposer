@@ -425,6 +425,83 @@ static void RunFileTests(const std::wstring& exeDir, const std::wstring& testTmp
             L"F-10: rule with an unresolved %%TOKEN%% does not redirect");
         if (h != INVALID_HANDLE_VALUE) CloseHandle(h);
     }
+
+    // The regression test for the KernelBase gap. This EXE links the dynamic
+    // UCRT, so the open below routes ucrtbase -> api-ms-win-core-file-l1-1-0 ->
+    // KernelBase!CreateFileW and never touches the kernel32 thunk. Hooking
+    // kernel32 alone leaves the CRT -- and therefore fopen, ifstream and
+    // std::filesystem -- completely invisible, so F-11 fails against such a build.
+    {
+        FILE* f = nullptr;
+        errno_t err = _wfopen_s(&f, L"C:\\TestGame\\Saves\\profile.dat", L"rb");
+
+        ASSERT(err == 0 && f != nullptr,
+            L"F-11: a CRT open is intercepted and redirected");
+
+        if (f)
+        {
+            char buf[64] = {};
+            size_t read = fread(buf, 1, sizeof(buf) - 1, f);
+            ASSERT(read == 23 && std::string(buf) == "redirect_target_content",
+                L"F-11: the CRT open reads the redirect target's contents");
+            fclose(f);
+        }
+    }
+
+    // F-12 / F-13: GetFileAttributesEx is what the CRT's _wstat and
+    // std::filesystem::file_size call. Both character sets must redirect.
+    {
+        WIN32_FILE_ATTRIBUTE_DATA data{};
+        BOOL ok = GetFileAttributesExW(L"C:\\TestGame\\Saves\\profile.dat", GetFileExInfoStandard, &data);
+        ASSERT(ok, L"F-12: GetFileAttributesExW redirect succeeds");
+        ASSERT(ok && data.nFileSizeLow == 23,
+            L"F-12: GetFileAttributesExW reports the redirect target's size");
+    }
+
+    {
+        WIN32_FILE_ATTRIBUTE_DATA data{};
+        BOOL ok = GetFileAttributesExA("C:\\TestGame\\Saves\\profile.dat", GetFileExInfoStandard, &data);
+        ASSERT(ok, L"F-13: GetFileAttributesExA redirect succeeds");
+        ASSERT(ok && data.nFileSizeLow == 23,
+            L"F-13: GetFileAttributesExA reports the redirect target's size");
+    }
+
+    // F-14: the modern open, which msvcp140 imports for std::filesystem.
+    {
+        HANDLE h = CreateFile2(L"C:\\TestGame\\Saves\\profile.dat", GENERIC_READ, FILE_SHARE_READ,
+            OPEN_EXISTING, nullptr);
+        ASSERT(h != INVALID_HANDLE_VALUE,
+            L"F-14: CreateFile2 redirect opens the redirected file");
+        if (h != INVALID_HANDLE_VALUE) CloseHandle(h);
+    }
+
+    // F-15: the real STL route, whichever of the hooked entry points it picks.
+    {
+        std::error_code ec;
+        bool exists = std::filesystem::exists(L"C:\\TestGame\\Saves\\profile.dat", ec);
+        ASSERT(exists, L"F-15: std::filesystem::exists sees the redirected file");
+
+        auto size = std::filesystem::file_size(L"C:\\TestGame\\Saves\\profile.dat", ec);
+        ASSERT(!ec && size == 23,
+            L"F-15: std::filesystem::file_size reports the redirect target's size");
+    }
+
+    // F-16: double-fire probes. Both paths are outside every configured rule, so
+    // each logs one plain verb rather than a [FILE REDIRECT] line -- the log tests
+    // then assert that "one" is literal. KernelBase's GetFileAttributesA and
+    // DeleteFileA call their exported wide counterparts, which are also hooked, so
+    // an ANSI hook that used its own trampoline would log each access twice.
+    {
+        SetLastError(0);
+        DWORD attr = GetFileAttributesA("C:\\NoMatch\\path\\dupe-attr.dat");
+        ASSERT(attr == INVALID_FILE_ATTRIBUTES,
+            L"F-16: GetFileAttributesA on a non-existent, non-matching path fails");
+
+        SetLastError(0);
+        BOOL deleted = DeleteFileA("C:\\NoMatch\\path\\dupe-del.dat");
+        ASSERT(!deleted,
+            L"F-16: DeleteFileA on a non-existent, non-matching path fails");
+    }
 }
 
 // ============================================================
@@ -1109,6 +1186,35 @@ static void RunLogTests(const std::wstring& logPath)
         L"L-27: Log contains [FILEREDIRECT] entry");
     ASSERT(log.find("unresolved %NOSUCHTOKEN%") != std::string::npos,
         L"L-28: unresolved token is reported by name");
+
+    // --- Hook placement (KernelBase-first) ---
+    //
+    // These assume Windows 7 or later, where KernelBase exists and the kernel32
+    // and advapi32 exports are thunks into it. On an older system the hooks fall
+    // back and these four would read kernel32!/advapi32! instead -- the same
+    // machine assumption the L-DI and L-AU blocks already make.
+
+    ASSERT(log.find("kernelbase!CreateFileW") != std::string::npos,
+        L"L-29: CreateFileW is hooked in KernelBase, not on the kernel32 thunk");
+    ASSERT(log.find("kernelbase!CreateFile2") != std::string::npos,
+        L"L-30: CreateFile2 is hooked");
+    ASSERT(log.find("kernelbase!GetFileAttributesExW") != std::string::npos,
+        L"L-31: GetFileAttributesExW is hooked");
+    ASSERT(log.find("kernelbase!RegOpenKeyExW") != std::string::npos,
+        L"L-32: RegOpenKeyExW is hooked in KernelBase, not on the advapi32 thunk");
+
+    // Pinned deliberately. KernelBase's LoadLibraryW tail-jumps onto the exported
+    // LoadLibraryExW, so hooking the loader family there would fire [DLL LOAD],
+    // the plugin callbacks and OnLibraryLoaded twice per load. A future
+    // consistency refactor should trip this test rather than ship that quietly.
+    ASSERT(log.find("kernel32!LoadLibraryW") != std::string::npos,
+        L"L-33: the loader family stays on kernel32");
+
+    // F-16 probed two paths no rule matches, so each must appear exactly once.
+    ASSERT(CountLinesContaining(log, "[FILE ATTR]", "dupe-attr.dat") == 1,
+        L"L-34: GetFileAttributesA logs one [FILE ATTR] line, not two");
+    ASSERT(CountLinesContaining(log, "[FILE DELETE]", "dupe-del.dat") == 1,
+        L"L-35: DeleteFileA logs one [FILE DELETE] line, not two");
 
     // R-01 opens HKLM\SOFTWARE\TestGame\1.0, which is in the virtual store.
     ASSERT(log.find("[REG HIT]") != std::string::npos,

@@ -79,6 +79,8 @@ interposer.IdentityQueried += (s, e) =>
     Console.WriteLine($"{e.IdentityType}: {e.Value}");
 ```
 
+`FileEventArgs.SecondaryPath` carries the fully resolved redirect target for `FILE REDIRECT` - capture groups and `%TOKEN%` references are already expanded. The redirect diagnostics emitted at `Logging.Level` `Debug` and `Trace` (`REDIRECT HIT`, `REDIRECT MISS`, `REDIRECT RULE`) go to the session log only and never reach this event stream.
+
 ## Requirements
 
 - **Windows** - The Interposer DLL and injection APIs are Windows-only.

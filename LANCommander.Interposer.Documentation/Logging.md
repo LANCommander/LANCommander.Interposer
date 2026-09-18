@@ -25,7 +25,7 @@ Logging:
 
 | Key | Type | Default | Description |
 |---|---|---|---|
-| `Files` | bool | `false` | Log file open and attribute operations. |
+| `Files` | bool | `false` | Log file open, attribute, enumeration, delete, move, copy and DLL-load operations. |
 | `Registry` | bool | `false` | Log registry open, read, write, and delete operations. |
 | `Downloads` | bool | `true` | Log file downloads from FastDL. |
 | `Plugins` | bool | `false` | Log plugin load, unload, error, and config registration events. |
@@ -77,12 +77,15 @@ The `->` portion only appears when a path was changed — for example, when a fi
 
 | Verb | Meaning |
 |---|---|
-| `[FILE READ]` | A file was opened for reading via `CreateFileW/A`. |
-| `[FILE WRITE]` | A file was opened for writing via `CreateFileW/A`. |
+| `[FILE READ]` | A file was opened for reading via `CreateFileW/A` or `CreateFile2`. |
+| `[FILE WRITE]` | A file was opened for writing via `CreateFileW/A` or `CreateFile2`. |
 | `[FILE R/W]` | A file was opened for both reading and writing. |
-| `[FILE ATTR]` | `GetFileAttributesW/A` was called on a path. |
+| `[FILE ATTR]` | `GetFileAttributesW/A` or `GetFileAttributesExW/A` was called on a path. |
 | `[FILE REDIRECT]` | A file open or attribute query was redirected by a rule. The line shows the original path and the destination path separated by `->`. |
-| `[FILE FIND]` | `FindFirstFileW/A` was called on a path. |
+| `[FILE FIND]` | `FindFirstFileW/A` or `FindFirstFileExW/A` was called on a path. |
+| `[FILE DELETE]` | A file was deleted via `DeleteFileW/A`. |
+| `[FILE MOVE]` | A file was moved or renamed via `MoveFileW/A` or `MoveFileExW/A`. |
+| `[FILE COPY]` | A file was copied via `CopyFileW/A` or `CopyFileExW/A`. |
 | `[DLL LOAD]` | A DLL was loaded via `LoadLibraryW/A` or `LoadLibraryExW/A`. |
 | `[FILE OVERLAY]` | A file open was served from the FastDL overlay cache instead of the game directory. |
 | `[FILEREDIRECT]` | A `FileRedirects` configuration warning: an unresolved `%TOKEN%` in a pattern, or a rule skipped for a malformed regex. Written once at startup regardless of `Logging.Files`, because a rule that never loads is otherwise invisible. |
