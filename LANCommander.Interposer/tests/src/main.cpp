@@ -18,6 +18,7 @@
 #include <string>
 #include <vector>
 #include <cstdio>
+#include <filesystem>
 
 // ============================================================
 // Test infrastructure
@@ -119,6 +120,29 @@ static std::string ReadFileAsUtf8(const std::wstring& path)
     ::ReadFile(h, out.data(), static_cast<DWORD>(out.size()), &rd, nullptr);
     CloseHandle(h);
     return out;
+}
+
+// Number of log lines containing both substrings. Used to prove a hook fires
+// exactly once -- a KernelBase ANSI export that calls its own exported wide
+// counterpart would otherwise log the same access twice.
+static size_t CountLinesContaining(const std::string& log, const char* a, const char* b)
+{
+    size_t count = 0;
+    size_t pos = 0;
+
+    while (pos < log.size())
+    {
+        size_t eol = log.find('\n', pos);
+        if (eol == std::string::npos) eol = log.size();
+
+        std::string line = log.substr(pos, eol - pos);
+        if (line.find(a) != std::string::npos && line.find(b) != std::string::npos)
+            ++count;
+
+        pos = eol + 1;
+    }
+
+    return count;
 }
 
 // Read a file as std::wstring, decoding UTF-16 LE BOM if present, else UTF-8.
@@ -276,6 +300,12 @@ static void WriteVirtualReg(const std::wstring& regPath)
     const std::string content =
         "Windows Registry Editor Version 5.00\r\n"
         "\r\n"
+        // The game's root key, declared bare. Without it TestGame is not a store
+        // key, and InVirtualSpace only relates ancestors and descendants -- so a
+        // sibling of 1.0 such as TestGame\DelKey would fall outside the virtual
+        // space and a create would try, and fail, against the real HKLM.
+        "[HKEY_LOCAL_MACHINE\\SOFTWARE\\TestGame]\r\n"
+        "\r\n"
         "[HKEY_LOCAL_MACHINE\\SOFTWARE\\TestGame\\1.0]\r\n"
         "\"PlayerName\"=\"TestSoldier\"\r\n"
         "\"Version\"=dword:00000001\r\n"
@@ -288,7 +318,24 @@ static void WriteVirtualReg(const std::wstring& regPath)
         // files, so a read of it must come back with this one.
         "[HKEY_LOCAL_MACHINE\\SOFTWARE\\TestGame\\Overlay]\r\n"
         "\"Shared\"=\"FromWrite\"\r\n"
-        "\"WriteOnly\"=\"OnlyInWriteLayer\"\r\n";
+        "\"WriteOnly\"=\"OnlyInWriteLayer\"\r\n"
+        "\r\n"
+        // RegGetValue's fixtures. Expand is a REG_EXPAND_SZ holding %TEMP%, which
+        // is set in every process, so the expanded form is never the literal.
+        "[HKEY_LOCAL_MACHINE\\SOFTWARE\\TestGame\\Get]\r\n"
+        "\"GetOnce\"=\"once\"\r\n"
+        "\"Expand\"=hex(2):25,00,54,00,45,00,4d,00,50,00,25,00,00,00\r\n"
+        "\r\n"
+        // Under HKCU rather than HKLM, so that a handle resolved through
+        // BuildPath's NtQueryKey tier has to survive the
+        // HKEY_USERS\<SID> -> HKEY_CURRENT_USER rewrite to find it.
+        "[HKEY_CURRENT_USER\\SOFTWARE\\TestGame\\User]\r\n"
+        "\"Marker\"=\"FromHkcu\"\r\n"
+        "\r\n"
+        // A key the base layer defines, deleted by this layer before the game
+        // ever runs. Pre-seeding it is what lets the reader and writer halves of
+        // a key tombstone be tested with no delete hook involved at all.
+        "[-HKEY_LOCAL_MACHINE\\SOFTWARE\\TestGame\\Tomb\\Preseeded]\r\n";
     WriteTextFile(regPath, content);
 }
 
@@ -306,7 +353,26 @@ static void WriteRegistryBaseReg(const std::wstring& basePath)
         "\"Doomed\"=\"DeleteMe\"\r\n"
         "\r\n"
         "[HKEY_LOCAL_MACHINE\\SOFTWARE\\TestGame\\BaseKey]\r\n"
-        "\"Marker\"=\"OnlyInBaseLayer\"\r\n";
+        "\"Marker\"=\"OnlyInBaseLayer\"\r\n"
+        "\r\n"
+        // The key-tombstone fixtures. Tomb carries a bare header of its own so
+        // that it is a store key and therefore an ancestor of every child below
+        // -- without it a deleted child would not be in the virtual space and a
+        // follow-up read would fall through to the real registry, passing for
+        // entirely the wrong reason.
+        //
+        // It needs two surviving children for the same reason: once Tomb\Doomed
+        // leaves the flat store, Tomb is what keeps the branch virtual.
+        "[HKEY_LOCAL_MACHINE\\SOFTWARE\\TestGame\\Tomb]\r\n"
+        "\r\n"
+        "[HKEY_LOCAL_MACHINE\\SOFTWARE\\TestGame\\Tomb\\Doomed]\r\n"
+        "\"Marker\"=\"TombstoneMe\"\r\n"
+        "\r\n"
+        "[HKEY_LOCAL_MACHINE\\SOFTWARE\\TestGame\\Tomb\\Kept]\r\n"
+        "\"Marker\"=\"stays\"\r\n"
+        "\r\n"
+        "[HKEY_LOCAL_MACHINE\\SOFTWARE\\TestGame\\Tomb\\Preseeded]\r\n"
+        "\"Marker\"=\"NeverLoaded\"\r\n";
     WriteTextFile(basePath, content);
 }
 
@@ -768,6 +834,745 @@ static void RunRegistryTests()
             L"R-18: real registry key HKLM\\SOFTWARE\\Microsoft opens (passthrough)");
         if (hReal) RegCloseKey(hReal);
     }
+
+    // ---- The composite APIs: hKey + lpSubKey, opened internally. --------------
+    // Every one of these would have reached the real registry before the
+    // composite hooks existed, because the internal open hands the nested leaf
+    // hook a handle it never tracked.
+
+    const wchar_t* kVersionKey = L"SOFTWARE\\TestGame\\1.0";
+    const wchar_t* kGetKey     = L"SOFTWARE\\TestGame\\Get";
+
+    // A real HKCU key for the passthrough assertions. Deliberately not under
+    // TestGame: it has to sit outside the virtual space, and InVirtualSpace only
+    // relates ancestors and descendants, so diverging at the third segment from
+    // HKEY_CURRENT_USER\SOFTWARE\TESTGAME\USER is enough. Removed by
+    // CleanRealProbeKey after the DLL is unloaded.
+    const wchar_t* kRealProbeKey = L"Software\\LANCommanderInterposerTest";
+
+    // R-19: RegGetValueW against a virtual key, through the subkey path.
+    {
+        DWORD type = 0, cb = 0;
+
+        LSTATUS st = RegGetValueW(HKEY_LOCAL_MACHINE, kVersionKey, L"PlayerName",
+            RRF_RT_ANY, &type, nullptr, &cb);
+
+        ASSERT(st == ERROR_SUCCESS && cb > 0,
+            L"R-19a: RegGetValueW size query succeeds (pvData == NULL)");
+        ASSERT(type == REG_SZ, L"R-19b: RegGetValueW reports REG_SZ");
+
+        std::vector<BYTE> buf(cb);
+        DWORD cb2 = cb;
+
+        st = RegGetValueW(HKEY_LOCAL_MACHINE, kVersionKey, L"PlayerName",
+            RRF_RT_ANY, nullptr, buf.data(), &cb2);
+
+        ASSERT(st == ERROR_SUCCESS
+            && wcscmp(reinterpret_cast<const wchar_t*>(buf.data()), L"TestSoldier") == 0,
+            L"R-19c: RegGetValueW returns the virtual value, not the real one");
+    }
+
+    // R-19d: GetOnce is read exactly once, here and nowhere else, because L-36
+    // counts the [REG READ] lines it produces to pin the once-only rule on the
+    // virtual branch of a composite.
+    {
+        wchar_t buf[32]{};
+        DWORD cb = sizeof(buf);
+
+        LSTATUS st = RegGetValueW(HKEY_LOCAL_MACHINE, kGetKey, L"GetOnce",
+            RRF_RT_ANY, nullptr, buf, &cb);
+
+        ASSERT(st == ERROR_SUCCESS && wcscmp(buf, L"once") == 0,
+            L"R-19d: RegGetValueW reads a value only this case touches");
+    }
+
+    // R-20/R-21: the RRF_RT_* type filter.
+    {
+        wchar_t buf[64]{};
+        DWORD cb = sizeof(buf);
+
+        LSTATUS st = RegGetValueW(HKEY_LOCAL_MACHINE, kVersionKey, L"PlayerName",
+            RRF_RT_REG_DWORD, nullptr, buf, &cb);
+
+        ASSERT(st == ERROR_UNSUPPORTED_TYPE,
+            L"R-20: a type filter the value does not match is ERROR_UNSUPPORTED_TYPE");
+
+        cb = sizeof(buf);
+        st = RegGetValueW(HKEY_LOCAL_MACHINE, kVersionKey, L"PlayerName",
+            RRF_RT_REG_SZ, nullptr, buf, &cb);
+
+        ASSERT(st == ERROR_SUCCESS, L"R-21: the matching type filter succeeds");
+    }
+
+    // R-22: a buffer too small reports the size it needed.
+    {
+        BYTE buf[2]{};
+        DWORD cb = sizeof(buf);
+
+        LSTATUS st = RegGetValueW(HKEY_LOCAL_MACHINE, kVersionKey, L"PlayerName",
+            RRF_RT_ANY, nullptr, buf, &cb);
+
+        ASSERT(st == ERROR_MORE_DATA, L"R-22a: a short buffer is ERROR_MORE_DATA");
+        ASSERT(cb > sizeof(buf),      L"R-22b: and pcbData is raised to what was needed");
+    }
+
+    // R-23: REG_EXPAND_SZ. Expanded by default and reported as REG_SZ, which is
+    // what Windows does; RRF_NOEXPAND hands back the stored form.
+    {
+        wchar_t buf[512]{};
+        DWORD type = 0, cb = sizeof(buf);
+
+        LSTATUS st = RegGetValueW(HKEY_LOCAL_MACHINE, kGetKey, L"Expand",
+            RRF_RT_ANY, &type, buf, &cb);
+
+        ASSERT(st == ERROR_SUCCESS && type == REG_SZ && wcscmp(buf, L"%TEMP%") != 0,
+            L"R-23a: REG_EXPAND_SZ is expanded and reported as REG_SZ");
+
+        wchar_t raw[512]{};
+        type = 0;
+        cb   = sizeof(raw);
+
+        st = RegGetValueW(HKEY_LOCAL_MACHINE, kGetKey, L"Expand",
+            RRF_NOEXPAND | RRF_RT_REG_EXPAND_SZ, &type, raw, &cb);
+
+        ASSERT(st == ERROR_SUCCESS && type == REG_EXPAND_SZ && wcscmp(raw, L"%TEMP%") == 0,
+            L"R-23b: RRF_NOEXPAND returns the unexpanded value and its real type");
+    }
+
+    // R-23c: the same call against a *real* REG_EXPAND_SZ value, so that the one
+    // fidelity judgement in the RRF_* handling is measured rather than assumed:
+    // RRF_RT_ANY has the REG_EXPAND_SZ bit set, and if Windows really rejected
+    // that pair then RRF_RT_ANY could never be used on an expandable value at all.
+    // kRealProbeKey is outside the virtual space, so this goes to the trampoline.
+    {
+        HKEY hProbe = nullptr;
+
+        if (RegCreateKeyExW(HKEY_CURRENT_USER, kRealProbeKey, 0, nullptr,
+                REG_OPTION_NON_VOLATILE, KEY_READ | KEY_WRITE, nullptr, &hProbe, nullptr)
+                    == ERROR_SUCCESS && hProbe)
+        {
+            const wchar_t* expandable = L"%TEMP%";
+
+            RegSetValueExW(hProbe, L"RealExpand", 0, REG_EXPAND_SZ,
+                reinterpret_cast<const BYTE*>(expandable),
+                static_cast<DWORD>((wcslen(expandable) + 1) * sizeof(wchar_t)));
+
+            RegCloseKey(hProbe);
+
+            wchar_t buf[512]{};
+            DWORD type = 0, cb = sizeof(buf);
+
+            LSTATUS st = RegGetValueW(HKEY_CURRENT_USER, kRealProbeKey, L"RealExpand",
+                RRF_RT_ANY, &type, buf, &cb);
+
+            ASSERT(st == ERROR_SUCCESS && type == REG_SZ,
+                L"R-23c: the real RegGetValueW accepts RRF_RT_ANY on a REG_EXPAND_SZ value");
+        }
+        else
+            ASSERT(false, L"R-23c: could not create the real-registry probe key");
+    }
+
+    // R-24: the ANSI entry point, including the terminator in the byte count.
+    {
+        char buf[64]{};
+        DWORD cb = sizeof(buf);
+
+        LSTATUS st = RegGetValueA(HKEY_LOCAL_MACHINE, "SOFTWARE\\TestGame\\1.0",
+            "PlayerName", RRF_RT_ANY, nullptr, buf, &cb);
+
+        ASSERT(st == ERROR_SUCCESS && strcmp(buf, "TestSoldier") == 0,
+            L"R-24a: RegGetValueA returns the virtual value as ANSI");
+        ASSERT(cb == strlen("TestSoldier") + 1,
+            L"R-24b: the reported size includes the terminator");
+    }
+
+    // R-25: a missing value, and RRF_ZEROONFAILURE against the caller's buffer.
+    {
+        BYTE buf[8];
+        memset(buf, 0xCD, sizeof(buf));
+        DWORD cb = sizeof(buf);
+
+        LSTATUS st = RegGetValueW(HKEY_LOCAL_MACHINE, kVersionKey, L"NoSuchValue",
+            RRF_RT_ANY | RRF_ZEROONFAILURE, nullptr, buf, &cb);
+
+        ASSERT(st == ERROR_FILE_NOT_FOUND,
+            L"R-25a: a missing value under a virtual key is ERROR_FILE_NOT_FOUND");
+
+        bool zeroed = true;
+        for (BYTE b : buf) if (b != 0) zeroed = false;
+
+        ASSERT(zeroed, L"R-25b: RRF_ZEROONFAILURE zeroes the caller's buffer");
+    }
+
+    // R-26: RegSetKeyValueW into an existing virtual key, read back through the
+    // composite that would previously have read the real registry.
+    {
+        const wchar_t* written = L"SetByKeyValue";
+        DWORD cb = static_cast<DWORD>((wcslen(written) + 1) * sizeof(wchar_t));
+
+        LSTATUS st = RegSetKeyValueW(HKEY_LOCAL_MACHINE, kGetKey, L"SetKeyValue",
+            REG_SZ, written, cb);
+
+        wchar_t buf[64]{};
+        DWORD read = sizeof(buf);
+
+        if (st == ERROR_SUCCESS)
+            st = RegGetValueW(HKEY_LOCAL_MACHINE, kGetKey, L"SetKeyValue",
+                RRF_RT_ANY, nullptr, buf, &read);
+
+        ASSERT(st == ERROR_SUCCESS && wcscmp(buf, written) == 0,
+            L"R-26: RegSetKeyValueW writes into the virtual store and reads back");
+    }
+
+    // R-27: and it creates the subkey when it is missing, as the real API does.
+    {
+        DWORD value = 7;
+
+        LSTATUS st = RegSetKeyValueW(HKEY_LOCAL_MACHINE, L"SOFTWARE\\TestGame\\Get\\Made",
+            L"Made", REG_DWORD, &value, sizeof(value));
+
+        DWORD readBack = 0, cb = sizeof(readBack);
+
+        if (st == ERROR_SUCCESS)
+            st = RegGetValueW(HKEY_LOCAL_MACHINE, L"SOFTWARE\\TestGame\\Get\\Made",
+                L"Made", RRF_RT_REG_DWORD, nullptr, &readBack, &cb);
+
+        ASSERT(st == ERROR_SUCCESS && readBack == 7,
+            L"R-27: RegSetKeyValueW creates the subkey it was given");
+    }
+
+    // R-28: RegDeleteKeyValueW takes it away again.
+    {
+        LSTATUS st = RegDeleteKeyValueW(HKEY_LOCAL_MACHINE,
+            L"SOFTWARE\\TestGame\\Get\\Made", L"Made");
+
+        ASSERT(st == ERROR_SUCCESS, L"R-28a: RegDeleteKeyValueW succeeds");
+
+        DWORD readBack = 0, cb = sizeof(readBack);
+
+        st = RegGetValueW(HKEY_LOCAL_MACHINE, L"SOFTWARE\\TestGame\\Get\\Made",
+            L"Made", RRF_RT_ANY, nullptr, &readBack, &cb);
+
+        ASSERT(st == ERROR_FILE_NOT_FOUND,
+            L"R-28b: and the value no longer reads back");
+    }
+
+    // R-34: RegQueryMultipleValues. Implemented on NtQueryMultipleValueKey, so
+    // nothing about it reaches a leaf hook.
+    {
+        HKEY hk34 = nullptr;
+
+        if (RegOpenKeyExW(HKEY_LOCAL_MACHINE, kVersionKey, 0, KEY_READ, &hk34)
+                == ERROR_SUCCESS && hk34)
+        {
+            wchar_t namePlayer[]  = L"PlayerName";
+            wchar_t nameVersion[] = L"Version";
+
+            VALENTW entries[2]{};
+            entries[0].ve_valuename = namePlayer;
+            entries[1].ve_valuename = nameVersion;
+
+            DWORD total = 0;
+            LSTATUS st = RegQueryMultipleValuesW(hk34, entries, 2, nullptr, &total);
+
+            ASSERT(st == ERROR_MORE_DATA && total > 0,
+                L"R-34a: a null buffer reports the total size as ERROR_MORE_DATA");
+
+            std::vector<BYTE> buf(total);
+            DWORD size = total;
+
+            st = RegQueryMultipleValuesW(hk34, entries, 2,
+                reinterpret_cast<LPWSTR>(buf.data()), &size);
+
+            ASSERT(st == ERROR_SUCCESS, L"R-34b: the real pass succeeds");
+            ASSERT(entries[0].ve_type == REG_SZ && entries[1].ve_type == REG_DWORD,
+                L"R-34c: each entry comes back with its stored type");
+
+            bool stringOk = st == ERROR_SUCCESS && entries[0].ve_valueptr != 0
+                && wcscmp(reinterpret_cast<const wchar_t*>(entries[0].ve_valueptr),
+                          L"TestSoldier") == 0;
+
+            ASSERT(stringOk, L"R-34d: ve_valueptr points at the value inside the buffer");
+            ASSERT(size == entries[0].ve_valuelen + entries[1].ve_valuelen,
+                L"R-34e: ldwTotsize is the sum of the entry lengths");
+
+            RegCloseKey(hk34);
+        }
+        else
+            ASSERT(false, L"R-34a: could not open the key for RegQueryMultipleValues");
+    }
+
+    // ---- The delete family. ----------------------------------------------------
+    // RegDeleteKeyW was the total miss: advapi32 implements it with NtOpenKey and
+    // NtDeleteKey inline, so before this it reached no hook of ours at all.
+
+    auto createKey = [](const wchar_t* subKey) -> bool
+    {
+        HKEY hk = nullptr;
+
+        LSTATUS st = RegCreateKeyExW(HKEY_LOCAL_MACHINE, subKey, 0, nullptr,
+            REG_OPTION_NON_VOLATILE, KEY_ALL_ACCESS, nullptr, &hk, nullptr);
+
+        if (hk) RegCloseKey(hk);
+
+        return st == ERROR_SUCCESS;
+    };
+
+    // R-29: a key with a subkey cannot be deleted. Windows reaches this through
+    // NtDeleteKey's STATUS_CANNOT_DELETE, which surfaces as ERROR_ACCESS_DENIED.
+    {
+        createKey(L"SOFTWARE\\TestGame\\DelKey");
+        createKey(L"SOFTWARE\\TestGame\\DelKey\\Child");
+
+        LSTATUS st = RegDeleteKeyW(HKEY_LOCAL_MACHINE, L"SOFTWARE\\TestGame\\DelKey");
+
+        ASSERT(st == ERROR_ACCESS_DENIED,
+            L"R-29: RegDeleteKeyW on a key with subkeys is ERROR_ACCESS_DENIED");
+    }
+
+    // R-30: the childless one goes, and only once.
+    {
+        LSTATUS st = RegDeleteKeyW(HKEY_LOCAL_MACHINE,
+            L"SOFTWARE\\TestGame\\DelKey\\Child");
+
+        ASSERT(st == ERROR_SUCCESS, L"R-30a: RegDeleteKeyW deletes a childless key");
+
+        st = RegDeleteKeyW(HKEY_LOCAL_MACHINE, L"SOFTWARE\\TestGame\\DelKey\\Child");
+
+        ASSERT(st == ERROR_FILE_NOT_FOUND,
+            L"R-30b: deleting it again is ERROR_FILE_NOT_FOUND, not a passthrough");
+
+        // Deliberately not asserting on a re-open: HookRegOpenKeyExW succeeds for
+        // any path in the virtual space whether or not the exact key is in the
+        // store, which is existing and intended behaviour. The enumeration is what
+        // actually shows the key is gone.
+        HKEY hParent = nullptr;
+
+        if (RegOpenKeyExW(HKEY_LOCAL_MACHINE, L"SOFTWARE\\TestGame\\DelKey",
+                0, KEY_READ, &hParent) == ERROR_SUCCESS && hParent)
+        {
+            wchar_t name[256];
+            DWORD cch = ARRAYSIZE(name);
+
+            st = RegEnumKeyExW(hParent, 0, name, &cch, nullptr, nullptr, nullptr, nullptr);
+
+            RegCloseKey(hParent);
+        }
+
+        ASSERT(st == ERROR_NO_MORE_ITEMS,
+            L"R-30c: and the parent now enumerates no subkeys");
+    }
+
+    // R-31: RegDeleteKeyEx, with a WOW64 view the virtual store does not have.
+    {
+        createKey(L"SOFTWARE\\TestGame\\DelKeyEx");
+
+        LSTATUS st = RegDeleteKeyExW(HKEY_LOCAL_MACHINE, L"SOFTWARE\\TestGame\\DelKeyEx",
+            KEY_WOW64_64KEY, 0);
+
+        ASSERT(st == ERROR_SUCCESS,
+            L"R-31: RegDeleteKeyExW deletes the key and ignores the WOW64 view");
+    }
+
+    // R-32: RegDeleteTreeW with a subkey path takes the named key and everything
+    // under it.
+    {
+        createKey(L"SOFTWARE\\TestGame\\Tree");
+        createKey(L"SOFTWARE\\TestGame\\Tree\\A");
+        createKey(L"SOFTWARE\\TestGame\\Tree\\A\\B");
+
+        DWORD marker = 1;
+        RegSetKeyValueW(HKEY_LOCAL_MACHINE, L"SOFTWARE\\TestGame\\Tree\\A\\B",
+            L"Deep", REG_DWORD, &marker, sizeof(marker));
+
+        LSTATUS st = RegDeleteTreeW(HKEY_LOCAL_MACHINE, L"SOFTWARE\\TestGame\\Tree");
+
+        ASSERT(st == ERROR_SUCCESS, L"R-32a: RegDeleteTreeW succeeds");
+
+        DWORD readBack = 0, cb = sizeof(readBack);
+
+        st = RegGetValueW(HKEY_LOCAL_MACHINE, L"SOFTWARE\\TestGame\\Tree\\A\\B",
+            L"Deep", RRF_RT_ANY, nullptr, &readBack, &cb);
+
+        ASSERT(st == ERROR_FILE_NOT_FOUND,
+            L"R-32b: a value three levels down the deleted tree is gone");
+    }
+
+    // R-33: the other shape of the same API. A null lpSubKey empties hKey but
+    // leaves hKey itself in place -- getting this backwards would silently delete
+    // a key the game expects to still be there.
+    {
+        createKey(L"SOFTWARE\\TestGame\\Tree2");
+        createKey(L"SOFTWARE\\TestGame\\Tree2\\C");
+
+        DWORD marker = 1;
+        RegSetKeyValueW(HKEY_LOCAL_MACHINE, L"SOFTWARE\\TestGame\\Tree2",
+            L"Surface", REG_DWORD, &marker, sizeof(marker));
+
+        HKEY hTree2 = nullptr;
+        LSTATUS st = RegOpenKeyExW(HKEY_LOCAL_MACHINE, L"SOFTWARE\\TestGame\\Tree2",
+            0, KEY_ALL_ACCESS, &hTree2);
+
+        if (st == ERROR_SUCCESS && hTree2)
+        {
+            st = RegDeleteTreeW(hTree2, nullptr);
+
+            ASSERT(st == ERROR_SUCCESS,
+                L"R-33a: RegDeleteTreeW with a null subkey succeeds");
+
+            DWORD subKeys = 0, values = 0;
+
+            LSTATUS info = RegQueryInfoKeyW(hTree2, nullptr, nullptr, nullptr,
+                &subKeys, nullptr, nullptr, &values, nullptr, nullptr, nullptr, nullptr);
+
+            ASSERT(info == ERROR_SUCCESS && subKeys == 0 && values == 0,
+                L"R-33b: the key is left with no subkeys and no values");
+
+            RegCloseKey(hTree2);
+        }
+        else
+            ASSERT(false, L"R-33a: could not open Tree2");
+
+        // ...and the key itself survives, which is the whole point.
+        HKEY hGame = nullptr;
+        bool sawTree2 = false, sawTree = false;
+
+        if (RegOpenKeyExW(HKEY_LOCAL_MACHINE, L"SOFTWARE\\TestGame", 0, KEY_READ, &hGame)
+                == ERROR_SUCCESS && hGame)
+        {
+            wchar_t name[256];
+
+            for (DWORD i = 0; ; ++i)
+            {
+                DWORD cch = ARRAYSIZE(name);
+
+                if (RegEnumKeyExW(hGame, i, name, &cch, nullptr, nullptr, nullptr, nullptr)
+                        != ERROR_SUCCESS)
+                    break;
+
+                if (_wcsicmp(name, L"Tree2") == 0) sawTree2 = true;
+                if (_wcsicmp(name, L"Tree") == 0)  sawTree  = true;
+            }
+
+            RegCloseKey(hGame);
+        }
+
+        ASSERT(sawTree2 && !sawTree,
+            L"R-33c: a null subkey empties the key but does not delete it, unlike R-32");
+    }
+
+    // ---- Hive roots and handles we did not issue. -------------------------------
+
+    // R-35: RegOpenCurrentUser hands back a hive root. Before it was hooked the
+    // handle was untracked, so every key opened through it -- including virtual
+    // ones -- went to the real registry.
+    {
+        HKEY hUser = nullptr;
+        LSTATUS st = RegOpenCurrentUser(KEY_READ, &hUser);
+
+        ASSERT(st == ERROR_SUCCESS && hUser != nullptr,
+            L"R-35a: RegOpenCurrentUser succeeds");
+
+        std::wstring value;
+
+        if (hUser)
+        {
+            HKEY hGameUser = nullptr;
+
+            if (RegOpenKeyExW(hUser, L"SOFTWARE\\TestGame\\User", 0, KEY_READ, &hGameUser)
+                    == ERROR_SUCCESS && hGameUser)
+            {
+                wchar_t buf[64]{};
+                DWORD cb = sizeof(buf);
+
+                if (RegQueryValueExW(hGameUser, L"Marker", nullptr, nullptr,
+                        reinterpret_cast<LPBYTE>(buf), &cb) == ERROR_SUCCESS)
+                    value = buf;
+
+                RegCloseKey(hGameUser);
+            }
+
+            RegCloseKey(hUser);
+        }
+
+        ASSERT(value == L"FromHkcu",
+            L"R-35b: a virtual key opened through that root is served from the store");
+    }
+
+    // R-36: BuildPath's NtQueryKey tier. A duplicated handle is a perfectly valid
+    // key handle that g_realHandles has never seen, which is the same position a
+    // handle the game opened before injection is in. R-36 proves the tier did not
+    // break passthrough; L-42 proves it actually resolved the path.
+    {
+        HKEY hSystem = nullptr;
+        LSTATUS st = RegOpenKeyExW(HKEY_LOCAL_MACHINE, L"SYSTEM", 0, KEY_READ, &hSystem);
+
+        HANDLE hDuplicate = nullptr;
+
+        if (st == ERROR_SUCCESS && hSystem)
+            DuplicateHandle(GetCurrentProcess(), hSystem, GetCurrentProcess(),
+                &hDuplicate, 0, FALSE, DUPLICATE_SAME_ACCESS);
+
+        HKEY hControlSet = nullptr;
+
+        st = hDuplicate
+            ? RegOpenKeyExW(reinterpret_cast<HKEY>(hDuplicate), L"CurrentControlSet",
+                  0, KEY_READ, &hControlSet)
+            : ERROR_INVALID_HANDLE;
+
+        ASSERT(st == ERROR_SUCCESS,
+            L"R-36: a subkey opens through an untracked handle (passthrough intact)");
+
+        if (hControlSet) RegCloseKey(hControlSet);
+        if (hDuplicate)  CloseHandle(hDuplicate);
+        if (hSystem)     RegCloseKey(hSystem);
+    }
+
+    // R-36b: the same tier against HKCU, which is where the HKEY_USERS\<SID>
+    // rewrite earns its place -- NtQueryKey reports the SID form, and the store is
+    // keyed on HKEY_CURRENT_USER. TierFour does not exist, so this only has to be
+    // logged, not to succeed; L-43 is the assertion that matters.
+    {
+        HKEY hProbe = nullptr;
+
+        if (RegOpenKeyExW(HKEY_CURRENT_USER, kRealProbeKey, 0, KEY_READ, &hProbe)
+                == ERROR_SUCCESS && hProbe)
+        {
+            HANDLE hDuplicate = nullptr;
+
+            DuplicateHandle(GetCurrentProcess(), hProbe, GetCurrentProcess(),
+                &hDuplicate, 0, FALSE, DUPLICATE_SAME_ACCESS);
+
+            if (hDuplicate)
+            {
+                HKEY hTierFour = nullptr;
+
+                RegOpenKeyExW(reinterpret_cast<HKEY>(hDuplicate), L"TierFour",
+                    0, KEY_READ, &hTierFour);
+
+                if (hTierFour) RegCloseKey(hTierFour);
+
+                CloseHandle(hDuplicate);
+            }
+
+            RegCloseKey(hProbe);
+
+            ASSERT(true, L"R-36b: an HKCU subkey open through an untracked handle is logged");
+        }
+        else
+            ASSERT(false, L"R-36b: could not open the real-registry probe key");
+    }
+
+    // R-37: RegFlushKey on a virtual handle. Never reaches the trampoline, which
+    // would reject our heap-pointer HKEY with ERROR_INVALID_HANDLE.
+    {
+        HKEY hk37 = nullptr;
+        LSTATUS st = RegOpenKeyExW(HKEY_LOCAL_MACHINE, kVersionKey, 0, KEY_READ, &hk37);
+
+        if (st == ERROR_SUCCESS && hk37)
+        {
+            st = RegFlushKey(hk37);
+            RegCloseKey(hk37);
+        }
+
+        ASSERT(st == ERROR_SUCCESS, L"R-37: RegFlushKey on a virtual handle succeeds");
+    }
+
+    // R-38: change notification. Registering succeeds and the event is never
+    // signalled, because nothing outside this process can change the store.
+    {
+        HKEY hk38 = nullptr;
+        HANDLE hEvent = CreateEventW(nullptr, TRUE, FALSE, nullptr);
+        LSTATUS st = RegOpenKeyExW(HKEY_LOCAL_MACHINE, kVersionKey, 0, KEY_NOTIFY, &hk38);
+
+        if (st == ERROR_SUCCESS && hk38)
+        {
+            st = RegNotifyChangeKeyValue(hk38, TRUE, REG_NOTIFY_CHANGE_LAST_SET,
+                hEvent, TRUE);
+
+            ASSERT(st == ERROR_SUCCESS,
+                L"R-38a: RegNotifyChangeKeyValue on a virtual handle registers");
+
+            ASSERT(WaitForSingleObject(hEvent, 0) == WAIT_TIMEOUT,
+                L"R-38b: and the event is not signalled");
+
+            RegCloseKey(hk38);
+        }
+        else
+            ASSERT(false, L"R-38a: could not open the key for RegNotifyChangeKeyValue");
+
+        if (hEvent) CloseHandle(hEvent);
+    }
+
+    // R-39: RegOpenKeyTransactedW. A null transaction would fail the real API, so
+    // this passes only because the virtual branch ignores the transaction -- which
+    // is exactly the semantic being pinned, with no dependency on ktmw32.
+    {
+        HKEY hk39 = nullptr;
+        LSTATUS st = RegOpenKeyTransactedW(HKEY_LOCAL_MACHINE, kVersionKey, 0, KEY_READ,
+            &hk39, nullptr, nullptr);
+
+        std::wstring value;
+
+        if (st == ERROR_SUCCESS && hk39)
+        {
+            wchar_t buf[64]{};
+            DWORD cb = sizeof(buf);
+
+            if (RegQueryValueExW(hk39, L"PlayerName", nullptr, nullptr,
+                    reinterpret_cast<LPBYTE>(buf), &cb) == ERROR_SUCCESS)
+                value = buf;
+
+            RegCloseKey(hk39);
+        }
+
+        ASSERT(st == ERROR_SUCCESS && value == L"TestSoldier",
+            L"R-39: RegOpenKeyTransactedW serves a virtual key, ignoring the transaction");
+    }
+
+    // R-40: and the transacted create and delete round-trip the same way.
+    {
+        HKEY hk40 = nullptr;
+        DWORD disposition = 0;
+
+        LSTATUS st = RegCreateKeyTransactedW(HKEY_LOCAL_MACHINE,
+            L"SOFTWARE\\TestGame\\Transacted", 0, nullptr, REG_OPTION_NON_VOLATILE,
+            KEY_ALL_ACCESS, nullptr, &hk40, &disposition, nullptr, nullptr);
+
+        ASSERT(st == ERROR_SUCCESS && disposition == REG_CREATED_NEW_KEY,
+            L"R-40a: RegCreateKeyTransactedW creates the key in the store");
+
+        if (hk40) RegCloseKey(hk40);
+
+        st = RegDeleteKeyTransactedW(HKEY_LOCAL_MACHINE,
+            L"SOFTWARE\\TestGame\\Transacted", 0, 0, nullptr, nullptr);
+
+        ASSERT(st == ERROR_SUCCESS,
+            L"R-40b: RegDeleteKeyTransactedW deletes it again");
+    }
+
+    // ---- RegCopyTreeW, in the three combinations that touch the store. ---------
+
+    auto openVirtual = [](const wchar_t* subKey) -> HKEY
+    {
+        HKEY hk = nullptr;
+
+        RegCreateKeyExW(HKEY_LOCAL_MACHINE, subKey, 0, nullptr, REG_OPTION_NON_VOLATILE,
+            KEY_ALL_ACCESS, nullptr, &hk, nullptr);
+
+        return hk;
+    };
+
+    // R-41: virtual -> virtual, including a child one level down.
+    {
+        const wchar_t* top = L"CopiedTop";
+
+        RegSetKeyValueW(HKEY_LOCAL_MACHINE, L"SOFTWARE\\TestGame\\CopySrc", L"Top",
+            REG_SZ, top, static_cast<DWORD>((wcslen(top) + 1) * sizeof(wchar_t)));
+
+        const wchar_t* deep = L"CopiedDeep";
+
+        RegSetKeyValueW(HKEY_LOCAL_MACHINE, L"SOFTWARE\\TestGame\\CopySrc\\Child",
+            L"Deep", REG_SZ, deep,
+            static_cast<DWORD>((wcslen(deep) + 1) * sizeof(wchar_t)));
+
+        HKEY hDst = openVirtual(L"SOFTWARE\\TestGame\\CopyDst");
+
+        LSTATUS st = hDst
+            ? RegCopyTreeW(HKEY_LOCAL_MACHINE, L"SOFTWARE\\TestGame\\CopySrc", hDst)
+            : ERROR_INVALID_HANDLE;
+
+        if (hDst) RegCloseKey(hDst);
+
+        ASSERT(st == ERROR_SUCCESS, L"R-41a: RegCopyTreeW virtual to virtual succeeds");
+
+        wchar_t buf[64]{};
+        DWORD cb = sizeof(buf);
+
+        st = RegGetValueW(HKEY_LOCAL_MACHINE, L"SOFTWARE\\TestGame\\CopyDst", L"Top",
+            RRF_RT_ANY, nullptr, buf, &cb);
+
+        ASSERT(st == ERROR_SUCCESS && wcscmp(buf, top) == 0,
+            L"R-41b: the root's values arrive at the destination");
+
+        wchar_t deepBuf[64]{};
+        cb = sizeof(deepBuf);
+
+        st = RegGetValueW(HKEY_LOCAL_MACHINE, L"SOFTWARE\\TestGame\\CopyDst\\Child",
+            L"Deep", RRF_RT_ANY, nullptr, deepBuf, &cb);
+
+        ASSERT(st == ERROR_SUCCESS && wcscmp(deepBuf, deep) == 0,
+            L"R-41c: and so does the subkey one level down");
+    }
+
+    // R-42: real -> virtual. The genuinely useful direction: seeding a virtual key
+    // from whatever the machine already has. kRealProbeKey is outside the virtual
+    // space, so the source walk goes through the trampolines.
+    {
+        const wchar_t* probe = L"FromRealRegistry";
+
+        RegSetKeyValueW(HKEY_CURRENT_USER, kRealProbeKey, L"RealProbe", REG_SZ, probe,
+            static_cast<DWORD>((wcslen(probe) + 1) * sizeof(wchar_t)));
+
+        HKEY hDst = openVirtual(L"SOFTWARE\\TestGame\\Seeded");
+
+        LSTATUS st = hDst
+            ? RegCopyTreeW(HKEY_CURRENT_USER, kRealProbeKey, hDst)
+            : ERROR_INVALID_HANDLE;
+
+        if (hDst) RegCloseKey(hDst);
+
+        ASSERT(st == ERROR_SUCCESS, L"R-42a: RegCopyTreeW real to virtual succeeds");
+
+        wchar_t buf[64]{};
+        DWORD cb = sizeof(buf);
+
+        st = RegGetValueW(HKEY_LOCAL_MACHINE, L"SOFTWARE\\TestGame\\Seeded",
+            L"RealProbe", RRF_RT_ANY, nullptr, buf, &cb);
+
+        ASSERT(st == ERROR_SUCCESS && wcscmp(buf, probe) == 0,
+            L"R-42b: a real value is readable out of the virtual store afterwards");
+    }
+
+    // R-43: virtual -> real, and then RegDeleteTreeW over the real result, which is
+    // the passthrough branch of the new delete hook.
+    {
+        std::wstring realDest = std::wstring(kRealProbeKey) + L"\\CopyDest";
+
+        HKEY hDst = nullptr;
+        LSTATUS st = RegCreateKeyExW(HKEY_CURRENT_USER, realDest.c_str(), 0, nullptr,
+            REG_OPTION_NON_VOLATILE, KEY_ALL_ACCESS, nullptr, &hDst, nullptr);
+
+        if (st == ERROR_SUCCESS && hDst)
+        {
+            st = RegCopyTreeW(HKEY_LOCAL_MACHINE, L"SOFTWARE\\TestGame\\CopySrc", hDst);
+
+            RegCloseKey(hDst);
+        }
+
+        ASSERT(st == ERROR_SUCCESS, L"R-43a: RegCopyTreeW virtual to real succeeds");
+
+        wchar_t buf[64]{};
+        DWORD cb = sizeof(buf);
+
+        st = RegGetValueW(HKEY_CURRENT_USER, realDest.c_str(), L"Top",
+            RRF_RT_ANY, nullptr, buf, &cb);
+
+        ASSERT(st == ERROR_SUCCESS && wcscmp(buf, L"CopiedTop") == 0,
+            L"R-43b: the value really landed in the real registry");
+
+        st = RegDeleteTreeW(HKEY_CURRENT_USER, realDest.c_str());
+
+        ASSERT(st == ERROR_SUCCESS,
+            L"R-43c: RegDeleteTreeW removes it again through the passthrough branch");
+
+        cb = sizeof(buf);
+
+        st = RegGetValueW(HKEY_CURRENT_USER, realDest.c_str(), L"Top",
+            RRF_RT_ANY, nullptr, buf, &cb);
+
+        ASSERT(st != ERROR_SUCCESS, L"R-43d: and it is gone");
+    }
 }
 
 // ============================================================
@@ -861,6 +1666,104 @@ static void RunOverlayTests()
             L"O-07b: the deleted base-layer value no longer reads back");
     }
 
+    // O-13: the write layer's pre-seeded [-Key] header. No hook is involved --
+    // this is purely the reader honouring regedit's delete-the-key marker.
+    {
+        HKEY hTomb = nullptr;
+        LSTATUS r = RegOpenKeyExW(HKEY_LOCAL_MACHINE,
+            L"SOFTWARE\\TestGame\\Tomb\\Preseeded", 0, KEY_READ, &hTomb);
+
+        if (r == ERROR_SUCCESS && hTomb)
+        {
+            wchar_t buf[256]{};
+            DWORD cb = sizeof(buf);
+
+            r = RegQueryValueExW(hTomb, L"Marker", nullptr, nullptr,
+                reinterpret_cast<LPBYTE>(buf), &cb);
+
+            RegCloseKey(hTomb);
+        }
+
+        ASSERT(r == ERROR_FILE_NOT_FOUND,
+            L"O-13a: a key deleted by a [-Key] header in the write layer is gone");
+    }
+
+    // O-13b: and it is gone from the enumeration too, not just from reads.
+    {
+        HKEY hTomb = nullptr;
+        bool sawPreseeded = false, sawKept = false;
+
+        if (RegOpenKeyExW(HKEY_LOCAL_MACHINE, L"SOFTWARE\\TestGame\\Tomb",
+                0, KEY_READ, &hTomb) == ERROR_SUCCESS && hTomb)
+        {
+            wchar_t name[256];
+
+            for (DWORD i = 0; ; ++i)
+            {
+                DWORD cch = ARRAYSIZE(name);
+
+                if (RegEnumKeyExW(hTomb, i, name, &cch, nullptr, nullptr, nullptr,
+                        nullptr) != ERROR_SUCCESS)
+                    break;
+
+                if (_wcsicmp(name, L"Preseeded") == 0) sawPreseeded = true;
+                if (_wcsicmp(name, L"Kept") == 0)      sawKept      = true;
+            }
+
+            RegCloseKey(hTomb);
+        }
+
+        ASSERT(!sawPreseeded && sawKept,
+            L"O-13b: the tombstoned key is not enumerated, its sibling still is");
+    }
+
+    // ---- Key deletes against a read-only base layer. --------------------------
+
+    // O-15: a childless key that only the base layer defines can still be deleted.
+    {
+        LSTATUS r = RegDeleteKeyW(HKEY_LOCAL_MACHINE,
+            L"SOFTWARE\\TestGame\\Tomb\\Doomed");
+
+        ASSERT(r == ERROR_SUCCESS,
+            L"O-15: deleting a key defined only by the base layer succeeds");
+    }
+
+    // O-16: and it is gone from the store, not merely absent from the real
+    // registry. Tomb's own bare header keeps the branch in the virtual space, so
+    // this read cannot fall through and pass for the wrong reason.
+    {
+        wchar_t buf[64]{};
+        DWORD cb = sizeof(buf);
+
+        LSTATUS r = RegGetValueW(HKEY_LOCAL_MACHINE,
+            L"SOFTWARE\\TestGame\\Tomb\\Doomed", L"Marker",
+            RRF_RT_ANY, nullptr, buf, &cb);
+
+        ASSERT(r == ERROR_FILE_NOT_FOUND,
+            L"O-16: the deleted base-layer key no longer reads back");
+    }
+
+    // O-17: the base-layer variant of R-29 -- Tomb still has Kept under it.
+    {
+        LSTATUS r = RegDeleteKeyW(HKEY_LOCAL_MACHINE, L"SOFTWARE\\TestGame\\Tomb");
+
+        ASSERT(r == ERROR_ACCESS_DENIED,
+            L"O-17: a base-layer key with a surviving child cannot be deleted");
+    }
+
+    // O-18: re-create it and write something of our own. The tombstone has to
+    // survive this, or the base layer's other values would come back with the key.
+    {
+        const wchar_t* reborn = L"yes";
+
+        LSTATUS r = RegSetKeyValueW(HKEY_LOCAL_MACHINE,
+            L"SOFTWARE\\TestGame\\Tomb\\Doomed", L"Reborn", REG_SZ, reborn,
+            static_cast<DWORD>((wcslen(reborn) + 1) * sizeof(wchar_t)));
+
+        ASSERT(r == ERROR_SUCCESS,
+            L"O-18: a tombstoned key can be re-created and written to");
+    }
+
     RegCloseKey(hk);
 }
 
@@ -894,6 +1797,41 @@ static void RunOverlayPersistenceTests(const std::wstring& basePath,
     // the next load -- so it is recorded as a regedit delete marker instead.
     ASSERT(write.find(L"\"DOOMED\"=-") != std::wstring::npos,
         L"O-12: deleting a base-layer value writes a tombstone to the last file");
+
+    // The key-level counterpart: the pre-seeded [-Key] header has to survive
+    // being read in and written back out, or the delete would last exactly one
+    // session and the base layer would hand the key back on the next launch.
+    ASSERT(write.find(L"[-HKEY_LOCAL_MACHINE\\SOFTWARE\\TESTGAME\\TOMB\\PRESEEDED]")
+        != std::wstring::npos,
+        L"O-14: a [-Key] tombstone read from the write layer is written back out");
+
+    // O-19: O-15's delete of a base-layer key is recorded the same way.
+    const std::wstring doomedKey =
+        L"HKEY_LOCAL_MACHINE\\SOFTWARE\\TESTGAME\\TOMB\\DOOMED";
+
+    ASSERT(write.find(L"[-" + doomedKey + L"]") != std::wstring::npos,
+        L"O-19: deleting a base-layer key writes a [-Key] tombstone");
+
+    // O-20: and O-18's re-creation puts a section back, *after* the tombstone.
+    // The reader applies them in file order, so the delete wipes what the base
+    // layer put there and the section re-adds only what this layer owns. Note
+    // that "[-X]" does not contain "[X]", so the two searches cannot collide.
+    {
+        size_t tomb    = write.find(L"[-" + doomedKey + L"]");
+        size_t section = write.find(L"[" + doomedKey + L"]");
+
+        ASSERT(tomb != std::wstring::npos && section != std::wstring::npos && tomb < section,
+            L"O-20: the [-Key] header precedes the section that re-creates the key");
+    }
+
+    ASSERT(write.find(L"REBORN") != std::wstring::npos,
+        L"O-21a: the value written into the re-created key is in the write layer");
+
+    ASSERT(write.find(L"TOMBSTONEME") == std::wstring::npos,
+        L"O-21b: the base layer's value did not come back with the key");
+
+    ASSERT(base.find(L"TombstoneMe") != std::wstring::npos,
+        L"O-22: and the base layer still defines it, untouched");
 }
 
 // ============================================================
@@ -1271,6 +2209,63 @@ static void RunLogTests(const std::wstring& logPath)
     // that is indistinguishable from a successful read at Info level.
     ASSERT(log.find("[REG PARTIAL]") != std::string::npos,
         L"L-21: Log contains [REG PARTIAL] entry for a missing value in a virtual key");
+
+    // ---- The composite hooks log exactly once per call. -----------------------
+    // A composite whose passthrough branch reaches a leaf hook has to stay silent
+    // there, or one call by the game would produce two lines. These two counts are
+    // what pin that, one per branch.
+
+    // R-19 reads GetOnce once, on the virtual branch.
+    ASSERT(CountLinesContaining(log, "[REG READ]", "GetOnce") == 1,
+        L"L-36: one RegGetValueW on a virtual value logs exactly one [REG READ]");
+
+    // R-23c reads RealExpand once, on the passthrough branch, where the nested
+    // RegQueryValueExW hook is the one that logs. A value only this suite creates,
+    // so no unrelated read in the process can make the count flaky.
+    ASSERT(CountLinesContaining(log, "[REG READ]", "RealExpand") == 1,
+        L"L-37: one passthrough RegGetValueW also logs exactly one [REG READ]");
+
+    // The composites live in KernelBase, not on advapi32's jmp [IAT] thunk --
+    // the same placement rule L-32 pins for RegOpenKeyExW.
+    ASSERT(log.find("kernelbase!RegGetValueW") != std::string::npos,
+        L"L-38: RegGetValueW is hooked in KernelBase, not on the advapi32 thunk");
+
+    ASSERT(log.find("kernelbase!RegQueryMultipleValuesW") != std::string::npos,
+        L"L-39: RegQueryMultipleValuesW is hooked in KernelBase");
+
+    // RegDeleteKeyW is the one entry point KernelBase does not export at all, so
+    // it is the one that has to take HookRegistryApi's advapi32 fallback.
+    ASSERT(log.find("advapi32!RegDeleteKeyW") != std::string::npos,
+        L"L-40: RegDeleteKeyW is hooked on advapi32, which is the only module with it");
+
+    // A key delete logs one line naming the key, with no value name appended --
+    // which is how a .NET or plugin consumer tells it from a value delete.
+    ASSERT(CountLinesContaining(log, "[REG DELETE]", "TOMB\\DOOMED") == 1,
+        L"L-41: deleting a key logs exactly one [REG DELETE] naming the key");
+
+    // R-36 opened CurrentControlSet through a duplicated -- and therefore
+    // untracked -- handle. A resolved path in the log can only have come from
+    // BuildPath's NtQueryKey tier; before it, this line read "(unknown)".
+    ASSERT(log.find("HKEY_LOCAL_MACHINE\\SYSTEM\\CURRENTCONTROLSET") != std::string::npos,
+        L"L-42: an untracked handle is resolved through NtQueryKey, not logged as unknown");
+
+    // R-36b did the same under HKCU, where NtQueryKey reports HKEY_USERS\<SID>.
+    // Seeing the HKEY_CURRENT_USER form is what proves the rewrite ran -- and
+    // without it the tier would never match the hive most games write to.
+    ASSERT(log.find("HKEY_CURRENT_USER\\SOFTWARE\\LANCOMMANDERINTERPOSERTEST\\TIERFOUR")
+        != std::string::npos,
+        L"L-43: HKEY_USERS\\<SID> is rewritten to HKEY_CURRENT_USER for the store");
+
+    // R-37's flush. The new diagnostic verbs are log-only: a flush is not an
+    // access, so it never reaches the plugin or .NET consumers.
+    ASSERT(log.find("[REG FLUSH]") != std::string::npos,
+        L"L-44: Log contains the [REG FLUSH] diagnostic");
+
+    // R-41..R-43's copies. One line naming source and destination, deliberately
+    // not one [REG WRITE] per copied value -- a tree copy would flood both the log
+    // and the plugin callbacks.
+    ASSERT(log.find("[REG COPY]") != std::string::npos,
+        L"L-45: Log contains the [REG COPY] diagnostic");
 }
 
 // ============================================================
@@ -1304,6 +2299,27 @@ static void RunPersistenceTests(const std::wstring& regPath)
     // Original string value still present (uppercased)
     ASSERT(reg.find(L"\"PLAYERNAME\"") != std::wstring::npos,
         L"P-05: VirtualRegistry.reg still contains 'PLAYERNAME'");
+
+    // R-26 wrote through RegSetKeyValueW, which reaches the writable layer by the
+    // same route RegSetValueExW does.
+    ASSERT(reg.find(L"SETKEYVALUE") != std::wstring::npos,
+        L"P-06: a RegSetKeyValueW write is persisted to the write layer");
+
+    // R-27 created Get\Made and R-28 emptied it again. An empty key still needs
+    // its bare header, or it would not exist on the next launch.
+    ASSERT(reg.find(L"[HKEY_LOCAL_MACHINE\\SOFTWARE\\TESTGAME\\GET\\MADE]")
+        != std::wstring::npos,
+        L"P-07: a created key whose last value was deleted still round-trips");
+
+    // ...and no key tombstone for it: nothing in a base layer would hand it back,
+    // so there is nothing to suppress. This is what gates the g_baseKeys check.
+    ASSERT(reg.find(L"[-HKEY_LOCAL_MACHINE\\SOFTWARE\\TESTGAME\\GET") == std::wstring::npos,
+        L"P-08: a key no base layer defines needs no [-Key] tombstone");
+
+    // R-32 deleted a whole tree it had created itself. Same gate, whole subtree:
+    // no base layer defines any of it, so none of it needs suppressing.
+    ASSERT(reg.find(L"[-HKEY_LOCAL_MACHINE\\SOFTWARE\\TESTGAME\\TREE") == std::wstring::npos,
+        L"P-09: RegDeleteTreeW over runtime-created keys writes no tombstones");
 }
 
 
@@ -1728,6 +2744,13 @@ static const wchar_t* kRealValue = L"ProgramFilesDir";
 // A key no machine has, used to prove a write went to the file and not to HKCU.
 static const wchar_t* kNovelKey  = L"Software\\LANCommanderInterposerIsolationProbe";
 
+// The same, for the composite write that goes through RegSetKeyValueW.
+static const wchar_t* kNovelKey2 = L"Software\\LANCommanderInterposerIsolationProbe2";
+
+// A key the child creates in the *real* registry before it loads the DLL, so that
+// the delete hooks have something real to fail to destroy.
+static const wchar_t* kVictimKey = L"Software\\LANCommanderInterposerIsolationVictim";
+
 // Written by the parent before the child starts. Files names one relative path,
 // so the child's store resolves to <childDir>\\.interposer\\Registry.reg.
 static void WriteIsolatedFixtures(const std::wstring& childInterposerDir)
@@ -1765,6 +2788,25 @@ static int RunIsolatedChild(const wchar_t* childDirArg)
     std::wstring regPath = childDir + L".interposer\\Registry.reg";
 
     wprintf(L"\n--- Registry Isolation Tests (child process) ---\n");
+
+    // Created while nothing is hooked, so it is unambiguously real. S-11 and S-12
+    // then try to delete it from inside isolation, and S-11b checks it survived.
+    {
+        HKEY hVictim = nullptr;
+
+        if (RegCreateKeyExW(HKEY_CURRENT_USER, kVictimKey, 0, nullptr,
+                REG_OPTION_NON_VOLATILE, KEY_ALL_ACCESS, nullptr, &hVictim, nullptr)
+                    == ERROR_SUCCESS && hVictim)
+        {
+            const wchar_t* keep = L"intact";
+
+            RegSetValueExW(hVictim, L"Keep", 0, REG_SZ,
+                reinterpret_cast<const BYTE*>(keep),
+                static_cast<DWORD>((wcslen(keep) + 1) * sizeof(wchar_t)));
+
+            RegCloseKey(hVictim);
+        }
+    }
 
     HMODULE hDll = LoadLibraryW(dllPath.c_str());
 
@@ -1847,6 +2889,47 @@ static int RunIsolatedChild(const wchar_t* childDirArg)
         }
     }
 
+    // S-07: the headline regression. RegGetValue reaches the real registry through
+    // an internal open, so before it was hooked it handed back the real value even
+    // under isolation -- the one thing isolation exists to prevent.
+    {
+        wchar_t buf[512]{};
+        DWORD cb = sizeof(buf);
+
+        LSTATUS st = RegGetValueW(HKEY_LOCAL_MACHINE, kRealKey, kRealValue,
+            RRF_RT_ANY, nullptr, buf, &cb);
+
+        ASSERT(st == ERROR_FILE_NOT_FOUND,
+            L"S-07: RegGetValueW does not serve a real value under Isolated");
+    }
+
+    // S-08: and the composite write lands in the store, like RegSetValueEx does.
+    {
+        const wchar_t* written = L"IsolatedKeyValue";
+
+        LSTATUS st = RegSetKeyValueW(HKEY_CURRENT_USER, kNovelKey2, L"Probe", REG_SZ,
+            written, static_cast<DWORD>((wcslen(written) + 1) * sizeof(wchar_t)));
+
+        ASSERT(st == ERROR_SUCCESS,
+            L"S-08: RegSetKeyValueW succeeds under Isolated");
+    }
+
+    // S-11/S-12: the delete hooks cannot escape isolation. The victim key is real
+    // and was created before the DLL loaded; isolation makes every path virtual, so
+    // a key the store has never heard of is ERROR_FILE_NOT_FOUND rather than a
+    // passthrough -- which is exactly what keeps a delete from reaching HKCU.
+    {
+        LSTATUS st = RegDeleteKeyW(HKEY_CURRENT_USER, kVictimKey);
+
+        ASSERT(st == ERROR_FILE_NOT_FOUND,
+            L"S-11a: RegDeleteKeyW on a real key is ERROR_FILE_NOT_FOUND under Isolated");
+
+        st = RegDeleteTreeW(HKEY_CURRENT_USER, kVictimKey);
+
+        ASSERT(st == ERROR_FILE_NOT_FOUND,
+            L"S-12: and so is RegDeleteTreeW");
+    }
+
     FreeLibrary(hDll);
 
     // Hooks are gone now, so the last two assertions see the real world.
@@ -1870,6 +2953,54 @@ static int RunIsolatedChild(const wchar_t* childDirArg)
             RegCloseKey(hk);
             RegDeleteKeyW(HKEY_CURRENT_USER, kNovelKey);
         }
+    }
+
+    // S-09: S-08's composite write went to the file.
+    {
+        std::wstring persisted = ReadFileAsWide(regPath);
+
+        ASSERT(persisted.find(L"IsolatedKeyValue") != std::wstring::npos,
+            L"S-09: the RegSetKeyValueW write is persisted to the configured file");
+    }
+
+    // S-10: and not to HKCU either.
+    {
+        HKEY hk = nullptr;
+        LSTATUS st = RegOpenKeyExW(HKEY_CURRENT_USER, kNovelKey2, 0, KEY_READ, &hk);
+
+        ASSERT(st != ERROR_SUCCESS,
+            L"S-10: the composite write never reached the real registry");
+
+        if (hk)
+        {
+            RegCloseKey(hk);
+            RegDeleteKeyW(HKEY_CURRENT_USER, kNovelKey2);
+        }
+    }
+
+    // S-11b: the real key the delete hooks were pointed at is still there, value
+    // intact. This is the assertion that actually proves nothing escaped.
+    {
+        HKEY hk = nullptr;
+        std::wstring survived;
+
+        if (RegOpenKeyExW(HKEY_CURRENT_USER, kVictimKey, 0, KEY_READ, &hk) == ERROR_SUCCESS
+                && hk)
+        {
+            wchar_t buf[64]{};
+            DWORD cb = sizeof(buf);
+
+            if (RegQueryValueExW(hk, L"Keep", nullptr, nullptr,
+                    reinterpret_cast<LPBYTE>(buf), &cb) == ERROR_SUCCESS)
+                survived = buf;
+
+            RegCloseKey(hk);
+        }
+
+        ASSERT(survived == L"intact",
+            L"S-11b: the real key and its value survived both delete attempts");
+
+        RegDeleteKeyW(HKEY_CURRENT_USER, kVictimKey);
     }
 
     return g_fail;
@@ -1994,7 +3125,6 @@ int wmain(int argc, wchar_t** argv)
     // Likewise for dinput8.dll, whose DirectInput8Create carries the device
     // filter for games that never touch the legacy API.
     HMODULE hDInput8 = LoadLibraryW(L"dinput8.dll");
-
     // ── Load DLL ─────────────────────────────────────────────────────────────
     HMODULE hDll = LoadLibraryW(dllPath.c_str());
     if (!hDll)
@@ -2048,6 +3178,12 @@ int wmain(int argc, wchar_t** argv)
     // ── Cleanup ──────────────────────────────────────────────────────────────
     DeleteFileW(redirectTarget.c_str());
     RemoveDirectoryW(redirectDir.c_str());
+
+    // R-23c and the RegCopyTree tests create a real HKCU key to exercise the
+    // passthrough branches against something this suite owns. Removed here rather
+    // than in the test, which still needs it while the hooks are live.
+    RegDeleteTreeW(HKEY_CURRENT_USER, L"Software\\LANCommanderInterposerTest");
+    RegDeleteKeyW(HKEY_CURRENT_USER, L"Software\\LANCommanderInterposerTest");
 
     // F-09 wrote through the %SAVEDGAMES% rule into the real Saved Games folder.
     {

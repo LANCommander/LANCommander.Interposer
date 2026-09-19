@@ -53,7 +53,7 @@ When the DLL loads, it reads `.interposer\Registry.reg` into an in-memory store.
 
 - **Reads** (`RegOpenKeyEx`, `RegQueryValueEx`, `RegEnumKeyEx`, etc.) — if the requested key exists in the virtual store, the call is satisfied entirely from memory. The real registry is not accessed.
 - **Writes** (`RegSetValueEx`) — values are written to the in-memory store and immediately persisted back to `.interposer\Registry.reg` on disk.
-- **Deletes** (`RegDeleteKey`, `RegDeleteValue`) — removals are applied to the store and persisted.
+- **Deletes** (`RegDeleteKey`, `RegDeleteValue`, `RegDeleteTree`) — removals are applied to the store and persisted.
 - **Real keys** — any key not listed in `.interposer\Registry.reg` passes through to the real registry.
 
 The `.reg` file is written back in standard format, so it can be edited with any text editor between runs.
@@ -86,6 +86,13 @@ A few consequences worth knowing:
 - Deleting a value that came from an earlier file writes regedit's delete marker
   (`"Name"=-`) into the writable layer, because simply dropping it would not survive the
   next launch; the earlier file would hand it straight back.
+- Deleting a whole **key** that came from an earlier file works the same way one level up:
+  the writable layer gets regedit's `[-HKEY_...\Path]` header. If the game later
+  re-creates that key, the writable layer ends up with both headers, the delete first —
+  which is how "start this key from scratch" is expressed in a `.reg` file, and what keeps
+  the earlier file's *other* values from coming back with it.
+- A `[-HKEY_...\Path]` header you write by hand is honoured on load too, so a
+  read-only template can suppress a key an earlier layer defines.
 - Paths may be absolute or relative to the directory holding the DLL, and support the same
   `%TOKEN%` expansion as [file redirects](/Interposer/FileRedirection): environment
   variables first, then known folders (`%SAVEDGAMES%`, `%DOCUMENTS%`, `%MYGAMES%`, ...),
@@ -197,16 +204,78 @@ Logging:
 
 ## Hooked Functions
 
-The following registry API functions (17 total from `advapi32.dll`) are intercepted:
+42 registry entry points are intercepted. They fall into two groups, and the
+difference matters when you are reading a log.
+
+**Leaf functions** operate on a key handle you already hold:
 
 - `RegOpenKeyExW` / `RegOpenKeyExA`
 - `RegCreateKeyExW` / `RegCreateKeyExA`
+- `RegCloseKey`
 - `RegQueryValueExW` / `RegQueryValueExA`
 - `RegSetValueExW` / `RegSetValueExA`
-- `RegDeleteKeyW` / `RegDeleteKeyA`
 - `RegDeleteValueW` / `RegDeleteValueA`
-- `RegEnumKeyExW` / `RegEnumKeyExA`
 - `RegEnumValueW` / `RegEnumValueA`
-- `RegCloseKey`
+- `RegEnumKeyExW` / `RegEnumKeyExA`
+- `RegQueryInfoKeyW` / `RegQueryInfoKeyA`
 - `RegFlushKey`
-- `RegQueryInfoKeyW`
+- `RegNotifyChangeKeyValue`
+- `RegQueryMultipleValuesW` / `RegQueryMultipleValuesA`
+
+**Composite functions** take a key *and* a subkey name and open it themselves:
+
+- `RegGetValueW` / `RegGetValueA`
+- `RegSetKeyValueW` / `RegSetKeyValueA`
+- `RegDeleteKeyValueW` / `RegDeleteKeyValueA`
+- `RegDeleteKeyW` / `RegDeleteKeyA`
+- `RegDeleteKeyExW` / `RegDeleteKeyExA`
+- `RegDeleteTreeW` / `RegDeleteTreeA`
+- `RegCopyTreeW`
+- `RegOpenKeyTransactedW` / `RegOpenKeyTransactedA`
+- `RegCreateKeyTransactedW` / `RegCreateKeyTransactedA`
+- `RegDeleteKeyTransactedW` / `RegDeleteKeyTransactedA`
+- `RegOpenCurrentUser`
+- `RegOpenUserClassesRoot`
+
+Each composite needs a hook of its own because the open it does internally is not the
+exported function the leaf hook is attached to. Left alone, the nested call arrives with a
+handle to the *real* key and the whole operation lands in the real registry — so
+`RegGetValue`, the function most modern code reaches for, would read straight past the
+virtual store whenever it was given a subkey name.
+
+The hooks go on `KernelBase.dll` wherever it has the export, and fall back to
+`advapi32.dll` where it does not. advapi32's `Reg*` functions are mostly `jmp` thunks into
+KernelBase, so hooking KernelBase catches both callers; hooking both would double every
+log line. The exceptions, visible in the session log as `advapi32!...`:
+
+- `RegDeleteKeyW` / `RegDeleteKeyA` — KernelBase has no such export at all. advapi32
+  implements them with `NtOpenKey` and `NtDeleteKey` directly, which is why they need
+  their own hooks rather than riding on `RegDeleteKeyEx`.
+- the six transacted entry points, which live only in advapi32.
+
+The pre-Win32-`Ex` wrappers `RegOpenKey`, `RegCreateKey`, `RegQueryValue`, `RegSetValue`
+and `RegEnumKey` need no hooks of their own: each one funnels into the `Ex` function
+above, which is already hooked. `RegDeleteKey` is the exception, and the reason it is
+listed above — it is not a wrapper around `RegDeleteKeyEx` at all.
+
+## Limitations
+
+- **The `ntdll` layer is not hooked.** A program that calls `NtOpenKey`, `NtQueryValueKey`,
+  `NtSetValueKey`, `NtDeleteKey` or their siblings directly bypasses the virtual store
+  entirely, and `Registry.Isolated` does not close that gap. Almost nothing a game does
+  goes this route — the CRT, .NET, MFC, ATL and Delphi all reach the `Reg*` layer — but an
+  anti-tamper wrapper or a copy-protection shim might. A `[REG MISS]` reading
+  `handle not resolvable` is the usual sign of it.
+- **Transactions are ignored.** `RegCreateKeyTransacted` and friends work on a virtual key,
+  but the transaction handle is discarded: a write is visible and persisted immediately, so
+  rolling the transaction back does not undo it.
+- **`RegNotifyChangeKeyValue` never signals.** On a virtual key the registration succeeds
+  and the event is never set, because nothing outside the process can change the store. The
+  synchronous form returns immediately rather than blocking forever.
+- **`RegDeleteKey` on a key with subkeys fails** with `ERROR_ACCESS_DENIED`, exactly as it
+  does on a real key. Use `RegDeleteTree` to remove a subtree.
+- **Deleting the last virtual key in a branch takes that branch out of the virtual space.**
+  The virtual space is defined by the keys the store holds, so once the last one under a
+  prefix is gone, a later access to that prefix passes through to the real registry again.
+  Giving the game's root key a bare `[HKEY_...\SOFTWARE\MyGame]` header of its own
+  in the `.reg` file keeps the whole branch virtual regardless of what gets deleted below it.

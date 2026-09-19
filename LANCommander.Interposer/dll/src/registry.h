@@ -1,7 +1,7 @@
 #pragma once
 #include <windows.h>
 
-void InstallRegistryHooks();   // MH_CreateHookApi x17 on advapi32; loads VirtualRegistry.reg
+void InstallRegistryHooks();   // MH_CreateHookApi x42, KernelBase-first; loads the Registry.Files stack
 void RemoveRegistryHooks();    // flush VirtualRegistry.reg to disk if dirty
 
 // Inject a transient REG_SZ into the virtual store by exact key path (not persisted to Registry.reg).

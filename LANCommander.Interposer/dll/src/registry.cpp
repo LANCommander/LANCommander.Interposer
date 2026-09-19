@@ -45,6 +45,28 @@ static StoreMap g_writable;
 static std::set<std::pair<std::wstring, std::wstring>> g_baseValues;
 static std::map<std::wstring, std::set<std::wstring>>  g_tombstones;
 
+static std::set<std::wstring> g_baseKeys;
+static std::set<std::wstring> g_keyTombstones;
+
+static void EraseSubtreeLocked(const std::wstring& keyPath)
+{
+    const std::wstring prefix = keyPath + L'\\';
+
+    auto covered = [&](const std::wstring& key)
+    {
+        return key == keyPath || key.compare(0, prefix.size(), prefix) == 0;
+    };
+
+    for (auto it = g_store.begin(); it != g_store.end(); )
+        it = covered(it->first) ? g_store.erase(it) : std::next(it);
+
+    for (auto it = g_writable.begin(); it != g_writable.end(); )
+        it = covered(it->first) ? g_writable.erase(it) : std::next(it);
+
+    for (auto it = g_tombstones.begin(); it != g_tombstones.end(); )
+        it = covered(it->first) ? g_tombstones.erase(it) : std::next(it);
+}
+
 // Drop a tombstone once the value is written again. Caller holds g_storeMutex.
 static void ClearTombstone(const std::wstring& keyPath, const std::wstring& valueName)
 {
@@ -163,6 +185,56 @@ static std::wstring NormalizeVirtualStore(std::wstring path)
     return path;
 }
 
+static std::wstring GetKeyPathViaSystem(HKEY hiveKey, bool rewriteCurrentUser = true);
+
+static const std::wstring& CurrentUserHivePrefix()
+{
+    static const std::wstring prefix = []() -> std::wstring
+    {
+        using FnRtlOpenCurrentUser = LONG(NTAPI*)(ULONG, PHANDLE);
+
+        auto openCurrentUser = reinterpret_cast<FnRtlOpenCurrentUser>(
+            GetProcAddress(GetModuleHandleW(L"ntdll.dll"), "RtlOpenCurrentUser"));
+
+        if (!openCurrentUser)
+            return {};
+
+        HANDLE userKey = nullptr;
+
+        if (openCurrentUser(MAXIMUM_ALLOWED, &userKey) != 0 || !userKey)
+            return {};
+
+        // rewriteCurrentUser = false is what keeps this out of infinite recursion.
+        std::wstring path = GetKeyPathViaSystem(reinterpret_cast<HKEY>(userKey), false);
+
+        CloseHandle(userKey);
+
+        return path;   // HKEY_USERS\<SID>
+    }();
+
+    return prefix;
+}
+
+// Map HKEY_USERS\<SID>\X onto HKEY_CURRENT_USER\X. Matched on a backslash
+// boundary, so the sibling hive HKEY_USERS\<SID>_Classes is left alone.
+// Input must already be uppercased.
+static std::wstring RewriteCurrentUserHive(std::wstring path)
+{
+    const std::wstring& prefix = CurrentUserHivePrefix();
+
+    if (prefix.empty() || path.size() < prefix.size() ||
+        path.compare(0, prefix.size(), prefix) != 0)
+        return path;
+
+    if (path.size() == prefix.size())
+        return L"HKEY_CURRENT_USER";
+
+    if (path[prefix.size()] != L'\\')
+        return path;
+
+    return L"HKEY_CURRENT_USER" + path.substr(prefix.size());
+}
+
 // Returns the full uppercase path from base hKey + optional subkey.
 // Returns "" if hKey is an unrecognised real OS handle.
 static std::wstring BuildPath(HKEY hKey, LPCWSTR lpSubKey)
@@ -188,11 +260,15 @@ static std::wstring BuildPath(HKEY hKey, LPCWSTR lpSubKey)
 
     // 3. Predefined root handles (HKLM, HKCU, …)
     if (base.empty())
+        if (const wchar_t* predefined = PredefinedName(hKey))
+            base = predefined;
+
+    if (base.empty())
     {
-        const wchar_t* predefined = PredefinedName(hKey);
-        if (!predefined)
+        base = NormalizeVirtualStore(GetKeyPathViaSystem(hKey));
+
+        if (base.empty())
             return {};
-        base = predefined;
     }
 
     if (lpSubKey && lpSubKey[0] != L'\0')
@@ -207,7 +283,7 @@ static std::wstring BuildPath(HKEY hKey, LPCWSTR lpSubKey)
 // Ask the OS for the full path of any open HKEY via NtQueryKey, then convert
 // the NT path (\REGISTRY\MACHINE\...) to a Win32 hive path (HKEY_LOCAL_MACHINE\...).
 // Works for predefined roots and handles opened before our hooks were installed.
-static std::wstring GetKeyPathViaSystem(HKEY hiveKey)
+static std::wstring GetKeyPathViaSystem(HKEY hiveKey, bool rewriteCurrentUser)
 {
     using FnNtQueryKey = LONG(NTAPI*)(HANDLE, int, PVOID, ULONG, PULONG);
     static FnNtQueryKey s_fn   = nullptr;
@@ -255,7 +331,9 @@ static std::wstring GetKeyPathViaSystem(HKEY hiveKey)
             if (ntPath.size() > ntLength)
                 result += ntPath.substr(ntLength); // retains leading '\'
             
-            return ToUpper(result);
+            std::wstring upper = ToUpper(result);
+
+            return rewriteCurrentUser ? RewriteCurrentUserHive(std::move(upper)) : upper;
         }
     }
     
@@ -264,22 +342,12 @@ static std::wstring GetKeyPathViaSystem(HKEY hiveKey)
 
 // Returns the path for any handle (virtual, tracked real, predefined root,
 // or untracked/pre-injection real handle), or "" if completely unrecognised.
-// NOTE: defined after BuildPath/ToUpper/PredefinedName so all helpers are available.
+// Reads as a separate concern from BuildPath -- this one exists for log lines --
+// but the two resolve a bare handle identically now that BuildPath has the
+// NtQueryKey tier, so it forwards rather than keeping a second copy of the walk.
 static std::wstring GetAnyPathFull(HKEY h)
 {
-    {
-        std::lock_guard lk(g_handleMutex);
-        auto it = g_handles.find(h);
-        if (it != g_handles.end()) return it->second->path;
-    }
-    {
-        std::lock_guard lk(g_realHandleMtx);
-        auto it = g_realHandles.find(h);
-        if (it != g_realHandles.end()) return it->second;
-    }
-    if (const wchar_t* name = PredefinedName(h))
-        return ToUpper(name);
-    return NormalizeVirtualStore(GetKeyPathViaSystem(h));
+    return BuildPath(h, nullptr);
 }
 
 // True if upperPath exactly matches, or is an ancestor/descendant of any stored key.
@@ -587,7 +655,28 @@ static void LoadRegFile(const std::wstring& path, bool writeLayer)
             size_t end = line.rfind(L']');
             if (end != std::wstring::npos && end > 0)
             {
-                currentKey = ToUpper(line.substr(1, end - 1));
+                std::wstring header = line.substr(1, end - 1);
+
+                if (!header.empty() && header[0] == L'-')
+                {
+                    std::wstring doomed = ToUpper(header.substr(1));
+
+                    if (!doomed.empty())
+                    {
+                        std::unique_lock lk(g_storeMutex);
+
+                        EraseSubtreeLocked(doomed);
+
+                        if (writeLayer)
+                            g_keyTombstones.insert(doomed);
+                    }
+
+                    currentKey.clear();
+
+                    continue;
+                }
+
+                currentKey = ToUpper(header);
                 std::unique_lock lk(g_storeMutex);
                 g_store.emplace(currentKey, ValueMap{});
 
@@ -595,8 +684,10 @@ static void LoadRegFile(const std::wstring& path, bool writeLayer)
                 // in the virtual space -- so the write layer keeps its own.
                 if (writeLayer)
                     g_writable.emplace(currentKey, ValueMap{});
+                else
+                    g_baseKeys.insert(currentKey);
             }
-            
+
             continue;
         }
 
@@ -754,8 +845,23 @@ static void SaveRegFile()
         for (const auto& [key, names] : g_tombstones)
             keys.insert(key);
 
+        for (const std::wstring& key : g_keyTombstones)
+            keys.insert(key);
+
         for (const std::wstring& key : keys)
         {
+            if (g_keyTombstones.count(key))
+            {
+                output += L"\r\n[-";
+                output += key;
+                output += L"]\r\n";
+
+                // Nothing of this key survives in this layer, so it gets no
+                // section of its own.
+                if (!g_writable.count(key) && !g_tombstones.count(key))
+                    continue;
+            }
+
             output += L"\r\n[";
             output += key;
             output += L"]\r\n";
@@ -887,6 +993,32 @@ using FnRegEnumKeyExA    = LSTATUS(WINAPI*)(HKEY, DWORD, LPSTR,   LPDWORD, LPDWO
 using FnRegQueryInfoKeyW = LSTATUS(WINAPI*)(HKEY, LPWSTR, LPDWORD, LPDWORD, LPDWORD, LPDWORD, LPDWORD, LPDWORD, LPDWORD, LPDWORD, LPDWORD, PFILETIME);
 using FnRegQueryInfoKeyA = LSTATUS(WINAPI*)(HKEY, LPSTR,  LPDWORD, LPDWORD, LPDWORD, LPDWORD, LPDWORD, LPDWORD, LPDWORD, LPDWORD, LPDWORD, PFILETIME);
 
+using FnRegGetValueW            = LSTATUS(WINAPI*)(HKEY, LPCWSTR, LPCWSTR, DWORD, LPDWORD, PVOID, LPDWORD);
+using FnRegGetValueA            = LSTATUS(WINAPI*)(HKEY, LPCSTR,  LPCSTR,  DWORD, LPDWORD, PVOID, LPDWORD);
+using FnRegSetKeyValueW         = LSTATUS(WINAPI*)(HKEY, LPCWSTR, LPCWSTR, DWORD, LPCVOID, DWORD);
+using FnRegSetKeyValueA         = LSTATUS(WINAPI*)(HKEY, LPCSTR,  LPCSTR,  DWORD, LPCVOID, DWORD);
+using FnRegDeleteKeyValueW      = LSTATUS(WINAPI*)(HKEY, LPCWSTR, LPCWSTR);
+using FnRegDeleteKeyValueA      = LSTATUS(WINAPI*)(HKEY, LPCSTR,  LPCSTR);
+using FnRegQueryMultipleValuesW = LSTATUS(WINAPI*)(HKEY, PVALENTW, DWORD, LPWSTR, LPDWORD);
+using FnRegQueryMultipleValuesA = LSTATUS(WINAPI*)(HKEY, PVALENTA, DWORD, LPSTR,  LPDWORD);
+using FnRegDeleteKeyW           = LSTATUS(WINAPI*)(HKEY, LPCWSTR);
+using FnRegDeleteKeyA           = LSTATUS(WINAPI*)(HKEY, LPCSTR);
+using FnRegDeleteKeyExW         = LSTATUS(WINAPI*)(HKEY, LPCWSTR, REGSAM, DWORD);
+using FnRegDeleteKeyExA         = LSTATUS(WINAPI*)(HKEY, LPCSTR,  REGSAM, DWORD);
+using FnRegDeleteTreeW          = LSTATUS(WINAPI*)(HKEY, LPCWSTR);
+using FnRegDeleteTreeA          = LSTATUS(WINAPI*)(HKEY, LPCSTR);
+using FnRegOpenCurrentUser      = LSTATUS(WINAPI*)(REGSAM, PHKEY);
+using FnRegOpenUserClassesRoot  = LSTATUS(WINAPI*)(HANDLE, DWORD, REGSAM, PHKEY);
+using FnRegFlushKey             = LSTATUS(WINAPI*)(HKEY);
+using FnRegNotifyChangeKeyValue = LSTATUS(WINAPI*)(HKEY, BOOL, DWORD, HANDLE, BOOL);
+using FnRegOpenKeyTransactedW   = LSTATUS(WINAPI*)(HKEY, LPCWSTR, DWORD, REGSAM, PHKEY, HANDLE, PVOID);
+using FnRegOpenKeyTransactedA   = LSTATUS(WINAPI*)(HKEY, LPCSTR,  DWORD, REGSAM, PHKEY, HANDLE, PVOID);
+using FnRegCreateKeyTransactedW = LSTATUS(WINAPI*)(HKEY, LPCWSTR, DWORD, LPWSTR, DWORD, REGSAM, LPSECURITY_ATTRIBUTES, PHKEY, LPDWORD, HANDLE, PVOID);
+using FnRegCreateKeyTransactedA = LSTATUS(WINAPI*)(HKEY, LPCSTR,  DWORD, LPSTR,  DWORD, REGSAM, LPSECURITY_ATTRIBUTES, PHKEY, LPDWORD, HANDLE, PVOID);
+using FnRegDeleteKeyTransactedW = LSTATUS(WINAPI*)(HKEY, LPCWSTR, REGSAM, DWORD, HANDLE, PVOID);
+using FnRegDeleteKeyTransactedA = LSTATUS(WINAPI*)(HKEY, LPCSTR,  REGSAM, DWORD, HANDLE, PVOID);
+using FnRegCopyTreeW            = LSTATUS(WINAPI*)(HKEY, LPCWSTR, HKEY);
+
 static FnRegOpenKeyExW    g_origRegOpenKeyExW    = nullptr;
 static FnRegOpenKeyExA    g_origRegOpenKeyExA    = nullptr;
 static FnRegCreateKeyExW  g_origRegCreateKeyExW  = nullptr;
@@ -905,6 +1037,649 @@ static FnRegEnumKeyExA    g_origRegEnumKeyExA    = nullptr;
 static FnRegQueryInfoKeyW g_origRegQueryInfoKeyW = nullptr;
 static FnRegQueryInfoKeyA g_origRegQueryInfoKeyA = nullptr;
 
+static FnRegGetValueW            g_origRegGetValueW            = nullptr;
+static FnRegGetValueA            g_origRegGetValueA            = nullptr;
+static FnRegSetKeyValueW         g_origRegSetKeyValueW         = nullptr;
+static FnRegSetKeyValueA         g_origRegSetKeyValueA         = nullptr;
+static FnRegDeleteKeyValueW      g_origRegDeleteKeyValueW      = nullptr;
+static FnRegDeleteKeyValueA      g_origRegDeleteKeyValueA      = nullptr;
+static FnRegQueryMultipleValuesW g_origRegQueryMultipleValuesW = nullptr;
+static FnRegQueryMultipleValuesA g_origRegQueryMultipleValuesA = nullptr;
+static FnRegDeleteKeyW           g_origRegDeleteKeyW           = nullptr;
+static FnRegDeleteKeyA           g_origRegDeleteKeyA           = nullptr;
+static FnRegDeleteKeyExW         g_origRegDeleteKeyExW         = nullptr;
+static FnRegDeleteKeyExA         g_origRegDeleteKeyExA         = nullptr;
+static FnRegDeleteTreeW          g_origRegDeleteTreeW          = nullptr;
+static FnRegDeleteTreeA          g_origRegDeleteTreeA          = nullptr;
+static FnRegOpenCurrentUser      g_origRegOpenCurrentUser      = nullptr;
+static FnRegOpenUserClassesRoot  g_origRegOpenUserClassesRoot  = nullptr;
+static FnRegFlushKey             g_origRegFlushKey             = nullptr;
+static FnRegNotifyChangeKeyValue g_origRegNotifyChangeKeyValue = nullptr;
+static FnRegOpenKeyTransactedW   g_origRegOpenKeyTransactedW   = nullptr;
+static FnRegOpenKeyTransactedA   g_origRegOpenKeyTransactedA   = nullptr;
+static FnRegCreateKeyTransactedW g_origRegCreateKeyTransactedW = nullptr;
+static FnRegCreateKeyTransactedA g_origRegCreateKeyTransactedA = nullptr;
+static FnRegDeleteKeyTransactedW g_origRegDeleteKeyTransactedW = nullptr;
+static FnRegDeleteKeyTransactedA g_origRegDeleteKeyTransactedA = nullptr;
+static FnRegCopyTreeW            g_origRegCopyTreeW            = nullptr;
+
+// ============================================================
+// Virtual store operations
+// ============================================================
+static LSTATUS CopyOutLocked(const RegValue& rv, LPDWORD lpType, LPBYTE lpData, LPDWORD lpcbData)
+{
+    if (lpType)
+        *lpType = rv.type;
+
+    if (lpcbData)
+    {
+        DWORD needed = static_cast<DWORD>(rv.data.size());
+
+        if (lpData)
+        {
+            if (*lpcbData < needed)
+            {
+                *lpcbData = needed;
+
+                return ERROR_MORE_DATA;
+            }
+
+            memcpy(lpData, rv.data.data(), needed);
+        }
+
+        *lpcbData = needed;
+    }
+
+    return ERROR_SUCCESS;
+}
+
+static const RegValue* FindValueLocked(const std::wstring& keyPath, const std::wstring& upperName)
+{
+    auto kit = g_store.find(keyPath);
+
+    if (kit == g_store.end())
+    {
+        LogRegistryDiag(L"REG MISS", keyPath.c_str(), L"virtual key not in store");
+
+        return nullptr;
+    }
+
+    auto vit = kit->second.find(upperName);
+
+    if (vit == kit->second.end())
+    {
+        LogRegistryDiag(L"REG PARTIAL", keyPath.c_str(),
+            (L"value not in store: " + (upperName.empty() ? std::wstring(L"(default)") : upperName)).c_str());
+
+        return nullptr;
+    }
+
+    return &vit->second;
+}
+
+// --- RegQueryValueEx (shared core) ---
+static LSTATUS VirtualQueryValueW(const std::wstring& keyPath, LPCWSTR lpValueName,
+    LPDWORD lpType, LPBYTE lpData, LPDWORD lpcbData)
+{
+    std::wstring upperName = ToUpper(lpValueName ? lpValueName : L"");
+
+    std::shared_lock lock(g_storeMutex);
+
+    const RegValue* rv = FindValueLocked(keyPath, upperName);
+
+    if (!rv)
+        return ERROR_FILE_NOT_FOUND;
+
+    return CopyOutLocked(*rv, lpType, lpData, lpcbData);
+}
+
+static LSTATUS VirtualQueryValueA(const std::wstring& keyPath, LPCWSTR wideValueName,
+    LPDWORD lpType, LPBYTE lpData, LPDWORD lpcbData)
+{
+    std::wstring upperName = ToUpper(wideValueName ? wideValueName : L"");
+
+    std::shared_lock lock(g_storeMutex);
+
+    const RegValue* rv = FindValueLocked(keyPath, upperName);
+
+    if (!rv)
+        return ERROR_FILE_NOT_FOUND;
+
+    // Binary types: pass raw bytes unchanged.
+    if (rv->type != REG_SZ && rv->type != REG_EXPAND_SZ)
+        return CopyOutLocked(*rv, lpType, lpData, lpcbData);
+
+    if (lpType)
+        *lpType = rv->type;
+
+    const wchar_t* wideRegistryValue = reinterpret_cast<const wchar_t*>(rv->data.data());
+    int wideRegistryValueLength      = static_cast<int>(rv->data.size() / sizeof(wchar_t));
+
+    int ansiRegistryValueLength = WideCharToMultiByte(CP_ACP, 0, wideRegistryValue,
+        wideRegistryValueLength, nullptr, 0, nullptr, nullptr);
+
+    if (lpcbData)
+    {
+        if (lpData)
+        {
+            if (static_cast<int>(*lpcbData) < ansiRegistryValueLength)
+            {
+                *lpcbData = static_cast<DWORD>(ansiRegistryValueLength);
+
+                return ERROR_MORE_DATA;
+            }
+
+            WideCharToMultiByte(CP_ACP, 0, wideRegistryValue, wideRegistryValueLength,
+                reinterpret_cast<LPSTR>(lpData), ansiRegistryValueLength, nullptr, nullptr);
+        }
+
+        *lpcbData = static_cast<DWORD>(ansiRegistryValueLength);
+    }
+
+    return ERROR_SUCCESS;
+}
+
+static RegValue MakeRegValueFromAnsi(DWORD dwType, const BYTE* lpData, DWORD cbData)
+{
+    RegValue registryValue;
+    registryValue.type = dwType;
+
+    if ((dwType == REG_SZ || dwType == REG_EXPAND_SZ) && lpData && cbData > 0)
+    {
+        // Convert ANSI string to wide (cbData typically includes the null terminator)
+        int wideLength = MultiByteToWideChar(CP_ACP, 0, reinterpret_cast<LPCSTR>(lpData),
+            static_cast<int>(cbData), nullptr, 0);
+
+        registryValue.data.resize(static_cast<size_t>(wideLength) * sizeof(wchar_t));
+
+        MultiByteToWideChar(CP_ACP, 0, reinterpret_cast<LPCSTR>(lpData),
+            static_cast<int>(cbData), reinterpret_cast<LPWSTR>(registryValue.data.data()), wideLength);
+    }
+    else if (lpData && cbData > 0)
+        registryValue.data.assign(lpData, lpData + cbData);
+
+    return registryValue;
+}
+
+static std::vector<BYTE> WideBytesToAnsiBytes(const std::vector<BYTE>& wideBytes)
+{
+    int characterCount = static_cast<int>(wideBytes.size() / sizeof(wchar_t));
+
+    if (characterCount <= 0)
+        return {};
+
+    const wchar_t* wide = reinterpret_cast<const wchar_t*>(wideBytes.data());
+
+    int ansiLength = WideCharToMultiByte(CP_ACP, 0, wide, characterCount,
+        nullptr, 0, nullptr, nullptr);
+
+    std::vector<BYTE> ansiBytes(static_cast<size_t>(ansiLength < 0 ? 0 : ansiLength));
+
+    if (ansiLength > 0)
+        WideCharToMultiByte(CP_ACP, 0, wide, characterCount,
+            reinterpret_cast<LPSTR>(ansiBytes.data()), ansiLength, nullptr, nullptr);
+
+    return ansiBytes;
+}
+
+// --- RegGetValue (shared core) ---
+static DWORD RrfBitForType(DWORD type)
+{
+    switch (type)
+    {
+        case REG_NONE:        return RRF_RT_REG_NONE;
+        case REG_SZ:          return RRF_RT_REG_SZ;
+        case REG_EXPAND_SZ:   return RRF_RT_REG_EXPAND_SZ;
+        case REG_BINARY:      return RRF_RT_REG_BINARY;
+        case REG_DWORD:       return RRF_RT_REG_DWORD;
+        case REG_MULTI_SZ:    return RRF_RT_REG_MULTI_SZ;
+        case REG_QWORD:       return RRF_RT_REG_QWORD;
+        default:              return 0;
+    }
+}
+
+static LSTATUS VirtualResolveGetValue(const std::wstring& keyPath, LPCWSTR lpValue,
+    DWORD dwFlags, DWORD& outType, std::vector<BYTE>& outData)
+{
+    if ((dwFlags & RRF_RT_ANY) == RRF_RT_REG_EXPAND_SZ && !(dwFlags & RRF_NOEXPAND))
+        return ERROR_INVALID_PARAMETER;
+
+    DWORD storedType = REG_NONE;
+    {
+        std::wstring upperName = ToUpper(lpValue ? lpValue : L"");
+
+        std::shared_lock lock(g_storeMutex);
+
+        const RegValue* rv = FindValueLocked(keyPath, upperName);
+
+        if (!rv)
+            return ERROR_FILE_NOT_FOUND;
+
+        storedType = rv->type;
+        outData    = rv->data;
+    }
+
+    const DWORD typeFilter = dwFlags & RRF_RT_ANY;
+
+    if (typeFilter != 0 && typeFilter != RRF_RT_ANY &&
+        (typeFilter & RrfBitForType(storedType)) == 0)
+        return ERROR_UNSUPPORTED_TYPE;
+
+    outType = storedType;
+
+    if (storedType == REG_EXPAND_SZ && !(dwFlags & RRF_NOEXPAND))
+    {
+        std::wstring unexpanded(reinterpret_cast<const wchar_t*>(outData.data()),
+            outData.size() / sizeof(wchar_t));
+
+        // Trim at the stored terminator so it is not expanded into the middle of
+        // the result.
+        if (size_t nul = unexpanded.find(L'\0'); nul != std::wstring::npos)
+            unexpanded.resize(nul);
+
+        DWORD needed = ExpandEnvironmentStringsW(unexpanded.c_str(), nullptr, 0);
+
+        if (needed > 0)
+        {
+            std::wstring expanded(needed, L'\0');
+
+            if (ExpandEnvironmentStringsW(unexpanded.c_str(), expanded.data(), needed) == needed)
+            {
+                expanded.resize(needed - 1);   // drop the counted terminator
+
+                const BYTE* bytes = reinterpret_cast<const BYTE*>(expanded.c_str());
+
+                outData.assign(bytes, bytes + (expanded.size() + 1) * sizeof(wchar_t));
+
+                // Windows reports the *expanded* type, and callers key off it.
+                outType = REG_SZ;
+            }
+        }
+    }
+
+    if (outType == REG_SZ || outType == REG_EXPAND_SZ)
+    {
+        size_t characterCount = outData.size() / sizeof(wchar_t);
+        const wchar_t* wide   = reinterpret_cast<const wchar_t*>(outData.data());
+
+        if (characterCount == 0 || wide[characterCount - 1] != L'\0')
+            outData.insert(outData.end(), sizeof(wchar_t), 0);
+    }
+    else if (outType == REG_MULTI_SZ)
+    {
+        // A multi-string ends on two terminators, so this may need both.
+        for (;;)
+        {
+            size_t characterCount = outData.size() / sizeof(wchar_t);
+            const wchar_t* wide   = reinterpret_cast<const wchar_t*>(outData.data());
+
+            if (characterCount >= 2 && wide[characterCount - 1] == L'\0'
+                                    && wide[characterCount - 2] == L'\0')
+                break;
+
+            outData.insert(outData.end(), sizeof(wchar_t), 0);
+        }
+    }
+
+    return ERROR_SUCCESS;
+}
+
+static LSTATUS GetValueCopyOut(const std::vector<BYTE>& data, PVOID pvData, LPDWORD pcbData)
+{
+    DWORD needed = static_cast<DWORD>(data.size());
+
+    if (!pvData)
+    {
+        if (pcbData)
+            *pcbData = needed;
+
+        return ERROR_SUCCESS;
+    }
+
+    if (!pcbData)
+        return ERROR_INVALID_PARAMETER;
+
+    if (*pcbData < needed)
+    {
+        *pcbData = needed;
+
+        return ERROR_MORE_DATA;
+    }
+
+    memcpy(pvData, data.data(), needed);
+
+    *pcbData = needed;
+
+    return ERROR_SUCCESS;
+}
+
+static bool HasDescendantsLocked(const std::wstring& keyPath)
+{
+    const std::wstring prefix = keyPath + L'\\';
+
+    auto it = g_store.lower_bound(prefix);
+
+    return it != g_store.end() && it->first.compare(0, prefix.size(), prefix) == 0;
+}
+
+// --- RegDeleteKey / RegDeleteKeyEx (shared core) ---
+static LSTATUS VirtualDeleteKeyPath(const std::wstring& path)
+{
+    std::unique_lock lock(g_storeMutex);
+
+    if (HasDescendantsLocked(path))
+    {
+        LogRegistryDiag(L"REG PARTIAL", path.c_str(), L"key has subkeys");
+
+        return ERROR_ACCESS_DENIED;
+    }
+
+    if (!g_store.count(path))
+    {
+        LogRegistryDiag(L"REG MISS", path.c_str(), L"virtual key not in store");
+
+        return ERROR_FILE_NOT_FOUND;
+    }
+
+    g_store.erase(path);
+    g_writable.erase(path);
+    g_tombstones.erase(path);   // subsumed by the key tombstone
+
+    if (g_baseKeys.count(path))
+        g_keyTombstones.insert(path);
+
+    g_dirty = true;
+
+    return ERROR_SUCCESS;
+}
+
+// --- RegDeleteTree (shared core) ---
+static LSTATUS VirtualDeleteTree(const std::wstring& path, bool deleteRoot)
+{
+    std::unique_lock lock(g_storeMutex);
+
+    if (deleteRoot && !g_store.count(path) && !HasDescendantsLocked(path))
+    {
+        LogRegistryDiag(L"REG MISS", path.c_str(), L"virtual key not in store");
+
+        return ERROR_FILE_NOT_FOUND;
+    }
+
+    if (!deleteRoot)
+    {
+        if (auto kit = g_store.find(path); kit != g_store.end())
+        {
+            for (const auto& [name, rv] : kit->second)
+                if (g_baseValues.count({ path, name }))
+                    g_tombstones[path].insert(name);
+
+            kit->second.clear();
+        }
+
+        g_writable[path].clear();
+    }
+
+    std::vector<std::wstring> victims;
+
+    if (deleteRoot)
+        victims.push_back(path);
+
+    const std::wstring prefix = path + L'\\';
+
+    for (const auto& [key, values] : g_store)
+        if (key.compare(0, prefix.size(), prefix) == 0)
+            victims.push_back(key);
+
+    for (const std::wstring& victim : victims)
+    {
+        g_store.erase(victim);
+        g_writable.erase(victim);
+        g_tombstones.erase(victim);
+
+        if (g_baseKeys.count(victim))
+            g_keyTombstones.insert(victim);
+    }
+
+    g_dirty = true;
+
+    return ERROR_SUCCESS;
+}
+
+// --- RegCopyTree (shared core) ---
+using SubtreeSnapshot = std::vector<std::pair<std::wstring, ValueMap>>;
+
+static constexpr size_t kCopyTreeMaxNodes = 4096;
+
+static SubtreeSnapshot SnapshotVirtualSubtree(const std::wstring& rootPath)
+{
+    SubtreeSnapshot snapshot;
+
+    const std::wstring prefix = rootPath + L'\\';
+
+    std::shared_lock lock(g_storeMutex);
+
+    if (auto it = g_store.find(rootPath); it != g_store.end())
+        snapshot.emplace_back(std::wstring{}, it->second);
+
+    for (const auto& [key, values] : g_store)
+    {
+        if (snapshot.size() >= kCopyTreeMaxNodes)
+            break;
+
+        if (key.compare(0, prefix.size(), prefix) == 0)
+            snapshot.emplace_back(key.substr(prefix.size()), values);
+    }
+
+    return snapshot;
+}
+
+static SubtreeSnapshot SnapshotRealSubtree(HKEY hRoot)
+{
+    SubtreeSnapshot snapshot;
+
+    std::vector<std::pair<HKEY, std::wstring>> pending{ { hRoot, std::wstring{} } };
+
+    while (!pending.empty() && snapshot.size() < kCopyTreeMaxNodes)
+    {
+        auto [hKey, relativePath] = pending.back();
+        pending.pop_back();
+
+        ValueMap values;
+
+        for (DWORD index = 0; ; ++index)
+        {
+            wchar_t name[16384];
+            DWORD   nameLength = ARRAYSIZE(name);
+            DWORD   type = 0, dataSize = 0;
+
+            LSTATUS status = g_origRegEnumValueW(hKey, index, name, &nameLength,
+                nullptr, &type, nullptr, &dataSize);
+
+            if (status != ERROR_SUCCESS)
+                break;
+
+            RegValue registryValue;
+            registryValue.type = type;
+            registryValue.data.resize(dataSize);
+
+            if (g_origRegQueryValueExW(hKey, name, nullptr, &type,
+                    dataSize ? registryValue.data.data() : nullptr, &dataSize) == ERROR_SUCCESS)
+            {
+                registryValue.type = type;
+                registryValue.data.resize(dataSize);
+
+                values[ToUpper(name)] = std::move(registryValue);
+            }
+        }
+
+        snapshot.emplace_back(relativePath, std::move(values));
+
+        for (DWORD index = 0; ; ++index)
+        {
+            wchar_t childName[256];
+            DWORD   childLength = ARRAYSIZE(childName);
+
+            if (g_origRegEnumKeyExW(hKey, index, childName, &childLength,
+                    nullptr, nullptr, nullptr, nullptr) != ERROR_SUCCESS)
+                break;
+
+            HKEY hChild = nullptr;
+
+            if (g_origRegOpenKeyExW(hKey, childName, 0, KEY_READ, &hChild) == ERROR_SUCCESS)
+                pending.emplace_back(hChild,
+                    relativePath.empty() ? std::wstring(childName)
+                                         : relativePath + L'\\' + childName);
+        }
+
+        // hRoot belongs to the caller; every other handle here is one we opened.
+        if (hKey != hRoot)
+            g_origRegCloseKey(hKey);
+    }
+
+    for (auto& [hKey, unused] : pending)
+        if (hKey != hRoot)
+            g_origRegCloseKey(hKey);
+
+    return snapshot;
+}
+
+static void ApplyVirtualSubtree(const std::wstring& destPath, const SubtreeSnapshot& snapshot)
+{
+    std::unique_lock lock(g_storeMutex);
+
+    for (const auto& [relativePath, values] : snapshot)
+    {
+        std::wstring keyPath = relativePath.empty() ? destPath
+                                                    : destPath + L'\\' + relativePath;
+
+        g_store.emplace(keyPath, ValueMap{});
+        g_writable.emplace(keyPath, ValueMap{});
+
+        for (const auto& [name, registryValue] : values)
+        {
+            g_store[keyPath][name]    = registryValue;
+            g_writable[keyPath][name] = registryValue;
+
+            ClearTombstone(keyPath, name);
+        }
+    }
+
+    g_dirty = true;
+}
+
+static LSTATUS ApplyRealSubtree(HKEY hDest, const SubtreeSnapshot& snapshot)
+{
+    for (const auto& [relativePath, values] : snapshot)
+    {
+        HKEY hKey = hDest;
+
+        if (!relativePath.empty() &&
+            g_origRegCreateKeyExW(hDest, relativePath.c_str(), 0, nullptr,
+                REG_OPTION_NON_VOLATILE, KEY_WRITE, nullptr, &hKey, nullptr) != ERROR_SUCCESS)
+            continue;
+
+        for (const auto& [name, registryValue] : values)
+            g_origRegSetValueExW(hKey, name.c_str(), 0, registryValue.type,
+                registryValue.data.empty() ? nullptr : registryValue.data.data(),
+                static_cast<DWORD>(registryValue.data.size()));
+
+        if (hKey != hDest)
+            g_origRegCloseKey(hKey);
+    }
+
+    return ERROR_SUCCESS;
+}
+
+// --- RegOpenKeyEx (shared core) ---
+// The key need not be in the store: being inside the virtual space is what makes
+// the open succeed, which is how a game finds a key it created at runtime.
+static LSTATUS VirtualOpenKey(const std::wstring& path, PHKEY phkResult)
+{
+    if (phkResult)
+        *phkResult = NewVirtHandle(path);
+
+    return ERROR_SUCCESS;
+}
+
+// --- RegCreateKeyEx (shared core) ---
+static LSTATUS VirtualCreateKey(const std::wstring& path, PHKEY phkResult, LPDWORD lpdwDisposition)
+{
+    DWORD disposition;
+    {
+        std::unique_lock lk(g_storeMutex);
+        bool existed     = g_store.count(path) > 0;
+        g_store.emplace(path, ValueMap{});
+        disposition      = existed ? REG_OPENED_EXISTING_KEY : REG_CREATED_NEW_KEY;
+
+        // A key the game invented belongs to the writable layer even before
+        // a value lands in it, so an empty key still round-trips.
+        if (!existed)
+            g_writable.emplace(path, ValueMap{});
+    }
+
+    if (phkResult)
+        *phkResult = NewVirtHandle(path);
+
+    if (lpdwDisposition)
+        *lpdwDisposition = disposition;
+
+    return ERROR_SUCCESS;
+}
+
+// --- RegSetValueEx (shared core) ---
+static void VirtualSetValueW(const std::wstring& path, LPCWSTR lpValueName, RegValue registryValue)
+{
+    std::wstring upperName = ToUpper(lpValueName ? lpValueName : L"");
+
+    std::unique_lock lock(g_storeMutex);
+
+    g_writable[path][upperName] = registryValue;
+    g_store[path][upperName]    = std::move(registryValue);
+
+    ClearTombstone(path, upperName);
+
+    g_dirty = true;
+}
+
+// --- RegDeleteValue (shared core) ---
+static LSTATUS VirtualDeleteValueW(const std::wstring& path, LPCWSTR lpValueName)
+{
+    std::wstring upperName = ToUpper(lpValueName ? lpValueName : L"");
+
+    std::unique_lock lock(g_storeMutex);
+
+    auto kit = g_store.find(path);
+
+    if (kit == g_store.end())
+    {
+        LogRegistryDiag(L"REG MISS", path.c_str(), L"virtual key not in store");
+
+        return ERROR_FILE_NOT_FOUND;
+    }
+
+    auto vit = kit->second.find(upperName);
+
+    if (vit == kit->second.end())
+    {
+        LogRegistryDiag(L"REG PARTIAL", path.c_str(),
+            (L"value not in store: " + (upperName.empty() ? std::wstring(L"(default)") : upperName)).c_str());
+
+        return ERROR_FILE_NOT_FOUND;
+    }
+
+    kit->second.erase(vit);
+
+    if (auto wit = g_writable.find(path); wit != g_writable.end())
+        wit->second.erase(upperName);
+
+    if (g_baseValues.count({ path, upperName }))
+        g_tombstones[path].insert(upperName);
+
+    g_dirty = true;
+
+    return ERROR_SUCCESS;
+}
+
 // ============================================================
 // Hook implementations
 // ============================================================
@@ -922,10 +1697,7 @@ static LSTATUS WINAPI HookRegOpenKeyExW(HKEY hKey, LPCWSTR lpSubKey, DWORD ulOpt
     LogVirtualSpaceVerdict(path, virtualSpace);
 
     if (virtualSpace)
-    {
-        if (phkResult) *phkResult = NewVirtHandle(path);
-        return ERROR_SUCCESS;
-    }
+        return VirtualOpenKey(path, phkResult);
 
     LSTATUS st = g_origRegOpenKeyExW(hKey, lpSubKey, ulOptions, samDesired, phkResult);
     
@@ -947,12 +1719,7 @@ static LSTATUS WINAPI HookRegOpenKeyExA(HKEY hKey, LPCSTR lpSubKey, DWORD ulOpti
     LogVirtualSpaceVerdict(path, virtualSpace);
 
     if (virtualSpace)
-    {
-        if (phkResult)
-            *phkResult = NewVirtHandle(path);
-
-        return ERROR_SUCCESS;
-    }
+        return VirtualOpenKey(path, phkResult);
 
     LSTATUS st = g_origRegOpenKeyExA(hKey, lpSubKey, ulOptions, samDesired, phkResult);
     
@@ -976,28 +1743,7 @@ static LSTATUS WINAPI HookRegCreateKeyExW(HKEY hKey, LPCWSTR lpSubKey, DWORD Res
     LogVirtualSpaceVerdict(path, virtualSpace);
 
     if (virtualSpace)
-    {
-        DWORD disposition;
-        {
-            std::unique_lock lk(g_storeMutex);
-            bool existed     = g_store.count(path) > 0;
-            g_store.emplace(path, ValueMap{});
-            disposition      = existed ? REG_OPENED_EXISTING_KEY : REG_CREATED_NEW_KEY;
-
-            // A key the game invented belongs to the writable layer even before
-            // a value lands in it, so an empty key still round-trips.
-            if (!existed)
-                g_writable.emplace(path, ValueMap{});
-        }
-        
-        if (phkResult)
-            *phkResult = NewVirtHandle(path);
-        
-        if (lpdwDisposition)
-            *lpdwDisposition = disposition;
-        
-        return ERROR_SUCCESS;
-    }
+        return VirtualCreateKey(path, phkResult, lpdwDisposition);
 
     LSTATUS status = g_origRegCreateKeyExW(hKey, lpSubKey, Reserved, lpClass, dwOptions,
         samDesired, lpSA, phkResult, lpdwDisposition);
@@ -1022,28 +1768,7 @@ static LSTATUS WINAPI HookRegCreateKeyExA(HKEY hKey, LPCSTR lpSubKey, DWORD Rese
     LogVirtualSpaceVerdict(path, virtualSpace);
 
     if (virtualSpace)
-    {
-        DWORD disposition;
-        {
-            std::unique_lock lk(g_storeMutex);
-            bool existed     = g_store.count(path) > 0;
-            g_store.emplace(path, ValueMap{});
-            disposition      = existed ? REG_OPENED_EXISTING_KEY : REG_CREATED_NEW_KEY;
-
-            // A key the game invented belongs to the writable layer even before
-            // a value lands in it, so an empty key still round-trips.
-            if (!existed)
-                g_writable.emplace(path, ValueMap{});
-        }
-        
-        if (phkResult)
-            *phkResult = NewVirtHandle(path);
-        
-        if (lpdwDisposition)
-            *lpdwDisposition  = disposition;
-        
-        return ERROR_SUCCESS;
-    }
+        return VirtualCreateKey(path, phkResult, lpdwDisposition);
 
     LSTATUS status = g_origRegCreateKeyExA(hKey, lpSubKey, Reserved, lpClass, dwOptions,
         samDesired, lpSA, phkResult, lpdwDisposition);
@@ -1075,71 +1800,15 @@ static LSTATUS WINAPI HookRegCloseKey(HKEY hKey)
     return g_origRegCloseKey(hKey);
 }
 
-// --- RegQueryValueEx (shared core) ---
-static LSTATUS VirtualQueryValueW(const std::wstring& keyPath, LPCWSTR lpValueName,
-    LPDWORD lpType, LPBYTE lpData, LPDWORD lpcbData)
-{
-    std::wstring upperName = ToUpper(lpValueName ? lpValueName : L"");
-
-    std::shared_lock lock(g_storeMutex);
-
-    auto kit = g_store.find(keyPath);
-
-    if (kit == g_store.end())
-    {
-        // The handle is virtual (an ancestor or descendant matched), but this
-        // exact key was never loaded from Registry.reg. No fallback to the real
-        // registry happens here — the game just gets ERROR_FILE_NOT_FOUND.
-        LogRegistryDiag(L"REG MISS", keyPath.c_str(), L"virtual key not in store");
-
-        return ERROR_FILE_NOT_FOUND;
-    }
-
-    auto vit = kit->second.find(upperName);
-
-    if (vit == kit->second.end())
-    {
-        LogRegistryDiag(L"REG PARTIAL", keyPath.c_str(),
-            (L"value not in store: " + (upperName.empty() ? std::wstring(L"(default)") : upperName)).c_str());
-
-        return ERROR_FILE_NOT_FOUND;
-    }
-
-    const RegValue& rv = vit->second;
-    
-    if (lpType)
-        *lpType = rv.type;
-
-    if (lpcbData)
-    {
-        DWORD needed = static_cast<DWORD>(rv.data.size());
-        
-        if (lpData)
-        {
-            if (*lpcbData < needed)
-            {
-                *lpcbData = needed;
-                return ERROR_MORE_DATA;
-            }
-            
-            memcpy(lpData, rv.data.data(), needed);
-        }
-        
-        *lpcbData = needed;
-    }
-    
-    return ERROR_SUCCESS;
-}
-
 static LSTATUS WINAPI HookRegQueryValueExW(HKEY hKey, LPCWSTR lpValueName, LPDWORD lpReserved,
     LPDWORD lpType, LPBYTE lpData, LPDWORD lpcbData)
 {
     std::wstring path = GetVirtualPath(hKey);
-    
+
     if (!path.empty())
     {
         LogRegistryAccess(L"REG READ", path.c_str(), lpValueName);
-        
+
         return VirtualQueryValueW(path, lpValueName, lpType, lpData, lpcbData);
     }
 
@@ -1147,7 +1816,7 @@ static LSTATUS WINAPI HookRegQueryValueExW(HKEY hKey, LPCWSTR lpValueName, LPDWO
     if (g_logRegistry)
     {
         std::wstring realPath = GetAnyPathFull(hKey);
-        
+
         if (!realPath.empty())
             LogRegistryAccess(L"REG READ", realPath.c_str(), lpValueName);
     }
@@ -1158,91 +1827,26 @@ static LSTATUS WINAPI HookRegQueryValueExW(HKEY hKey, LPCWSTR lpValueName, LPDWO
 static LSTATUS WINAPI HookRegQueryValueExA(HKEY hKey, LPCSTR lpValueName, LPDWORD lpReserved,
     LPDWORD lpType, LPBYTE lpData, LPDWORD lpcbData)
 {
-    std::wstring path = GetVirtualPath(hKey);
-    
+    std::wstring path     = GetVirtualPath(hKey);
+    std::wstring wideName = lpValueName ? AnsiToWide(lpValueName) : std::wstring{};
+
     if (path.empty())
     {
         // Log real registry reads
         if (g_logRegistry)
         {
             std::wstring realPath = GetAnyPathFull(hKey);
-            std::wstring wideName = lpValueName ? AnsiToWide(lpValueName) : std::wstring{};
-            
+
             if (!realPath.empty())
                 LogRegistryAccess(L"REG READ", realPath.c_str(), wideName.c_str());
         }
-        
+
         return g_origRegQueryValueExA(hKey, lpValueName, lpReserved, lpType, lpData, lpcbData);
     }
 
-    std::wstring wideName = lpValueName ? AnsiToWide(lpValueName) : std::wstring{};
-    
     LogRegistryAccess(L"REG READ", path.c_str(), wideName.c_str());
-    
-    DWORD type = 0;
 
-    // Query wide first to discover type and data size
-    LSTATUS status = VirtualQueryValueW(path, wideName.c_str(), &type, nullptr, nullptr);
-    
-    if (status != ERROR_SUCCESS)
-        return status;
-    
-    if (lpType)
-        *lpType = type;
-
-    if (type == REG_SZ || type == REG_EXPAND_SZ)
-    {
-        // Convert stored wide data to ANSI
-        std::shared_lock lock(g_storeMutex);
-        
-        auto kit = g_store.find(path);
-
-        if (kit == g_store.end())
-        {
-            LogRegistryDiag(L"REG MISS", path.c_str(), L"virtual key not in store");
-
-            return ERROR_FILE_NOT_FOUND;
-        }
-
-        auto vit = kit->second.find(ToUpper(wideName));
-
-        if (vit == kit->second.end())
-        {
-            LogRegistryDiag(L"REG PARTIAL", path.c_str(), L"value not in store");
-
-            return ERROR_FILE_NOT_FOUND;
-        }
-
-        const RegValue& registryValue = vit->second;
-        const wchar_t* wideRegistryValue = reinterpret_cast<const wchar_t*>(registryValue.data.data());
-        int wideRegistryValueLength = static_cast<int>(registryValue.data.size() / sizeof(wchar_t));
-
-        int ansiRegistryValueLength = WideCharToMultiByte(CP_ACP, 0, wideRegistryValue, wideRegistryValueLength, nullptr, 0, nullptr, nullptr);
-        
-        if (lpcbData)
-        {
-            if (lpData)
-            {
-                if (static_cast<int>(*lpcbData) < ansiRegistryValueLength)
-                {
-                    *lpcbData = static_cast<DWORD>(ansiRegistryValueLength);
-                    
-                    return ERROR_MORE_DATA;
-                }
-                
-                WideCharToMultiByte(CP_ACP, 0, wideRegistryValue, wideRegistryValueLength, reinterpret_cast<LPSTR>(lpData), ansiRegistryValueLength, nullptr, nullptr);
-            }
-            
-            *lpcbData = static_cast<DWORD>(ansiRegistryValueLength);
-        }
-        
-        return ERROR_SUCCESS;
-    }
-    else
-    {
-        // Binary types: pass raw bytes unchanged
-        return VirtualQueryValueW(path, wideName.c_str(), lpType, lpData, lpcbData);
-    }
+    return VirtualQueryValueA(path, wideName.c_str(), lpType, lpData, lpcbData);
 }
 
 // --- RegSetValueEx ---
@@ -1250,17 +1854,17 @@ static LSTATUS WINAPI HookRegSetValueExW(HKEY hKey, LPCWSTR lpValueName, DWORD /
     DWORD dwType, const BYTE* lpData, DWORD cbData)
 {
     std::wstring path = GetVirtualPath(hKey);
-    
+
     if (path.empty())
     {
         if (g_logRegistry)
         {
             std::wstring realPath = GetAnyPathFull(hKey);
-            
+
             if (!realPath.empty())
                 LogRegistryAccess(L"REG WRITE", realPath.c_str(), lpValueName);
         }
-        
+
         return g_origRegSetValueExW(hKey, lpValueName, 0, dwType, lpData, cbData);
     }
 
@@ -1268,25 +1872,14 @@ static LSTATUS WINAPI HookRegSetValueExW(HKEY hKey, LPCWSTR lpValueName, DWORD /
 
     RegValue registryValue;
     registryValue.type = dwType;
-    
+
     if (lpData && cbData > 0)
         registryValue.data.assign(lpData, lpData + cbData);
 
-    std::wstring upperName = ToUpper(lpValueName ? lpValueName : L"");
+    VirtualSetValueW(path, lpValueName, std::move(registryValue));
 
-    {
-        std::unique_lock lock(g_storeMutex);
-
-        g_writable[path][upperName] = registryValue;
-        g_store[path][upperName]    = std::move(registryValue);
-
-        ClearTombstone(path, upperName);
-
-        g_dirty = true;
-    }
-    
     SaveRegFile();
-    
+
     return ERROR_SUCCESS;
 }
 
@@ -1295,55 +1888,27 @@ static LSTATUS WINAPI HookRegSetValueExA(HKEY hKey, LPCSTR lpValueName, DWORD /*
 {
     std::wstring path  = GetVirtualPath(hKey);
     std::wstring wideRegistyValueName = lpValueName ? AnsiToWide(lpValueName) : std::wstring{};
+
     if (path.empty())
     {
         if (g_logRegistry)
         {
             std::wstring realPath = GetAnyPathFull(hKey);
-            
+
             if (!realPath.empty())
                 LogRegistryAccess(L"REG WRITE", realPath.c_str(), wideRegistyValueName.c_str());
         }
-        
+
         return g_origRegSetValueExA(hKey, lpValueName, 0, dwType, lpData, cbData);
     }
 
     LogRegistryAccess(L"REG WRITE", path.c_str(), wideRegistyValueName.c_str());
-    
-    RegValue registryValue;
-    registryValue.type = dwType;
 
-    if ((dwType == REG_SZ || dwType == REG_EXPAND_SZ) && lpData && cbData > 0)
-    {
-        // Convert ANSI string to wide (cbData typically includes the null terminator)
-        int wideLength = MultiByteToWideChar(CP_ACP, 0, reinterpret_cast<LPCSTR>(lpData),
-            static_cast<int>(cbData), nullptr, 0);
-        
-        registryValue.data.resize(static_cast<size_t>(wideLength) * sizeof(wchar_t));
-        
-        MultiByteToWideChar(CP_ACP, 0, reinterpret_cast<LPCSTR>(lpData),
-            static_cast<int>(cbData), reinterpret_cast<LPWSTR>(registryValue.data.data()), wideLength);
-    }
-    else if (lpData && cbData > 0)
-    {
-        registryValue.data.assign(lpData, lpData + cbData);
-    }
+    VirtualSetValueW(path, wideRegistyValueName.c_str(),
+        MakeRegValueFromAnsi(dwType, lpData, cbData));
 
-    std::wstring upperName = ToUpper(wideRegistyValueName);
-
-    {
-        std::unique_lock lock(g_storeMutex);
-
-        g_writable[path][upperName] = registryValue;
-        g_store[path][upperName]    = std::move(registryValue);
-
-        ClearTombstone(path, upperName);
-
-        g_dirty = true;
-    }
-    
     SaveRegFile();
-    
+
     return ERROR_SUCCESS;
 }
 
@@ -1351,7 +1916,7 @@ static LSTATUS WINAPI HookRegSetValueExA(HKEY hKey, LPCSTR lpValueName, DWORD /*
 static LSTATUS WINAPI HookRegDeleteValueW(HKEY hKey, LPCWSTR lpValueName)
 {
     std::wstring path = GetVirtualPath(hKey);
-    
+
     if (path.empty())
     {
         if (g_logRegistry)
@@ -1360,59 +1925,25 @@ static LSTATUS WINAPI HookRegDeleteValueW(HKEY hKey, LPCWSTR lpValueName)
             if (!realPath.empty())
                 LogRegistryAccess(L"REG DELETE", realPath.c_str(), lpValueName);
         }
-        
+
         return g_origRegDeleteValueW(hKey, lpValueName);
     }
 
     LogRegistryAccess(L"REG DELETE", path.c_str(), lpValueName);
-    
-    std::wstring upperName = ToUpper(lpValueName ? lpValueName : L"");
-    {
-        std::unique_lock lock(g_storeMutex);
-        auto kit = g_store.find(path);
 
-        if (kit == g_store.end())
-        {
-            LogRegistryDiag(L"REG MISS", path.c_str(), L"virtual key not in store");
+    LSTATUS status = VirtualDeleteValueW(path, lpValueName);
 
-            return ERROR_FILE_NOT_FOUND;
-        }
+    if (status == ERROR_SUCCESS)
+        SaveRegFile();
 
-        auto vit = kit->second.find(upperName);
-
-        if (vit == kit->second.end())
-        {
-            LogRegistryDiag(L"REG PARTIAL", path.c_str(),
-                (L"value not in store: " + (upperName.empty() ? std::wstring(L"(default)") : upperName)).c_str());
-
-            return ERROR_FILE_NOT_FOUND;
-        }
-
-        kit->second.erase(vit);
-
-        if (auto wit = g_writable.find(path); wit != g_writable.end())
-            wit->second.erase(upperName);
-
-        // A base layer would hand the value straight back on the next launch,
-        // so the delete has to be recorded rather than just applied. With one
-        // file there is no base layer, nothing is recorded, and the written file
-        // looks exactly as it always did.
-        if (g_baseValues.count({ path, upperName }))
-            g_tombstones[path].insert(upperName);
-
-        g_dirty = true;
-    }
-    
-    SaveRegFile();
-    
-    return ERROR_SUCCESS;
+    return status;
 }
 
 static LSTATUS WINAPI HookRegDeleteValueA(HKEY hKey, LPCSTR lpValueName)
 {
     // Delegate to W variant which handles both logging and virtual store.
     std::wstring wideRegistryValueName = lpValueName ? AnsiToWide(lpValueName) : std::wstring{};
-    
+
     return HookRegDeleteValueW(hKey, wideRegistryValueName.c_str());
 }
 
@@ -1827,6 +2358,723 @@ static LSTATUS WINAPI HookRegQueryInfoKeyA(HKEY hKey, LPSTR lpClass, LPDWORD lpc
         lpcbMaxValueLen, lpcbSecurityDescriptor, lpftLastWriteTime);
 }
 
+// ============================================================
+// Composite hooks
+// ============================================================
+// Each of these takes hKey + lpSubKey and opens the key through an internal
+// entry point (RegOpenKeyExInternalW, RegCreateKeyExInternalW) that is not the
+// exported function we hook -- so the nested leaf call arrives with a real
+// handle we never tracked, and without a hook here the whole operation lands in
+// the real registry. Where the passthrough branch *does* reach a leaf hook, the
+// composite stays silent and lets that hook do the logging, so one call by the
+// game is one line in the log.
+
+// --- RegGetValue ---
+static LSTATUS WINAPI HookRegGetValueW(HKEY hkey, LPCWSTR lpSubKey, LPCWSTR lpValue,
+    DWORD dwFlags, LPDWORD pdwType, PVOID pvData, LPDWORD pcbData)
+{
+    std::wstring path = BuildPath(hkey, lpSubKey);
+
+    bool virtualSpace = !path.empty() && InVirtualSpace(path);
+
+    LogVirtualSpaceVerdict(path, virtualSpace);
+
+    if (!virtualSpace)
+        return g_origRegGetValueW(hkey, lpSubKey, lpValue, dwFlags, pdwType, pvData, pcbData);
+
+    LogRegistryAccess(L"REG READ", path.c_str(), lpValue);
+
+    // Captured before the copy-out, which overwrites *pcbData with the required
+    // size -- zeroing against that instead would run past the caller's buffer.
+    DWORD callerSize = (pvData && pcbData) ? *pcbData : 0;
+
+    DWORD             type = REG_NONE;
+    std::vector<BYTE> data;
+
+    LSTATUS status = VirtualResolveGetValue(path, lpValue, dwFlags, type, data);
+
+    if (status == ERROR_SUCCESS)
+        status = GetValueCopyOut(data, pvData, pcbData);
+
+    // Windows reports the type even when the buffer was too small.
+    if (pdwType && (status == ERROR_SUCCESS || status == ERROR_MORE_DATA))
+        *pdwType = type;
+
+    // Handled in one place so that no early return above can miss it.
+    if (status != ERROR_SUCCESS && (dwFlags & RRF_ZEROONFAILURE) && pvData)
+        memset(pvData, 0, callerSize);
+
+    return status;
+}
+
+static LSTATUS WINAPI HookRegGetValueA(HKEY hkey, LPCSTR lpSubKey, LPCSTR lpValue,
+    DWORD dwFlags, LPDWORD pdwType, PVOID pvData, LPDWORD pcbData)
+{
+    std::wstring wideSubKey = lpSubKey ? AnsiToWide(lpSubKey) : std::wstring{};
+    std::wstring wideValue  = lpValue  ? AnsiToWide(lpValue)  : std::wstring{};
+
+    std::wstring path = BuildPath(hkey, wideSubKey.empty() ? nullptr : wideSubKey.c_str());
+
+    bool virtualSpace = !path.empty() && InVirtualSpace(path);
+
+    LogVirtualSpaceVerdict(path, virtualSpace);
+
+    if (!virtualSpace)
+        return g_origRegGetValueA(hkey, lpSubKey, lpValue, dwFlags, pdwType, pvData, pcbData);
+
+    LogRegistryAccess(L"REG READ", path.c_str(), wideValue.c_str());
+
+    DWORD callerSize = (pvData && pcbData) ? *pcbData : 0;
+
+    DWORD             type = REG_NONE;
+    std::vector<BYTE> data;
+
+    LSTATUS status = VirtualResolveGetValue(path, wideValue.c_str(), dwFlags, type, data);
+
+    if (status == ERROR_SUCCESS)
+    {
+        if (type == REG_SZ || type == REG_EXPAND_SZ || type == REG_MULTI_SZ)
+            data = WideBytesToAnsiBytes(data);
+
+        status = GetValueCopyOut(data, pvData, pcbData);
+    }
+
+    if (pdwType && (status == ERROR_SUCCESS || status == ERROR_MORE_DATA))
+        *pdwType = type;
+
+    if (status != ERROR_SUCCESS && (dwFlags & RRF_ZEROONFAILURE) && pvData)
+        memset(pvData, 0, callerSize);
+
+    return status;
+}
+
+// --- RegSetKeyValue ---
+static LSTATUS WINAPI HookRegSetKeyValueW(HKEY hKey, LPCWSTR lpSubKey, LPCWSTR lpValueName,
+    DWORD dwType, LPCVOID lpData, DWORD cbData)
+{
+    std::wstring path = BuildPath(hKey, lpSubKey);
+
+    bool virtualSpace = !path.empty() && InVirtualSpace(path);
+
+    LogVirtualSpaceVerdict(path, virtualSpace);
+
+    if (!virtualSpace)
+        return g_origRegSetKeyValueW(hKey, lpSubKey, lpValueName, dwType, lpData, cbData);
+
+    LogRegistryAccess(L"REG WRITE", path.c_str(), lpValueName);
+
+    // The API creates the key when it is missing, so the create belongs here too.
+    VirtualCreateKey(path, nullptr, nullptr);
+
+    RegValue registryValue;
+    registryValue.type = dwType;
+
+    if (lpData && cbData > 0)
+    {
+        const BYTE* bytes = static_cast<const BYTE*>(lpData);
+
+        registryValue.data.assign(bytes, bytes + cbData);
+    }
+
+    VirtualSetValueW(path, lpValueName, std::move(registryValue));
+
+    SaveRegFile();
+
+    return ERROR_SUCCESS;
+}
+
+static LSTATUS WINAPI HookRegSetKeyValueA(HKEY hKey, LPCSTR lpSubKey, LPCSTR lpValueName,
+    DWORD dwType, LPCVOID lpData, DWORD cbData)
+{
+    std::wstring wideSubKey   = lpSubKey    ? AnsiToWide(lpSubKey)    : std::wstring{};
+    std::wstring wideValueName = lpValueName ? AnsiToWide(lpValueName) : std::wstring{};
+
+    std::wstring path = BuildPath(hKey, wideSubKey.empty() ? nullptr : wideSubKey.c_str());
+
+    bool virtualSpace = !path.empty() && InVirtualSpace(path);
+
+    LogVirtualSpaceVerdict(path, virtualSpace);
+
+    if (!virtualSpace)
+        return g_origRegSetKeyValueA(hKey, lpSubKey, lpValueName, dwType, lpData, cbData);
+
+    LogRegistryAccess(L"REG WRITE", path.c_str(), wideValueName.c_str());
+
+    VirtualCreateKey(path, nullptr, nullptr);
+
+    VirtualSetValueW(path, wideValueName.c_str(),
+        MakeRegValueFromAnsi(dwType, static_cast<const BYTE*>(lpData), cbData));
+
+    SaveRegFile();
+
+    return ERROR_SUCCESS;
+}
+
+// --- RegDeleteKeyValue ---
+static LSTATUS WINAPI HookRegDeleteKeyValueW(HKEY hKey, LPCWSTR lpSubKey, LPCWSTR lpValueName)
+{
+    std::wstring path = BuildPath(hKey, lpSubKey);
+
+    bool virtualSpace = !path.empty() && InVirtualSpace(path);
+
+    LogVirtualSpaceVerdict(path, virtualSpace);
+
+    if (!virtualSpace)
+        return g_origRegDeleteKeyValueW(hKey, lpSubKey, lpValueName);
+
+    LogRegistryAccess(L"REG DELETE", path.c_str(), lpValueName);
+
+    LSTATUS status = VirtualDeleteValueW(path, lpValueName);
+
+    if (status == ERROR_SUCCESS)
+        SaveRegFile();
+
+    return status;
+}
+
+static LSTATUS WINAPI HookRegDeleteKeyValueA(HKEY hKey, LPCSTR lpSubKey, LPCSTR lpValueName)
+{
+    std::wstring wideSubKey    = lpSubKey    ? AnsiToWide(lpSubKey)    : std::wstring{};
+    std::wstring wideValueName = lpValueName ? AnsiToWide(lpValueName) : std::wstring{};
+
+    return HookRegDeleteKeyValueW(hKey,
+        wideSubKey.empty() ? nullptr : wideSubKey.c_str(),
+        lpValueName ? wideValueName.c_str() : nullptr);
+}
+
+// --- RegQueryMultipleValues ---
+static LSTATUS WINAPI HookRegQueryMultipleValuesW(HKEY hKey, PVALENTW val_list, DWORD num_vals,
+    LPWSTR lpValueBuf, LPDWORD ldwTotsize)
+{
+    std::wstring path = GetVirtualPath(hKey);
+
+    if (path.empty())
+    {
+        // Nothing nested fires on the real path -- the implementation is
+        // NtQueryMultipleValueKey -- so this branch logs for itself.
+        if (g_logRegistry)
+        {
+            std::wstring realPath = GetAnyPathFull(hKey);
+
+            if (!realPath.empty())
+                for (DWORD i = 0; val_list && i < num_vals; ++i)
+                    LogRegistryAccess(L"REG READ", realPath.c_str(), val_list[i].ve_valuename);
+        }
+
+        return g_origRegQueryMultipleValuesW(hKey, val_list, num_vals, lpValueBuf, ldwTotsize);
+    }
+
+    if (!ldwTotsize)
+        return ERROR_INVALID_PARAMETER;
+
+    if (num_vals == 0)
+    {
+        *ldwTotsize = 0;
+
+        return ERROR_SUCCESS;
+    }
+
+    if (!val_list)
+        return ERROR_INVALID_PARAMETER;
+
+    for (DWORD i = 0; i < num_vals; ++i)
+        LogRegistryAccess(L"REG READ", path.c_str(), val_list[i].ve_valuename);
+
+    std::vector<std::vector<BYTE>> payloads(num_vals);
+    std::vector<DWORD>             types(num_vals, REG_NONE);
+    DWORD                          total = 0;
+
+    {
+        std::shared_lock lock(g_storeMutex);
+
+        for (DWORD i = 0; i < num_vals; ++i)
+        {
+            std::wstring upperName = ToUpper(val_list[i].ve_valuename
+                ? val_list[i].ve_valuename : L"");
+
+            const RegValue* rv = FindValueLocked(path, upperName);
+
+            if (!rv)
+                return ERROR_FILE_NOT_FOUND;
+
+            types[i]    = rv->type;
+            payloads[i] = rv->data;
+            total      += static_cast<DWORD>(rv->data.size());
+        }
+    }
+
+    if (!lpValueBuf || *ldwTotsize < total)
+    {
+        *ldwTotsize = total;
+
+        return ERROR_MORE_DATA;
+    }
+
+    BYTE* cursor = reinterpret_cast<BYTE*>(lpValueBuf);
+
+    for (DWORD i = 0; i < num_vals; ++i)
+    {
+        memcpy(cursor, payloads[i].data(), payloads[i].size());
+
+        val_list[i].ve_valuelen = static_cast<DWORD>(payloads[i].size());
+        val_list[i].ve_valueptr = reinterpret_cast<DWORD_PTR>(cursor);
+        val_list[i].ve_type     = types[i];
+
+        cursor += payloads[i].size();
+    }
+
+    *ldwTotsize = total;
+
+    return ERROR_SUCCESS;
+}
+
+static LSTATUS WINAPI HookRegQueryMultipleValuesA(HKEY hKey, PVALENTA val_list, DWORD num_vals,
+    LPSTR lpValueBuf, LPDWORD ldwTotsize)
+{
+    std::wstring path = GetVirtualPath(hKey);
+
+    if (path.empty())
+    {
+        if (g_logRegistry)
+        {
+            std::wstring realPath = GetAnyPathFull(hKey);
+
+            if (!realPath.empty())
+                for (DWORD i = 0; val_list && i < num_vals; ++i)
+                {
+                    std::wstring wideName = val_list[i].ve_valuename
+                        ? AnsiToWide(val_list[i].ve_valuename) : std::wstring{};
+
+                    LogRegistryAccess(L"REG READ", realPath.c_str(), wideName.c_str());
+                }
+        }
+
+        return g_origRegQueryMultipleValuesA(hKey, val_list, num_vals, lpValueBuf, ldwTotsize);
+    }
+
+    if (!ldwTotsize)
+        return ERROR_INVALID_PARAMETER;
+
+    if (num_vals == 0)
+    {
+        *ldwTotsize = 0;
+
+        return ERROR_SUCCESS;
+    }
+
+    if (!val_list)
+        return ERROR_INVALID_PARAMETER;
+
+    std::vector<std::wstring> names(num_vals);
+
+    for (DWORD i = 0; i < num_vals; ++i)
+    {
+        names[i] = val_list[i].ve_valuename
+            ? AnsiToWide(val_list[i].ve_valuename) : std::wstring{};
+
+        LogRegistryAccess(L"REG READ", path.c_str(), names[i].c_str());
+    }
+
+    std::vector<std::vector<BYTE>> payloads(num_vals);
+    std::vector<DWORD>             types(num_vals, REG_NONE);
+    DWORD                          total = 0;
+
+    {
+        std::shared_lock lock(g_storeMutex);
+
+        for (DWORD i = 0; i < num_vals; ++i)
+        {
+            const RegValue* rv = FindValueLocked(path, ToUpper(names[i]));
+
+            if (!rv)
+                return ERROR_FILE_NOT_FOUND;
+
+            types[i] = rv->type;
+
+            payloads[i] = (rv->type == REG_SZ || rv->type == REG_EXPAND_SZ
+                                              || rv->type == REG_MULTI_SZ)
+                ? WideBytesToAnsiBytes(rv->data)
+                : rv->data;
+
+            total += static_cast<DWORD>(payloads[i].size());
+        }
+    }
+
+    if (!lpValueBuf || *ldwTotsize < total)
+    {
+        *ldwTotsize = total;
+
+        return ERROR_MORE_DATA;
+    }
+
+    BYTE* cursor = reinterpret_cast<BYTE*>(lpValueBuf);
+
+    for (DWORD i = 0; i < num_vals; ++i)
+    {
+        memcpy(cursor, payloads[i].data(), payloads[i].size());
+
+        val_list[i].ve_valuelen = static_cast<DWORD>(payloads[i].size());
+        val_list[i].ve_valueptr = reinterpret_cast<DWORD_PTR>(cursor);
+        val_list[i].ve_type     = types[i];
+
+        cursor += payloads[i].size();
+    }
+
+    *ldwTotsize = total;
+
+    return ERROR_SUCCESS;
+}
+
+// --- RegDeleteKey / RegDeleteKeyEx ---
+static LSTATUS WINAPI HookRegDeleteKeyW(HKEY hKey, LPCWSTR lpSubKey)
+{
+    std::wstring path = BuildPath(hKey, lpSubKey);
+
+    bool virtualSpace = !path.empty() && InVirtualSpace(path);
+
+    LogRegistryAccess(L"REG DELETE", path.empty() ? L"(unknown)" : path.c_str());
+    LogVirtualSpaceVerdict(path, virtualSpace);
+
+    if (!virtualSpace)
+        return g_origRegDeleteKeyW(hKey, lpSubKey);
+
+    LSTATUS status = VirtualDeleteKeyPath(path);
+
+    if (status == ERROR_SUCCESS)
+        SaveRegFile();
+
+    return status;
+}
+
+static LSTATUS WINAPI HookRegDeleteKeyA(HKEY hKey, LPCSTR lpSubKey)
+{
+    std::wstring wideSubKey = lpSubKey ? AnsiToWide(lpSubKey) : std::wstring{};
+
+    return HookRegDeleteKeyW(hKey, wideSubKey.empty() ? nullptr : wideSubKey.c_str());
+}
+
+static LSTATUS WINAPI HookRegDeleteKeyExW(HKEY hKey, LPCWSTR lpSubKey,
+    REGSAM samDesired, DWORD Reserved)
+{
+    std::wstring path = BuildPath(hKey, lpSubKey);
+
+    bool virtualSpace = !path.empty() && InVirtualSpace(path);
+
+    LogRegistryAccess(L"REG DELETE", path.empty() ? L"(unknown)" : path.c_str());
+    LogVirtualSpaceVerdict(path, virtualSpace);
+
+    if (!virtualSpace)
+        return g_origRegDeleteKeyExW(hKey, lpSubKey, samDesired, Reserved);
+
+    LSTATUS status = VirtualDeleteKeyPath(path);
+
+    if (status == ERROR_SUCCESS)
+        SaveRegFile();
+
+    return status;
+}
+
+static LSTATUS WINAPI HookRegDeleteKeyExA(HKEY hKey, LPCSTR lpSubKey,
+    REGSAM samDesired, DWORD Reserved)
+{
+    std::wstring wideSubKey = lpSubKey ? AnsiToWide(lpSubKey) : std::wstring{};
+
+    return HookRegDeleteKeyExW(hKey, wideSubKey.empty() ? nullptr : wideSubKey.c_str(),
+        samDesired, Reserved);
+}
+
+// --- RegDeleteTree ---
+static LSTATUS WINAPI HookRegDeleteTreeW(HKEY hKey, LPCWSTR lpSubKey)
+{
+    std::wstring path = BuildPath(hKey, lpSubKey);
+
+    bool virtualSpace = !path.empty() && InVirtualSpace(path);
+
+    LogRegistryAccess(L"REG DELETE", path.empty() ? L"(unknown)" : path.c_str());
+    LogVirtualSpaceVerdict(path, virtualSpace);
+
+    if (!virtualSpace)
+        return g_origRegDeleteTreeW(hKey, lpSubKey);
+
+    LSTATUS status = VirtualDeleteTree(path, lpSubKey && lpSubKey[0] != L'\0');
+
+    if (status == ERROR_SUCCESS)
+        SaveRegFile();
+
+    return status;
+}
+
+static LSTATUS WINAPI HookRegDeleteTreeA(HKEY hKey, LPCSTR lpSubKey)
+{
+    std::wstring wideSubKey = lpSubKey ? AnsiToWide(lpSubKey) : std::wstring{};
+
+    return HookRegDeleteTreeW(hKey, wideSubKey.empty() ? nullptr : wideSubKey.c_str());
+}
+
+// --- RegOpenCurrentUser / RegOpenUserClassesRoot ---
+static LSTATUS WINAPI HookRegOpenCurrentUser(REGSAM samDesired, PHKEY phkResult)
+{
+    LogRegistryAccess(L"REG OPEN", L"HKEY_CURRENT_USER");
+
+    if (g_registryIsolated)
+        return VirtualOpenKey(L"HKEY_CURRENT_USER", phkResult);
+
+    LSTATUS status = g_origRegOpenCurrentUser(samDesired, phkResult);
+
+    if (status == ERROR_SUCCESS && phkResult && *phkResult)
+        TrackRealHandle(*phkResult, L"HKEY_CURRENT_USER");
+
+    return status;
+}
+
+static LSTATUS WINAPI HookRegOpenUserClassesRoot(HANDLE hToken, DWORD dwOptions,
+    REGSAM samDesired, PHKEY phkResult)
+{
+    LogRegistryAccess(L"REG OPEN", L"HKEY_CLASSES_ROOT");
+
+    if (g_registryIsolated)
+        return VirtualOpenKey(L"HKEY_CLASSES_ROOT", phkResult);
+
+    LSTATUS status = g_origRegOpenUserClassesRoot(hToken, dwOptions, samDesired, phkResult);
+
+    if (status == ERROR_SUCCESS && phkResult && *phkResult)
+        TrackRealHandle(*phkResult, L"HKEY_CLASSES_ROOT");
+
+    return status;
+}
+
+// --- RegFlushKey ---
+static LSTATUS WINAPI HookRegFlushKey(HKEY hKey)
+{
+    std::wstring path = GetVirtualPath(hKey);
+
+    if (!path.empty())
+    {
+        if (g_dirty)
+        {
+            SaveRegFile();
+
+            LogRegistryDiag(L"REG FLUSH", path.c_str(), L"virtual store written");
+        }
+        else
+            LogRegistryDiag(L"REG FLUSH", path.c_str(), L"virtual store already persisted");
+
+        return ERROR_SUCCESS;
+    }
+
+    if (g_logRegistry)
+    {
+        std::wstring realPath = GetAnyPathFull(hKey);
+
+        if (!realPath.empty())
+            LogRegistryDiag(L"REG FLUSH", realPath.c_str(), L"real key");
+    }
+
+    return g_origRegFlushKey(hKey);
+}
+
+// --- RegNotifyChangeKeyValue ---
+static LSTATUS WINAPI HookRegNotifyChangeKeyValue(HKEY hKey, BOOL bWatchSubtree,
+    DWORD dwNotifyFilter, HANDLE hEvent, BOOL fAsynchronous)
+{
+    std::wstring path = GetVirtualPath(hKey);
+
+    if (path.empty())
+    {
+        if (g_logRegistry)
+        {
+            std::wstring realPath = GetAnyPathFull(hKey);
+
+            if (!realPath.empty())
+                LogRegistryDiag(L"REG NOTIFY", realPath.c_str(), L"real key");
+        }
+
+        return g_origRegNotifyChangeKeyValue(hKey, bWatchSubtree, dwNotifyFilter,
+            hEvent, fAsynchronous);
+    }
+
+    if (fAsynchronous && !hEvent)
+        return ERROR_INVALID_PARAMETER;
+
+    if (fAsynchronous)
+    {
+        LogRegistryDiag(L"REG NOTIFY", path.c_str(), L"registered; the store never changes");
+
+        return ERROR_SUCCESS;
+    }
+
+    LogRegistryDiag(L"REG NOTIFY", path.c_str(), L"synchronous wait not emulated");
+
+    return ERROR_SUCCESS;
+}
+
+static LSTATUS WINAPI HookRegOpenKeyTransactedW(HKEY hKey, LPCWSTR lpSubKey, DWORD ulOptions,
+    REGSAM samDesired, PHKEY phkResult, HANDLE hTransaction, PVOID pExtendedParameter)
+{
+    std::wstring path = BuildPath(hKey, lpSubKey);
+
+    bool virtualSpace = !path.empty() && InVirtualSpace(path);
+
+    LogRegistryAccess(L"REG OPEN", path.empty() ? L"(unknown)" : path.c_str());
+    LogVirtualSpaceVerdict(path, virtualSpace);
+
+    if (!virtualSpace)
+        return g_origRegOpenKeyTransactedW(hKey, lpSubKey, ulOptions, samDesired,
+            phkResult, hTransaction, pExtendedParameter);
+
+    if (hTransaction)
+        LogRegistryDiag(L"REG HIT", path.c_str(), L"transaction ignored");
+
+    return VirtualOpenKey(path, phkResult);
+}
+
+static LSTATUS WINAPI HookRegOpenKeyTransactedA(HKEY hKey, LPCSTR lpSubKey, DWORD ulOptions,
+    REGSAM samDesired, PHKEY phkResult, HANDLE hTransaction, PVOID pExtendedParameter)
+{
+    std::wstring wideSubKey = lpSubKey ? AnsiToWide(lpSubKey) : std::wstring{};
+
+    return HookRegOpenKeyTransactedW(hKey,
+        wideSubKey.empty() ? nullptr : wideSubKey.c_str(),
+        ulOptions, samDesired, phkResult, hTransaction, pExtendedParameter);
+}
+
+static LSTATUS WINAPI HookRegCreateKeyTransactedW(HKEY hKey, LPCWSTR lpSubKey, DWORD Reserved,
+    LPWSTR lpClass, DWORD dwOptions, REGSAM samDesired, LPSECURITY_ATTRIBUTES lpSA,
+    PHKEY phkResult, LPDWORD lpdwDisposition, HANDLE hTransaction, PVOID pExtendedParameter)
+{
+    std::wstring path = BuildPath(hKey, lpSubKey);
+
+    bool virtualSpace = !path.empty() && InVirtualSpace(path);
+
+    LogRegistryAccess(L"REG CREATE", path.empty() ? L"(unknown)" : path.c_str());
+    LogVirtualSpaceVerdict(path, virtualSpace);
+
+    if (!virtualSpace)
+        return g_origRegCreateKeyTransactedW(hKey, lpSubKey, Reserved, lpClass, dwOptions,
+            samDesired, lpSA, phkResult, lpdwDisposition, hTransaction, pExtendedParameter);
+
+    if (hTransaction)
+        LogRegistryDiag(L"REG HIT", path.c_str(), L"transaction ignored");
+
+    return VirtualCreateKey(path, phkResult, lpdwDisposition);
+}
+
+static LSTATUS WINAPI HookRegCreateKeyTransactedA(HKEY hKey, LPCSTR lpSubKey, DWORD Reserved,
+    LPSTR lpClass, DWORD dwOptions, REGSAM samDesired, LPSECURITY_ATTRIBUTES lpSA,
+    PHKEY phkResult, LPDWORD lpdwDisposition, HANDLE hTransaction, PVOID pExtendedParameter)
+{
+    std::wstring wideSubKey = lpSubKey ? AnsiToWide(lpSubKey) : std::wstring{};
+    std::wstring path = BuildPath(hKey, wideSubKey.empty() ? nullptr : wideSubKey.c_str());
+
+    bool virtualSpace = !path.empty() && InVirtualSpace(path);
+
+    LogRegistryAccess(L"REG CREATE", path.empty() ? L"(unknown)" : path.c_str());
+    LogVirtualSpaceVerdict(path, virtualSpace);
+
+    if (!virtualSpace)
+        return g_origRegCreateKeyTransactedA(hKey, lpSubKey, Reserved, lpClass, dwOptions,
+            samDesired, lpSA, phkResult, lpdwDisposition, hTransaction, pExtendedParameter);
+
+    if (hTransaction)
+        LogRegistryDiag(L"REG HIT", path.c_str(), L"transaction ignored");
+
+    return VirtualCreateKey(path, phkResult, lpdwDisposition);
+}
+
+static LSTATUS WINAPI HookRegDeleteKeyTransactedW(HKEY hKey, LPCWSTR lpSubKey,
+    REGSAM samDesired, DWORD Reserved, HANDLE hTransaction, PVOID pExtendedParameter)
+{
+    std::wstring path = BuildPath(hKey, lpSubKey);
+
+    bool virtualSpace = !path.empty() && InVirtualSpace(path);
+
+    LogRegistryAccess(L"REG DELETE", path.empty() ? L"(unknown)" : path.c_str());
+    LogVirtualSpaceVerdict(path, virtualSpace);
+
+    if (!virtualSpace)
+        return g_origRegDeleteKeyTransactedW(hKey, lpSubKey, samDesired, Reserved,
+            hTransaction, pExtendedParameter);
+
+    if (hTransaction)
+        LogRegistryDiag(L"REG HIT", path.c_str(), L"transaction ignored");
+
+    LSTATUS status = VirtualDeleteKeyPath(path);
+
+    if (status == ERROR_SUCCESS)
+        SaveRegFile();
+
+    return status;
+}
+
+static LSTATUS WINAPI HookRegDeleteKeyTransactedA(HKEY hKey, LPCSTR lpSubKey,
+    REGSAM samDesired, DWORD Reserved, HANDLE hTransaction, PVOID pExtendedParameter)
+{
+    std::wstring wideSubKey = lpSubKey ? AnsiToWide(lpSubKey) : std::wstring{};
+
+    return HookRegDeleteKeyTransactedW(hKey,
+        wideSubKey.empty() ? nullptr : wideSubKey.c_str(),
+        samDesired, Reserved, hTransaction, pExtendedParameter);
+}
+
+// --- RegCopyTree ---
+static LSTATUS WINAPI HookRegCopyTreeW(HKEY hKeySrc, LPCWSTR lpSubKey, HKEY hKeyDest)
+{
+    std::wstring sourcePath = BuildPath(hKeySrc, lpSubKey);
+    std::wstring destPath   = GetVirtualPath(hKeyDest);
+
+    bool sourceVirtual = !sourcePath.empty() && InVirtualSpace(sourcePath);
+    bool destVirtual   = !destPath.empty();
+
+    if (!sourceVirtual && !destVirtual)
+        return g_origRegCopyTreeW(hKeySrc, lpSubKey, hKeyDest);
+
+    LogRegistryDiag(L"REG COPY", sourcePath.empty() ? L"(unknown)" : sourcePath.c_str(),
+        destVirtual ? destPath.c_str() : L"(real key)");
+
+    // One line for the destination root rather than one [REG WRITE] per value: a
+    // tree copy would otherwise flood both the log and the plugin callbacks.
+    if (destVirtual)
+        LogRegistryAccess(L"REG CREATE", destPath.c_str());
+
+    SubtreeSnapshot snapshot;
+
+    if (sourceVirtual)
+        snapshot = SnapshotVirtualSubtree(sourcePath);
+    else
+    {
+        HKEY hSource = hKeySrc;
+        bool opened  = false;
+
+        if (lpSubKey && lpSubKey[0] != L'\0')
+        {
+            if (g_origRegOpenKeyExW(hKeySrc, lpSubKey, 0, KEY_READ, &hSource) != ERROR_SUCCESS)
+                return ERROR_FILE_NOT_FOUND;
+
+            opened = true;
+        }
+
+        snapshot = SnapshotRealSubtree(hSource);
+
+        if (opened)
+            g_origRegCloseKey(hSource);
+    }
+
+    // An empty source is a successful no-op, not a failure.
+    if (snapshot.empty())
+        return ERROR_SUCCESS;
+
+    if (destVirtual)
+    {
+        ApplyVirtualSubtree(destPath, snapshot);
+
+        SaveRegFile();
+
+        return ERROR_SUCCESS;
+    }
+
+    return ApplyRealSubtree(hKeyDest, snapshot);
+}
+
 // Create every missing directory above filePath. SaveRegFile opens the write
 // file with CREATE_ALWAYS, which will not create directories, and a
 // Registry.Files entry may point somewhere that does not exist yet.
@@ -1926,7 +3174,8 @@ void InstallRegistryHooks()
         LogRegistryDiag(L"REG LAYER", g_writeFile.c_str(),
             L"isolated: every key is served from the virtual store");
 
-    // Install the 17 registry hooks, preferring KernelBase (see HookRegistryApi).
+    // Install the 42 registry hooks, preferring KernelBase (see HookRegistryApi).
+    // The leaf functions first: each operates on a handle the caller already holds.
     HookRegistryApi("RegOpenKeyExW",    HookRegOpenKeyExW, &g_origRegOpenKeyExW);
     HookRegistryApi("RegOpenKeyExA",    HookRegOpenKeyExA, &g_origRegOpenKeyExA);
     HookRegistryApi("RegCreateKeyExW",  HookRegCreateKeyExW, &g_origRegCreateKeyExW);
@@ -1944,6 +3193,39 @@ void InstallRegistryHooks()
     HookRegistryApi("RegEnumKeyExA",    HookRegEnumKeyExA, &g_origRegEnumKeyExA);
     HookRegistryApi("RegQueryInfoKeyW", HookRegQueryInfoKeyW, &g_origRegQueryInfoKeyW);
     HookRegistryApi("RegQueryInfoKeyA", HookRegQueryInfoKeyA, &g_origRegQueryInfoKeyA);
+
+    HookRegistryApi("RegGetValueW",            HookRegGetValueW, &g_origRegGetValueW);
+    HookRegistryApi("RegGetValueA",            HookRegGetValueA, &g_origRegGetValueA);
+    HookRegistryApi("RegSetKeyValueW",         HookRegSetKeyValueW, &g_origRegSetKeyValueW);
+    HookRegistryApi("RegSetKeyValueA",         HookRegSetKeyValueA, &g_origRegSetKeyValueA);
+    HookRegistryApi("RegDeleteKeyValueW",      HookRegDeleteKeyValueW, &g_origRegDeleteKeyValueW);
+    HookRegistryApi("RegDeleteKeyValueA",      HookRegDeleteKeyValueA, &g_origRegDeleteKeyValueA);
+    HookRegistryApi("RegQueryMultipleValuesW", HookRegQueryMultipleValuesW, &g_origRegQueryMultipleValuesW);
+    HookRegistryApi("RegQueryMultipleValuesA", HookRegQueryMultipleValuesA, &g_origRegQueryMultipleValuesA);
+
+    HookRegistryApi("RegDeleteKeyW",    HookRegDeleteKeyW, &g_origRegDeleteKeyW);
+    HookRegistryApi("RegDeleteKeyA",    HookRegDeleteKeyA, &g_origRegDeleteKeyA);
+    HookRegistryApi("RegDeleteKeyExW",  HookRegDeleteKeyExW, &g_origRegDeleteKeyExW);
+    HookRegistryApi("RegDeleteKeyExA",  HookRegDeleteKeyExA, &g_origRegDeleteKeyExA);
+    HookRegistryApi("RegDeleteTreeW",   HookRegDeleteTreeW, &g_origRegDeleteTreeW);
+    HookRegistryApi("RegDeleteTreeA",   HookRegDeleteTreeA, &g_origRegDeleteTreeA);
+
+    // Hive roots, flush and change notification.
+    HookRegistryApi("RegOpenCurrentUser",      HookRegOpenCurrentUser, &g_origRegOpenCurrentUser);
+    HookRegistryApi("RegOpenUserClassesRoot",  HookRegOpenUserClassesRoot, &g_origRegOpenUserClassesRoot);
+    HookRegistryApi("RegFlushKey",             HookRegFlushKey, &g_origRegFlushKey);
+    HookRegistryApi("RegNotifyChangeKeyValue", HookRegNotifyChangeKeyValue, &g_origRegNotifyChangeKeyValue);
+
+    // The transacted six. KernelBase exports none of them, so all six take the
+    // advapi32 fallback.
+    HookRegistryApi("RegOpenKeyTransactedW",   HookRegOpenKeyTransactedW, &g_origRegOpenKeyTransactedW);
+    HookRegistryApi("RegOpenKeyTransactedA",   HookRegOpenKeyTransactedA, &g_origRegOpenKeyTransactedA);
+    HookRegistryApi("RegCreateKeyTransactedW", HookRegCreateKeyTransactedW, &g_origRegCreateKeyTransactedW);
+    HookRegistryApi("RegCreateKeyTransactedA", HookRegCreateKeyTransactedA, &g_origRegCreateKeyTransactedA);
+    HookRegistryApi("RegDeleteKeyTransactedW", HookRegDeleteKeyTransactedW, &g_origRegDeleteKeyTransactedW);
+    HookRegistryApi("RegDeleteKeyTransactedA", HookRegDeleteKeyTransactedA, &g_origRegDeleteKeyTransactedA);
+
+    HookRegistryApi("RegCopyTreeW", HookRegCopyTreeW, &g_origRegCopyTreeW);
 }
 
 void RemoveRegistryHooks()
