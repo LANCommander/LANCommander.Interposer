@@ -1,10 +1,12 @@
 # Uninstall
 #
-# Removes the Interposer DLL and its .interposer directory from the game.
+# Removes the Interposer DLL, the injector executable and the .interposer
+# directory from the game.
 #
 # Every candidate file is checked against its embedded ProductName before being
-# deleted, so a game that ships its own version.dll, dinput8.dll or dinput.dll is left
-# alone even if the load method changed after install.
+# deleted, so a game that ships its own version.dll, dinput8.dll, dinput.dll or
+# LANCommander.Interposer.dll is left alone even if the load method changed
+# after install.
 
 $RedistributableName = 'LANCommander Interposer'
 $Options = Get-RedistributableOptions -Path $InstallDirectory -Id $GameManifest.Id -Name $RedistributableName
@@ -73,7 +75,17 @@ if ($primaryExecutable) {
 
 $directories.Add($InstallDirectory)
 
-$loaderFiles = @('version.dll', 'dinput8.dll', 'dinput.dll', 'LANCommander.Interposer.asi')
+# The proxy names plus the two files the Injector method installs. The injector
+# and a DLL named LANCommander.Interposer.dll are only removed when their
+# embedded ProductName matches, so an unrelated file is never deleted.
+$loaderFiles = @(
+    'version.dll'
+    'dinput8.dll'
+    'dinput.dll'
+    'LANCommander.Interposer.asi'
+    'LANCommander.Interposer.dll'
+    'LANCommander.Interposer.Injector.exe'
+)
 $seen = New-Object System.Collections.Generic.HashSet[string]
 
 foreach ($directory in $directories) {

@@ -305,12 +305,15 @@ jobs:
           # One DLL per architecture. It serves every load method, so the
           # install script copies it out under whichever name Loader.Method
           # calls for and renders .interposer\Config.yml itself — no sample
-          # config and no per-method duplicates are included.
+          # config and no per-method duplicates are included. The injector
+          # ships per architecture too: the Injector load method installs it
+          # next to the game DLL, and it has to match the game's bitness.
           $d = 'pkg\redistributable'
 
           foreach ($arch in @('x64', 'x86')) {
             New-Item -ItemType Directory -Force "$d\$arch" | Out-Null
-            Copy-Item "Release\Injector\$arch\LANCommander.Interposer.dll"   "$d\$arch\"
+            Copy-Item "Release\Injector\$arch\LANCommander.Interposer.dll"          "$d\$arch\"
+            Copy-Item "Release\Injector\$arch\LANCommander.Interposer.Injector.exe" "$d\$arch\"
           }
 
           Compress-Archive -Path "$d\*" -DestinationPath "LANCommander.Interposer.Redistributable.$version.zip"

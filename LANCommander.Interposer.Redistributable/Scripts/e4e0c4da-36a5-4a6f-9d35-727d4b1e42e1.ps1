@@ -5,14 +5,19 @@
 # redistributable's configured options.
 #
 # The archive is extracted to <InstallDirectory>\.lancommander\<Id>\Files and
-# holds one DLL per architecture:
+# holds one DLL and the injector per architecture:
 #
 #   x64\LANCommander.Interposer.dll
+#   x64\LANCommander.Interposer.Injector.exe
 #   x86\LANCommander.Interposer.dll
+#   x86\LANCommander.Interposer.Injector.exe
 #
-# That single binary serves every load method - it exports the union of what
-# version.dll, dinput8.dll and dinput.dll export, and decides what it is by the
-# name it was given - so installing is a copy plus a rename.
+# That single binary serves every proxy load method - it exports the union of
+# what version.dll, dinput8.dll and dinput.dll export, and decides what it is by
+# the name it was given - so installing is a copy plus a rename. The Injector
+# method instead installs the DLL under its own name plus the injector
+# executable, which the game then has to be launched through - nothing loads
+# the DLL implicitly.
 
 $RedistributableName = 'LANCommander Interposer'
 $Options = Get-RedistributableOptions -Path $InstallDirectory -Id $GameManifest.Id -Name $RedistributableName
@@ -226,12 +231,15 @@ function Get-PeArchitecture {
 
 $primaryExecutable = Get-PrimaryExecutablePath $GameManifest $InstallDirectory
 
-# Load method -> the name the DLL has to be given next to the game executable
+# Load method -> the name the DLL has to be given next to the game executable.
+# The Injector method keeps the DLL's own name: the injector looks for
+# LANCommander.Interposer.dll next to itself.
 $loaderFiles = @{
-    'Proxy'   = 'version.dll'
-    'DInput8' = 'dinput8.dll'
-    'DInput'  = 'dinput.dll'
-    'ASI'     = 'LANCommander.Interposer.asi'
+    'Proxy'    = 'version.dll'
+    'DInput8'  = 'dinput8.dll'
+    'DInput'   = 'dinput.dll'
+    'ASI'      = 'LANCommander.Interposer.asi'
+    'Injector' = 'LANCommander.Interposer.dll'
 }
 
 $loaderMethod = Get-StringOption $Options 'Loader.Method'
@@ -292,9 +300,26 @@ if (-not (Test-Path -LiteralPath $sourceFile)) {
     throw "Interposer payload is missing '$architecture\LANCommander.Interposer.dll' (looked in '$sourceRoot')"
 }
 
+# The Injector method also needs the injector executable. It has to match the
+# DLL's architecture - a 32-bit process cannot inject a 64-bit DLL into a
+# 64-bit game.
+$injectorSourceFile = $null
+
+if ($loaderMethod -eq 'Injector') {
+    $injectorSourceFile = Join-Path $sourceRoot "$architecture\LANCommander.Interposer.Injector.exe"
+
+    if (-not (Test-Path -LiteralPath $injectorSourceFile)) {
+        throw "Interposer payload is missing '$architecture\LANCommander.Interposer.Injector.exe' (looked in '$sourceRoot')"
+    }
+}
+
 New-Item -ItemType Directory -Force -Path $targetDirectory | Out-Null
 
 Copy-Item -LiteralPath $sourceFile -Destination (Join-Path $targetDirectory $loaderFile) -Force
+
+if ($injectorSourceFile) {
+    Copy-Item -LiteralPath $injectorSourceFile -Destination (Join-Path $targetDirectory 'LANCommander.Interposer.Injector.exe') -Force
+}
 
 $interposerDirectory = Join-Path $targetDirectory '.interposer'
 
@@ -471,3 +496,7 @@ $configPath = Join-Path $interposerDirectory 'Config.yml'
 #endregion
 
 Write-Output "Installed Interposer ($loaderMethod, $architecture) to $targetDirectory"
+
+if ($loaderMethod -eq 'Injector') {
+    Write-Output "The game must be launched through the injector - point the game's primary action at '$(Join-Path $targetDirectory 'LANCommander.Interposer.Injector.exe')' with --launch <game executable>"
+}

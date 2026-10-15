@@ -68,17 +68,17 @@ Because the redistributable defines an [option schema](https://lancommander.app/
 
 | Option | Values | Meaning |
 |---|---|---|
-| `Loader.Method` | `Proxy`, `DInput8`, `DInput`, `ASI` | Which build to copy next to the game executable |
+| `Loader.Method` | `Proxy`, `DInput8`, `DInput`, `ASI`, `Injector` | Which build to copy next to the game executable. `Injector` also copies the injector executable. |
 | `Loader.Architecture` | `Auto`, `x86`, `x64` | `Auto` reads the PE header of the game's primary executable |
 | `Loader.TargetDirectory` | path | Override the install location. Blank uses the folder containing the primary executable. |
 
-The Standard (injector) variant is not offered through the LCX — driving the injector would require a [Run Wrapper](https://lancommander.app/Scripting/Script%20Types/Run%20Wrapper) script, which takes over game launching for every game the redistributable is assigned to. Use the Standard ZIP directly if you need the injector.
+The `Injector` method installs `LANCommander.Interposer.dll` and `LANCommander.Interposer.Injector.exe` next to the game executable. Unlike the other methods, nothing loads the DLL implicitly - the game has to be launched through the injector, so point the game's primary action at the injector executable (`LANCommander.Interposer.Injector.exe --launch <game executable>`).
 
 ### Scripts
 
 | Script | Behaviour |
 |---|---|
 | Detect Install | Always reports not installed — the shim is per game, not machine-wide |
-| Install | Copies the selected build next to the game executable and renders `.interposer\Config.yml` from the configured options |
+| Install | Copies the selected build next to the game executable (plus the injector executable for the `Injector` method) and renders `.interposer\Config.yml` from the configured options |
 | Name Change | Keeps `Player.Username` in sync with the LANCommander player alias |
-| Uninstall | Removes the DLL and the `.interposer\` directory. Files are checked against their embedded product name first, so a game's own `version.dll` is never deleted. |
+| Uninstall | Removes the DLL, the injector executable and the `.interposer\` directory. Files are checked against their embedded product name first, so a game's own `version.dll` is never deleted. |

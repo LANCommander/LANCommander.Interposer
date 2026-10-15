@@ -21,6 +21,13 @@ Notes: |
     ASI      - installs LANCommander.Interposer.asi. Only works when the game
                already has an ASI loader (Ultimate ASI Loader, ScriptHookV,
                etc.) installed.
+    Injector - installs LANCommander.Interposer.dll and
+               LANCommander.Interposer.Injector.exe next to the game
+               executable. Nothing is loaded implicitly - the game has to be
+               launched through the injector, which starts the game and
+               injects the DLL before its first instruction runs. Point the
+               game's primary action at the injector. Use this when the game
+               loads none of the proxy names and has no ASI loader.
 
   Architecture defaults to Auto, which reads the PE header of the game's
   primary executable. Override it if the primary action points at a launcher
@@ -72,13 +79,14 @@ OptionSchema: |
         Method:
           Type: choice
           DisplayName: Load Method
-          Description: Which build of the shim to install next to the game executable
+          Description: Which build of the shim to install next to the game executable. Injector also installs the injector executable the game is launched through.
           Default: "Proxy"
           Choices:
             - { Value: "Proxy", DisplayName: "version.dll proxy" }
             - { Value: "DInput8", DisplayName: "dinput8.dll proxy" }
             - { Value: "DInput", DisplayName: "dinput.dll proxy (DirectInput 3/7 games)" }
             - { Value: "ASI", DisplayName: "ASI plugin (requires an ASI loader)" }
+            - { Value: "Injector", DisplayName: "Injector (launch the game through the injector)" }
         Architecture:
           Type: choice
           DisplayName: Architecture
