@@ -350,6 +350,7 @@ $loggingDefaults = [ordered]@{
     DnsRedirects = $true
     Network      = $false
     DirectInput  = $false
+    Audio        = $false
     OsVersion    = $false
 }
 
@@ -429,6 +430,19 @@ $lines.Add("  Enabled: $(Format-YamlBool (Get-BoolOption $Options 'NetworkAdapte
 Add-ScalarList $lines '  ' 'Subnets' (Get-ListOption $Options 'NetworkAdapters.Subnets')
 Add-ScalarList $lines '  ' 'Names' (Get-ListOption $Options 'NetworkAdapters.Names')
 Add-ScalarList $lines '  ' 'MACs' (Get-ListOption $Options 'NetworkAdapters.MACs')
+$lines.Add('')
+
+$lines.Add('AudioDevices:')
+$lines.Add("  Enabled: $(Format-YamlBool (Get-BoolOption $Options 'AudioDevices.Enabled' $false))")
+
+# A direction is only filtered when its key is present, so an admin who never
+# set the option must not get an empty list rendered for it - that would mean
+# 'hide every device of this direction' rather than 'leave it alone'.
+foreach ($direction in @('Output', 'Input')) {
+    if ($null -ne (Get-Option $Options "AudioDevices.$direction")) {
+        Add-ScalarList $lines '  ' $direction (Get-ListOption $Options "AudioDevices.$direction")
+    }
+}
 $lines.Add('')
 
 $lines.Add('FastDL:')

@@ -50,6 +50,10 @@ Player:
 #                 device creation, enumeration, interface aliasing), false to
 #                 disable (default).
 #
+#   Audio     - true to log audio device enumeration and filtering (which
+#               devices a game asked for, and which the filter hid), false
+#               to disable (default).
+#
 #   OsVersion - true to log the Windows version reported to the game and which
 #               API each caller used to ask for it, false to disable (default).
 #               Each entry point is reported only the first time it is called.
@@ -86,6 +90,7 @@ Logging:
   DnsRedirects: true
   Network: false
   DirectInput: false
+  Audio: false
   OsVersion: false
   Level: Info
 
@@ -408,6 +413,82 @@ NetworkAdapters:
   Subnets: []   # e.g. ['192.168.1.0/24', '10.0.0.0/8'] (IPv4 CIDR)
   Names:   []   # case-insensitive ECMAScript regex vs FriendlyName/Description
   MACs:    []   # e.g. ['00:11:22:33:44:55'] (colon or dash separated)
+
+# ---------------------------------------------------------------------------
+# AudioDevices
+#
+# Controls which audio devices the game is allowed to see when it enumerates
+# them. Games that grab the first device Windows reports, or the system
+# default, end up on the wrong one as soon as a capture card, virtual cable or
+# streaming mixer is installed.
+#
+# There is one list per direction. Each entry names a device, and a device is
+# KEPT if any entry in its direction's list matches it.
+#
+#   Enabled - true to apply the lists below, false (default) to disable.
+#
+#   Output  - Playback devices: speakers, headphones, HDMI.
+#   Input   - Recording devices: microphones, line-in.
+#
+# Whether a direction is filtered at all is decided by whether its key is
+# PRESENT, not by what is in it:
+#
+#   key omitted           that direction is not filtered - every device shown
+#   key present, empty    every device of that direction is hidden
+#   key present, entries  only devices matching an entry are shown
+#
+# So `Input: []` hides every microphone from the game, while leaving Input out
+# altogether leaves microphones alone.
+#
+# Entries are LITERAL text, not regular expressions, and are matched
+# case-insensitively as a substring. Each one is compared against every string
+# the device is known by, so you can name a device whichever way you have it
+# written down:
+#
+#   - The friendly name, as shown in the Windows sound settings
+#       'Speakers (High Definition Audio Device)'
+#   - The short description
+#       'Speakers'
+#   - A hardware ID of the device behind it, as shown in Device Manager under
+#     Details > Hardware Ids. This survives a re-plug into a different port,
+#     and is the way to pin one specific piece of hardware
+#       'USB\VID_0965&PID_9001'
+#   - The Core Audio endpoint ID
+#       '{0.0.0.00000000}.{a1b2c3d4-1234-5678-9abc-def012345678}'
+#   - The DirectSound device GUID
+#       '{def00000-9c6d-47ed-aaf1-4dda8f2b5c03}'
+#
+# Because matching is a substring, a short entry can match more than you meant:
+# 'USB' on its own would match every USB device. Paste in enough to be unique.
+#
+# Covered enumeration APIs:
+#   - winmm        waveOutGetNumDevs / waveOutGetDevCaps / waveOutOpen and the
+#                  waveIn equivalents
+#   - dsound       DirectSoundEnumerate, DirectSoundCaptureEnumerate, both
+#                  character sets
+#   - Core Audio   IMMDeviceEnumerator EnumAudioEndpoints,
+#                  GetDefaultAudioEndpoint and GetDevice
+#
+# When a list hides something, the device a game gets for 'the default' is
+# steered to the first allowed device - WAVE_MAPPER under winmm and
+# GetDefaultAudioEndpoint under Core Audio - so a game that never enumerates
+# still lands on the device you chose.
+#
+# Hidden-device activity is written to the session log when Logging.Audio is
+# true and Logging.Level is Debug or higher. Plugins and host apps can
+# enumerate the canonical device list (with each device's allowed/hidden status
+# and every string it can be matched by) via InterposerEnumAudioDevices.
+# ---------------------------------------------------------------------------
+AudioDevices:
+  Enabled: false
+  # Omit a direction to leave it unfiltered; give it an empty list to hide
+  # every device of that direction.
+  #
+  # Output:
+  #   - 'Speakers (High Definition Audio Device)'
+  #   - 'USB\VID_0965&PID_9001'
+  # Input:
+  #   - 'Voicemeeter Input (VB-Audio Voicemeeter VAIO)'
 
 # ---------------------------------------------------------------------------
 # FastDL

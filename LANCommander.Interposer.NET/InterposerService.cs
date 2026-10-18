@@ -133,6 +133,27 @@ namespace LANCommander.Interposer
             [Out] NativeNetworkAdapter[] buffer, uint capacity, out uint outCount);
 
         // =================================================================
+        // P/Invoke - Audio device enumeration
+        // =================================================================
+
+        [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
+        private struct NativeAudioDevice
+        {
+            [MarshalAs(UnmanagedType.ByValTStr, SizeConst = 256)] public string Name;
+            [MarshalAs(UnmanagedType.ByValTStr, SizeConst = 256)] public string Description;
+            [MarshalAs(UnmanagedType.ByValTStr, SizeConst = 256)] public string Id;
+            [MarshalAs(UnmanagedType.ByValTStr, SizeConst = 256)] public string InstanceId;
+            [MarshalAs(UnmanagedType.ByValTStr, SizeConst = 256)] public string HardwareId;
+            public int Direction;
+            public int IsDefault;
+            public int Allowed;
+        }
+
+        [DllImport(DllName, CallingConvention = CallingConvention.Cdecl)]
+        private static extern uint InterposerEnumAudioDevices(
+            [Out] NativeAudioDevice[] buffer, uint capacity, out uint outCount);
+
+        // =================================================================
         // P/Invoke - Callback registration
         // =================================================================
 
@@ -651,6 +672,50 @@ namespace LANCommander.Interposer
                     MacAddress = n.MacAddress,
                     IPv4Address = n.Ipv4Address,
                     IPv6Address = n.Ipv6Address,
+                    Allowed = n.Allowed != 0,
+                };
+            }
+
+            return result;
+        }
+
+        // =================================================================
+        // Audio device enumeration (in-process only)
+        // =================================================================
+
+        /// <summary>
+        /// Enumerates the machine's active audio devices, output and input alike,
+        /// including each device's allowed/hidden status under the current
+        /// AudioDevices filter. This is the canonical device list shared with the
+        /// native filtering logic, so the <see cref="AudioDeviceInfo.Allowed"/> flag
+        /// always matches what the hooks expose to the game. In-process only.
+        /// </summary>
+        public IReadOnlyList<AudioDeviceInfo> EnumerateAudioDevices()
+        {
+            uint written;
+            uint total = InterposerEnumAudioDevices(null, 0, out written);
+
+            if (total == 0)
+                return Array.Empty<AudioDeviceInfo>();
+
+            var buffer = new NativeAudioDevice[total];
+            InterposerEnumAudioDevices(buffer, total, out written);
+
+            uint count = Math.Min(written, (uint)buffer.Length);
+            var result = new AudioDeviceInfo[count];
+
+            for (uint i = 0; i < count; i++)
+            {
+                var n = buffer[i];
+                result[i] = new AudioDeviceInfo
+                {
+                    Name = n.Name,
+                    Description = n.Description,
+                    Id = n.Id,
+                    InstanceId = n.InstanceId,
+                    HardwareId = n.HardwareId,
+                    Direction = (AudioDeviceDirection)n.Direction,
+                    IsDefault = n.IsDefault != 0,
                     Allowed = n.Allowed != 0,
                 };
             }

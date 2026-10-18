@@ -44,4 +44,5 @@ Configuration and use of the Interposer is broken down on this site under the fo
 - [Rich Presence](/Interposer/RichPresence)
 - [DirectInput](/Interposer/DirectInput)
 - [Network Adapters](/Interposer/NetworkAdapters)
+- [Audio Devices](/Interposer/AudioDevices)
 - [Plugins](/Interposer/Plugins/Overview)

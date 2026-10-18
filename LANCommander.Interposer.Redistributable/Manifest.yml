@@ -163,6 +163,11 @@ OptionSchema: |
           DisplayName: DirectInput
           Description: Log DirectInput bridge object creation, device creation, and enumeration
           Default: "false"
+        Audio:
+          Type: bool
+          DisplayName: Audio
+          Description: Log audio device enumeration and which devices the filter hid
+          Default: "false"
         OsVersion:
           Type: bool
           DisplayName: OS Version
@@ -321,6 +326,26 @@ OptionSchema: |
           ItemType: string
           DisplayName: MAC Addresses
           Description: Physical addresses, colon- or dash-separated. Applies to iphlpapi only.
+
+    AudioDevices:
+      DisplayName: Audio Devices
+      Description: One allow-list per direction controlling which audio devices the game sees. A device is kept if any entry in its direction's list matches it.
+      Options:
+        Enabled:
+          Type: bool
+          DisplayName: Enabled
+          Description: Apply the lists below. No-op when neither list is set.
+          Default: "false"
+        Output:
+          Type: list
+          ItemType: string
+          DisplayName: Output Devices
+          Description: Playback devices the game may see - speakers, headphones, HDMI. Each entry names a device literally - its friendly name, short description, a hardware ID such as USB\VID_0965&PID_9001, the Core Audio endpoint ID, or the DirectSound GUID - and is matched case-insensitively as a substring. Leave the list empty to hide every device of this direction; clear the option entirely to leave the direction unfiltered.
+        Input:
+          Type: list
+          ItemType: string
+          DisplayName: Input Devices
+          Description: Recording devices the game may see - microphones, line-in. Each entry names a device literally - its friendly name, short description, a hardware ID such as USB\VID_0965&PID_9001, the Core Audio endpoint ID, or the DirectSound GUID - and is matched case-insensitively as a substring. Leave the list empty to hide every device of this direction; clear the option entirely to leave the direction unfiltered.
 
     FastDL:
       DisplayName: FastDL

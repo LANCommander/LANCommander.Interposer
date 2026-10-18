@@ -53,6 +53,7 @@ bool         g_logRichPresence  = false;
 bool         g_logDnsRedirects = true;
 bool         g_logNetwork      = false;
 bool         g_logDirectInput  = false;
+bool         g_logAudio        = false;
 
 std::vector<DnsRedirect> g_dnsRedirects;
 
@@ -69,6 +70,12 @@ bool                            g_naAnyFilters = false;
 std::vector<SubnetFilter>       g_naSubnets;
 std::vector<std::wregex>        g_naNames;
 std::vector<std::array<BYTE,6>> g_naMacs;
+
+bool                      g_adEnabled      = false;
+bool                      g_adFilterOutput = false;
+bool                      g_adFilterInput  = false;
+std::vector<std::wstring> g_adOutput;
+std::vector<std::wstring> g_adInput;
 
 // Rich presence
 bool        g_rpDiscordEnabled         = false;
@@ -833,6 +840,47 @@ const wchar_t* DiClassName(DiDeviceClass deviceClass)
 }
 
 // ---------------------------------------------------------------------------
+// Audio device lists
+// ---------------------------------------------------------------------------
+
+namespace {
+
+// Read one AudioDevices direction list. The key's presence is what arms the
+// filter, so a key with nothing under it is an empty allow-list -- "hide every
+// device of this direction" -- and is meaningfully different from the key not
+// being there at all.
+void ParseAudioDeviceList(const YAML::Node& node, std::vector<std::wstring>& out, bool& present)
+{
+    if (!node.IsDefined())
+        return;
+
+    present = true;
+
+    if (!node.IsSequence())
+        return;
+
+    for (const auto& item : node)
+    {
+        std::string entry = item.as<std::string>("");
+
+        if (!entry.empty())
+            out.push_back(Utf8ToWide(entry));
+    }
+}
+
+} // namespace
+
+const wchar_t* AudioDirectionName(AudioDirection direction)
+{
+    switch (direction)
+    {
+    case AudioDirection::Output: return L"Output";
+    case AudioDirection::Input:  return L"Input";
+    default:                     return L"Unknown";
+    }
+}
+
+// ---------------------------------------------------------------------------
 // OS version presets
 // ---------------------------------------------------------------------------
 
@@ -932,6 +980,22 @@ void LogDirectInputDiag(const wchar_t* verb, const wchar_t* info, const wchar_t*
 void LogDirectInput(const wchar_t* verb, const wchar_t* info, const wchar_t* detail)
 {
     if (!g_logDirectInput)
+        return;
+
+    WriteLogLine(verb, info, detail);
+}
+
+void LogAudioDiag(const wchar_t* verb, const wchar_t* info, const wchar_t* detail)
+{
+    if (!g_logAudio || g_logLevel < LogLevel::Debug)
+        return;
+
+    WriteLogLine(verb, info, detail);
+}
+
+void LogAudio(const wchar_t* verb, const wchar_t* info, const wchar_t* detail)
+{
+    if (!g_logAudio)
         return;
 
     WriteLogLine(verb, info, detail);
@@ -1966,6 +2030,8 @@ void LoadConfig()
             g_logNetwork = logging["Network"].as<bool>(false);
         if (logging["DirectInput"])
             g_logDirectInput = logging["DirectInput"].as<bool>(false);
+        if (logging["Audio"])
+            g_logAudio = logging["Audio"].as<bool>(false);
         if (logging["OsVersion"])
             g_logOsVersion = logging["OsVersion"].as<bool>(false);
 
@@ -2312,6 +2378,21 @@ void LoadConfig()
         }
 
         g_naAnyFilters = !g_naSubnets.empty() || !g_naNames.empty() || !g_naMacs.empty();
+    }
+
+    // -- AudioDevices ----------------------------------------------------------
+    //
+    // One allow-list per direction, armed by the key's presence rather than by
+    // its contents, so `Input: []` (hide every microphone) is expressible and
+    // distinct from an absent Input key (do not filter microphones at all).
+    // Entries are literal strings, not regexes -- see config.h.
+    if (YAML::Node ad = root["AudioDevices"])
+    {
+        if (ad["Enabled"])
+            g_adEnabled = ad["Enabled"].as<bool>(false);
+
+        ParseAudioDeviceList(ad["Output"], g_adOutput, g_adFilterOutput);
+        ParseAudioDeviceList(ad["Input"],  g_adInput,  g_adFilterInput);
     }
 
     // ── fastDL ────────────────────────────────────────────────────────────────

@@ -26,6 +26,19 @@
 
 static int g_pass = 0, g_fail = 0;
 
+// Real audio device counts, read before the DLL is loaded -- afterwards there
+// is no way to see the unfiltered list from inside this process. Declared up
+// here because the log tests consult them too: a machine with no capture
+// device gives the filter nothing to hide, so there is no line to assert on.
+static UINT g_realWaveOut = 0;
+static UINT g_realWaveIn  = 0;
+static int  g_realDsOut   = -1;   // -1 = enumeration unavailable, test skipped
+static int  g_realDsIn    = -1;
+
+// Endpoint ID of the first render device, discovered before the DLL loads and
+// written into the fixture as the sole AudioDevices.Output entry.
+static std::wstring g_pinnedEndpointId;
+
 #define ASSERT(cond, msg)                                    \
     do {                                                      \
         if (cond) {                                           \
@@ -243,6 +256,7 @@ static void WriteInterposerYaml(const std::wstring& yamlPath,
         "  Files: true\n"
         "  Registry: true\n"
         "  DirectInput: true\n"
+        "  Audio: true\n"
         "  OsVersion: true\n"
         "  Level: Trace\n"
         "\n"
@@ -253,6 +267,10 @@ static void WriteInterposerYaml(const std::wstring& yamlPath,
         "    Classes: ['Mouse', 'Keyboard']\n"
         "    Names: []\n"
         "\n"
+        // AudioDevices is appended after this literal rather than written into
+        // it: the Output list has to name a real endpoint on this machine, and
+        // that is only known once Core Audio has been asked.
+        //
         // Spaces and case are deliberate: the name should still resolve to the
         // WindowsServer2003 preset. ServicePack overrides just that one field,
         // and the number in it should carry into wServicePackMajor.
@@ -290,6 +308,38 @@ static void WriteInterposerYaml(const std::wstring& yamlPath,
         // than dropped, so the rule simply never matches (L-21).
         "  - Pattern: '%NOSUCHTOKEN%\\\\Nowhere\\\\(.+)'\n"
         "    Replacement: 'C:\\Nowhere\\$1'\n";
+    // AudioDevices, assembled from what this machine actually has.
+    //
+    // Output names the first render endpoint by its Core Audio endpoint ID --
+    // an identifier winmm and DirectSound cannot report, so the only way they
+    // can agree about it is by resolving through the identity table. Input is
+    // present but empty, which is the allow-list that admits nothing.
+    content += "AudioDevices:\n";
+    content += "  Enabled: true\n";
+
+    if (!g_pinnedEndpointId.empty())
+    {
+        content += "  Output:\n";
+        content += "    - '" + WideToUtf8(g_pinnedEndpointId) + "'\n";
+    }
+
+    content += "  Input: []\n";
+
+    // Plugin sections for the C- tests. Tester is block style, with a comment
+    // the in-place patch has to keep; Flow is a flow map the patcher declines,
+    // so writing into it exercises the re-render fallback -- which must stay
+    // inside Flow and leave Tester's comment alone.
+    content +=
+        "\n"
+        "Plugins:\n"
+        "  Tester:\n"
+        "    Existing: 'old'   # kept across the write\n"
+        "    Nulled:\n"
+        "    Nested:\n"
+        "      Deep: 1\n"
+        "  Flow: {A: '1'}\n"
+        "# trailing comment\n";
+
     WriteTextFile(yamlPath, content);
 }
 
@@ -2192,6 +2242,40 @@ static void RunLogTests(const std::wstring& logPath)
     ASSERT(log.find("X=0  Y=4  Z=8") != std::string::npos,
         L"L-DI-10: [DINPUT FORMAT] reports the axis offsets the game declared");
 
+    // --- Audio devices (AudioDevices filter + Logging.Audio) ---
+
+    ASSERT(log.find("winmm.dll!waveOutGetNumDevs") != std::string::npos,
+        L"L-AU-1: Log records the winmm.dll!waveOutGetNumDevs hook installation");
+    ASSERT(log.find("dsound.dll!DirectSoundEnumerateA") != std::string::npos,
+        L"L-AU-2: Log records the dsound.dll!DirectSoundEnumerateA hook installation");
+    ASSERT(log.find("ole32.dll!CoCreateInstance") != std::string::npos,
+        L"L-AU-3: Log records the ole32.dll!CoCreateInstance hook installation");
+    ASSERT(log.find("[AUDIO ENUM]") != std::string::npos,
+        L"L-AU-4: Log contains [AUDIO ENUM] entry");
+    ASSERT(log.find("output devices shown") != std::string::npos,
+        L"L-AU-5: [AUDIO ENUM] reports how many devices survived the filter");
+
+    // Logging.Level is Trace in the fixture, so the per-device listing is on.
+    // A machine with no capture device has nothing to hide, so the hidden-device
+    // verb is only required when one was actually present before the DLL loaded.
+    if (g_realWaveIn > 0)
+    {
+        ASSERT(log.find("[AUDIO HIDE]") != std::string::npos,
+            L"L-AU-6: Log lists devices the filter hid at Debug level");
+        ASSERT(log.find("no devices are allowed in this direction") != std::string::npos,
+            L"L-AU-7: [AUDIO HIDE] reports that the empty Input list allows nothing");
+    }
+
+    // The identity table is what lets winmm honour an entry written as a Core
+    // Audio endpoint ID, so its construction is worth seeing in the log.
+    if (!g_pinnedEndpointId.empty())
+    {
+        ASSERT(log.find("identity table built") != std::string::npos,
+            L"L-AU-8: Log records the audio identity table being built");
+        ASSERT(log.find("matched ") != std::string::npos,
+            L"L-AU-9: [AUDIO FOUND] names the entry that kept the device");
+    }
+
     ASSERT(log.find("kernel32!GetVersionExA") != std::string::npos,
         L"L-OV-1: Log records the kernel32!GetVersionExA hook installation");
     ASSERT(log.find("ntdll!RtlGetVersion") != std::string::npos,
@@ -2833,6 +2917,357 @@ static void RunDirectInput8Tests(HMODULE hDInput8)
 }
 
 // ============================================================
+// Audio device filter tests
+// ============================================================
+// The fixture pins one specific device: it discovers the first render endpoint
+// before the DLL loads and writes that endpoint's ID as the only entry in
+// AudioDevices.Output, alongside an empty AudioDevices.Input.
+//
+// That shape is what makes the assertions machine-independent while still
+// exercising the parts that matter. An empty Input list must hide every
+// microphone. A one-entry Output list must leave exactly that device visible --
+// and crucially it must do so through winmm too, which knows nothing about
+// endpoint IDs and reports names truncated to 31 characters. winmm can only
+// agree with Core Audio here if the device really was resolved through the
+// identity table, so A-03 is the test for that whole chain.
+//
+// The real counts are captured before the Interposer loads, which is the only
+// way to see the unfiltered lists from inside the same process.
+
+struct TestAudioDevice
+{
+    wchar_t name[256];
+    wchar_t description[256];
+    wchar_t id[256];
+    wchar_t instanceId[256];
+    wchar_t hardwareId[256];
+    int     direction;   // 1 = output, 2 = input
+    int     isDefault;
+    int     allowed;
+};
+
+using TestPfnEnumAudio    = DWORD (*)(TestAudioDevice*, DWORD, DWORD*);
+using TestPfnWaveNumDevs  = UINT (WINAPI*)(void);
+using TestPfnDsCallbackA  = BOOL (CALLBACK*)(GUID*, const char*, const char*, void*);
+using TestPfnDsEnumerateA = HRESULT (WINAPI*)(TestPfnDsCallbackA, void*);
+
+// Core Audio, declared locally for the same reason the DirectInput ABI is: only
+// a few vtable slots are needed, and the SDK GUIDs would add a link dependency
+// the test does not otherwise have.
+static const CLSID kTestClsidMMDeviceEnumerator =
+    { 0xBCDE0395, 0xE52F, 0x467C, { 0x8E, 0x3D, 0xC4, 0x57, 0x92, 0x91, 0x69, 0x2E } };
+static const IID kTestIidMMDeviceEnumerator =
+    { 0xA95664D2, 0x9614, 0x4F35, { 0xA7, 0x46, 0xDE, 0x8D, 0xB6, 0x36, 0x17, 0xE6 } };
+
+using TestPfnCoInitializeEx   = HRESULT (__stdcall*)(void*, DWORD);
+using TestPfnCoUninitialize   = void (__stdcall*)(void);
+using TestPfnCoCreateInstance = HRESULT (__stdcall*)(const CLSID*, void*, DWORD, const IID*, void**);
+using TestPfnCoTaskMemFree    = void (__stdcall*)(void*);
+using TestPfnEnumEndpoints    = HRESULT (__stdcall*)(void*, int, DWORD, void**);
+using TestPfnCollectionCount  = HRESULT (__stdcall*)(void*, UINT*);
+using TestPfnCollectionItem   = HRESULT (__stdcall*)(void*, UINT, void**);
+using TestPfnDeviceGetId      = HRESULT (__stdcall*)(void*, wchar_t**);
+
+static BOOL CALLBACK TestDsCountCallback(GUID*, const char*, const char*, void* ref)
+{
+    ++*static_cast<int*>(ref);
+    return TRUE;
+}
+
+// Count what a DirectSound enumeration yields. Returns -1 when the export is
+// unavailable, so a machine without dsound skips rather than fails.
+static int CountDsDevices(HMODULE hDSound, const char* exportName)
+{
+    if (!hDSound)
+        return -1;
+
+    auto enumerate = reinterpret_cast<TestPfnDsEnumerateA>(
+        reinterpret_cast<void*>(GetProcAddress(hDSound, exportName)));
+
+    if (!enumerate)
+        return -1;
+
+    int count = 0;
+
+    if (FAILED(enumerate(TestDsCountCallback, &count)))
+        return -1;
+
+    return count;
+}
+
+// Read the unfiltered device counts. Called before LoadLibraryW of the DLL.
+static void CaptureRealAudioCounts(HMODULE hWinmm, HMODULE hDSound)
+{
+    if (hWinmm)
+    {
+        auto waveOutGetNumDevs = reinterpret_cast<TestPfnWaveNumDevs>(
+            reinterpret_cast<void*>(GetProcAddress(hWinmm, "waveOutGetNumDevs")));
+        auto waveInGetNumDevs = reinterpret_cast<TestPfnWaveNumDevs>(
+            reinterpret_cast<void*>(GetProcAddress(hWinmm, "waveInGetNumDevs")));
+
+        if (waveOutGetNumDevs) g_realWaveOut = waveOutGetNumDevs();
+        if (waveInGetNumDevs)  g_realWaveIn  = waveInGetNumDevs();
+    }
+
+    g_realDsOut = CountDsDevices(hDSound, "DirectSoundEnumerateA");
+    g_realDsIn  = CountDsDevices(hDSound, "DirectSoundCaptureEnumerateA");
+}
+
+// Endpoint ID of the first active render device, read before the DLL loads so
+// the fixture can pin it by name. Empty on a machine with no output device, in
+// which case the Output list is left out of the fixture entirely.
+static void DiscoverPinnedEndpoint(HMODULE hOle32)
+{
+    if (!hOle32)
+        return;
+
+    auto coInitialize = reinterpret_cast<TestPfnCoInitializeEx>(
+        reinterpret_cast<void*>(GetProcAddress(hOle32, "CoInitializeEx")));
+    auto coUninitialize = reinterpret_cast<TestPfnCoUninitialize>(
+        reinterpret_cast<void*>(GetProcAddress(hOle32, "CoUninitialize")));
+    auto coCreateInstance = reinterpret_cast<TestPfnCoCreateInstance>(
+        reinterpret_cast<void*>(GetProcAddress(hOle32, "CoCreateInstance")));
+    auto coTaskMemFree = reinterpret_cast<TestPfnCoTaskMemFree>(
+        reinterpret_cast<void*>(GetProcAddress(hOle32, "CoTaskMemFree")));
+
+    if (!coInitialize || !coCreateInstance || !coTaskMemFree)
+        return;
+
+    const bool initialized = SUCCEEDED(coInitialize(nullptr, 0));   // COINIT_MULTITHREADED
+
+    void* enumerator = nullptr;
+
+    // CLSCTX_INPROC_SERVER
+    if (SUCCEEDED(coCreateInstance(&kTestClsidMMDeviceEnumerator, nullptr, 1,
+            &kTestIidMMDeviceEnumerator, &enumerator)) && enumerator)
+    {
+        void* collection = nullptr;
+
+        // eRender, DEVICE_STATE_ACTIVE
+        if (SUCCEEDED(reinterpret_cast<TestPfnEnumEndpoints>(TestVtSlot(enumerator, 3))(
+                enumerator, 0, 0x1, &collection)) && collection)
+        {
+            UINT count = 0;
+
+            reinterpret_cast<TestPfnCollectionCount>(TestVtSlot(collection, 3))(collection, &count);
+
+            void* device = nullptr;
+
+            if (count > 0 &&
+                SUCCEEDED(reinterpret_cast<TestPfnCollectionItem>(TestVtSlot(collection, 4))(
+                    collection, 0, &device)) && device)
+            {
+                wchar_t* id = nullptr;
+
+                if (SUCCEEDED(reinterpret_cast<TestPfnDeviceGetId>(TestVtSlot(device, 5))(device, &id)) && id)
+                {
+                    g_pinnedEndpointId = id;
+                    coTaskMemFree(id);
+                }
+
+                reinterpret_cast<TestPfnRelease>(TestVtSlot(device, 2))(device);
+            }
+
+            reinterpret_cast<TestPfnRelease>(TestVtSlot(collection, 2))(collection);
+        }
+
+        reinterpret_cast<TestPfnRelease>(TestVtSlot(enumerator, 2))(enumerator);
+    }
+
+    if (initialized && coUninitialize)
+        coUninitialize();
+}
+
+static void RunAudioTests(HMODULE hDll, HMODULE hWinmm, HMODULE hDSound, HMODULE hOle32)
+{
+    wprintf(L"\n--- Audio Device Filter Tests ---\n");
+
+    if (g_pinnedEndpointId.empty())
+        wprintf(L"        (no render endpoint to pin; Output was left unfiltered)\n");
+    else
+        wprintf(L"        (pinned %s)\n", g_pinnedEndpointId.c_str());
+
+    // A-01: an Input key with an empty list is an allow-list that admits
+    // nothing, which is how every microphone is hidden.
+    auto waveOutGetNumDevs = reinterpret_cast<TestPfnWaveNumDevs>(
+        hWinmm ? GetProcAddress(hWinmm, "waveOutGetNumDevs") : nullptr);
+    auto waveInGetNumDevs = reinterpret_cast<TestPfnWaveNumDevs>(
+        hWinmm ? GetProcAddress(hWinmm, "waveInGetNumDevs") : nullptr);
+
+    if (waveInGetNumDevs)
+    {
+        ASSERT(waveInGetNumDevs() == 0,
+            L"A-01: an empty Input list hides every input device");
+
+        wprintf(L"        (%u real input devices)\n", g_realWaveIn);
+    }
+    else
+    {
+        wprintf(L"  SKIP  winmm.dll unavailable; A-01 skipped\n");
+    }
+
+    // A-02: the export reports the real device set with the filter's verdict on
+    // each device. Exactly the pinned endpoint should survive.
+    UINT allowedOutputs = 0;
+    UINT allowedInputs  = 0;
+    bool pinnedAllowed  = false;
+    bool listIsComplete = false;
+
+    {
+        auto enumAudio = reinterpret_cast<TestPfnEnumAudio>(
+            reinterpret_cast<void*>(GetProcAddress(hDll, "InterposerEnumAudioDevices")));
+
+        ASSERT(enumAudio != nullptr,
+            L"A-02a: InterposerEnumAudioDevices is exported");
+
+        if (enumAudio)
+        {
+            DWORD written = 0;
+            DWORD total   = enumAudio(nullptr, 0, &written);
+
+            std::vector<TestAudioDevice> devices(total);
+
+            if (total > 0)
+                enumAudio(devices.data(), total, &written);
+
+            for (DWORD i = 0; i < written; ++i)
+            {
+                const TestAudioDevice& d = devices[i];
+
+                if (d.allowed && d.direction == 1) ++allowedOutputs;
+                if (d.allowed && d.direction == 2) ++allowedInputs;
+
+                if (!g_pinnedEndpointId.empty() && g_pinnedEndpointId == d.id && d.allowed)
+                    pinnedAllowed = true;
+            }
+
+            ASSERT(allowedInputs == 0,
+                L"A-02b: no input endpoint passes an empty Input list");
+
+            if (!g_pinnedEndpointId.empty())
+            {
+                ASSERT(pinnedAllowed && allowedOutputs == 1,
+                    L"A-02c: exactly the endpoint named in Output passes the filter");
+            }
+
+            wprintf(L"        (%lu endpoints reported, %u outputs allowed)\n", total, allowedOutputs);
+
+            listIsComplete = (total == written);
+        }
+    }
+
+    // A-03: THE test for the identity table. The fixture names the device by its
+    // Core Audio endpoint ID -- something winmm cannot report and does not know
+    // exists. winmm can only arrive at the same answer by resolving its device
+    // index to an endpoint and looking it up, so agreement here means the whole
+    // chain worked. Falling back to the truncated name would yield 0.
+    if (waveOutGetNumDevs)
+    {
+        ASSERT(waveOutGetNumDevs() == allowedOutputs,
+            L"A-03: winmm agrees with Core Audio on which output devices survive");
+
+        wprintf(L"        (%u of %u real output devices shown)\n",
+            waveOutGetNumDevs(), g_realWaveOut);
+    }
+
+    // A-04/A-05: DirectSound. Its leading "Primary Sound Driver" entry has no
+    // name or GUID an entry would match, so it is hidden too -- which is why the
+    // count must come out below the unfiltered one.
+    if (g_realDsIn >= 0)
+    {
+        ASSERT(CountDsDevices(hDSound, "DirectSoundCaptureEnumerateA") == 0,
+            L"A-04: DirectSoundCaptureEnumerate yields no devices");
+    }
+    else
+    {
+        wprintf(L"  SKIP  DirectSoundCaptureEnumerateA unavailable; A-04 skipped\n");
+    }
+
+    if (g_realDsOut > 0)
+    {
+        const int shown = CountDsDevices(hDSound, "DirectSoundEnumerateA");
+
+        ASSERT(shown >= 0 && shown < g_realDsOut,
+            L"A-05a: DirectSoundEnumerate hides the devices the filter excludes");
+
+        if (!g_pinnedEndpointId.empty())
+        {
+            ASSERT(shown == static_cast<int>(allowedOutputs),
+                L"A-05b: DirectSound shows the same devices Core Audio does");
+        }
+
+        wprintf(L"        (%d of %d DirectSound output devices shown)\n", shown, g_realDsOut);
+    }
+    else
+    {
+        wprintf(L"  SKIP  DirectSoundEnumerateA unavailable; A-05 skipped\n");
+    }
+
+    // A-06: Core Audio end to end. EnumAudioEndpoints must hand back a
+    // collection holding exactly the endpoints the export marked allowed.
+    if (!hOle32 || !listIsComplete)
+    {
+        wprintf(L"  SKIP  Core Audio unavailable or device list incomplete; A-06 skipped\n");
+        return;
+    }
+
+    auto coInitialize = reinterpret_cast<TestPfnCoInitializeEx>(
+        reinterpret_cast<void*>(GetProcAddress(hOle32, "CoInitializeEx")));
+    auto coUninitialize = reinterpret_cast<TestPfnCoUninitialize>(
+        reinterpret_cast<void*>(GetProcAddress(hOle32, "CoUninitialize")));
+    auto coCreateInstance = reinterpret_cast<TestPfnCoCreateInstance>(
+        reinterpret_cast<void*>(GetProcAddress(hOle32, "CoCreateInstance")));
+
+    if (!coInitialize || !coCreateInstance)
+    {
+        wprintf(L"  SKIP  ole32 entry points unavailable; A-06 skipped\n");
+        return;
+    }
+
+    const bool initialized = SUCCEEDED(coInitialize(nullptr, 0));
+
+    void* enumerator = nullptr;
+
+    // CLSCTX_INPROC_SERVER
+    HRESULT hr = coCreateInstance(&kTestClsidMMDeviceEnumerator, nullptr, 1,
+        &kTestIidMMDeviceEnumerator, &enumerator);
+
+    ASSERT(SUCCEEDED(hr) && enumerator != nullptr,
+        L"A-06a: CoCreateInstance(CLSID_MMDeviceEnumerator) succeeds");
+
+    if (SUCCEEDED(hr) && enumerator)
+    {
+        void* collection = nullptr;
+
+        // eAll, DEVICE_STATE_ACTIVE
+        hr = reinterpret_cast<TestPfnEnumEndpoints>(TestVtSlot(enumerator, 3))(
+            enumerator, 2, 0x1, &collection);
+
+        ASSERT(SUCCEEDED(hr) && collection != nullptr,
+            L"A-06b: EnumAudioEndpoints succeeds");
+
+        if (SUCCEEDED(hr) && collection)
+        {
+            UINT count = 0;
+
+            reinterpret_cast<TestPfnCollectionCount>(TestVtSlot(collection, 3))(collection, &count);
+
+            ASSERT(count == allowedOutputs + allowedInputs,
+                L"A-06c: EnumAudioEndpoints yields only the allowed endpoints");
+
+            // Released before the DLL unloads: the filtered collection's vtable
+            // lives in the Interposer's image.
+            reinterpret_cast<TestPfnRelease>(TestVtSlot(collection, 2))(collection);
+        }
+
+        reinterpret_cast<TestPfnRelease>(TestVtSlot(enumerator, 2))(enumerator);
+    }
+
+    if (initialized && coUninitialize)
+        coUninitialize();
+}
+
+// ============================================================
 // Isolated-mode tests  (separate process)
 // ============================================================
 // Registry.Isolated is process-global: it makes every key virtual, which is
@@ -3211,6 +3646,17 @@ int wmain(int argc, wchar_t** argv)
     // has to be set before LoadLibraryW, not just before the test that uses it.
     SetEnvironmentVariableW(kTokenEnvVar, testTmpDir.c_str());
 
+    // The audio stack has to be in the process before the Interposer loads, the
+    // same as dinput below. It is loaded here rather than there because the
+    // fixture depends on it: the unfiltered device counts and the endpoint the
+    // Output list pins can only be read while nothing is hooked.
+    HMODULE hWinmm  = LoadLibraryW(L"winmm.dll");
+    HMODULE hDSound = LoadLibraryW(L"dsound.dll");
+    HMODULE hOle32  = LoadLibraryW(L"ole32.dll");
+
+    CaptureRealAudioCounts(hWinmm, hDSound);
+    DiscoverPinnedEndpoint(hOle32);
+
     // .interposer\Config.yml must be in place before LoadLibraryW
     // (LoadConfig runs in DLL_PROCESS_ATTACH, before MH_EnableHook)
     CreateDirs(interposerDir);
@@ -3251,6 +3697,8 @@ int wmain(int argc, wchar_t** argv)
     RunDirectInputTests(hDInput);
     RunDirectInput8Tests(hDInput8);
     RunMouseTransformTests(hDll, hDInput);
+    RunAudioTests(hDll, hWinmm, hDSound, hOle32);
+    RunPluginConfigTests(hDll);
 
     // ── Unload DLL ───────────────────────────────────────────────────────────
     // DLL_PROCESS_DETACH fires: RemoveRegistryHooks (SaveRegFile if dirty),
@@ -3269,6 +3717,10 @@ int wmain(int argc, wchar_t** argv)
         FreeLibrary(hDInput8);
         hDInput8 = nullptr;
     }
+
+    if (hWinmm)  FreeLibrary(hWinmm);
+    if (hDSound) FreeLibrary(hDSound);
+    if (hOle32)  FreeLibrary(hOle32);
 
     // ── Post-unload tests ─────────────────────────────────────────────────────
     // Discover the timestamped log created by LoadConfig during DLL_PROCESS_ATTACH.

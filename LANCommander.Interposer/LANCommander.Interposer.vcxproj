@@ -178,6 +178,7 @@
   </ItemGroup>
 
   <ItemGroup>
+    <ClCompile Include="dll\src\audio.cpp" />
     <ClCompile Include="dll\src\callbacks.cpp" />
     <ClCompile Include="dll\src\config.cpp" />
     <ClCompile Include="dll\src\proxy.cpp" />
@@ -197,6 +198,7 @@
   </ItemGroup>
 
   <ItemGroup>
+    <ClInclude Include="dll\src\audio.h" />
     <ClInclude Include="dll\src\callbacks.h" />
     <ClInclude Include="dll\src\config.h" />
     <ClInclude Include="dll\src\dinput.h" />

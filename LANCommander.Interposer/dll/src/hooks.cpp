@@ -1,4 +1,5 @@
 #include "hooks.h"
+#include "audio.h"
 #include "config.h"
 #include "dinput.h"
 #include "fastdl.h"
@@ -36,6 +37,7 @@ void InstallHooks()
     InstallIdentityHooks();
     InstallOsVersionHooks();
     InstallDirectInputHooks();
+    InstallAudioHooks();
 
     MH_EnableHook(MH_ALL_HOOKS);
 
@@ -58,6 +60,7 @@ void OnLibraryLoaded(HMODULE hModule)
 
     LateInstallNetworkHooks(name);
     LateInstallDirectInputHooks(name);
+    LateInstallAudioHooks(name);
 }
 
 void RemoveHooks()
@@ -68,6 +71,7 @@ void RemoveHooks()
     RemoveRegistryHooks();
     RemoveNetworkHooks();
     RemoveDirectInputHooks();
+    RemoveAudioHooks();
     ShutdownFastDL();
     MH_DisableHook(MH_ALL_HOOKS);
     MH_Uninitialize();

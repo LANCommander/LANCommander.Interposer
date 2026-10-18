@@ -103,6 +103,7 @@ extern bool         g_logRichPresence;  // true = log rich presence updates
 extern bool         g_logDnsRedirects;  // true = log DNS redirect matches
 extern bool         g_logNetwork;       // true = log connection/DNS events
 extern bool         g_logDirectInput;   // true = log DirectInput bridge activity
+extern bool         g_logAudio;         // true = log audio device enumeration/filtering
 
 extern std::vector<DnsRedirect> g_dnsRedirects; // DNS hostname redirects (case-insensitive)
 
@@ -170,6 +171,41 @@ extern bool                            g_naAnyFilters; // any of the three lists
 extern std::vector<SubnetFilter>       g_naSubnets;    // IPv4 CIDR filters
 extern std::vector<std::wregex>        g_naNames;      // vs FriendlyName + Description
 extern std::vector<std::array<BYTE,6>> g_naMacs;       // physical addresses
+
+// The direction an audio endpoint carries data in. Output is a render endpoint
+// (speakers, headphones), Input a capture one (microphone, line-in). Every
+// audio API this filter covers splits its enumeration along the same line, so
+// one value classifies a waveOut device, a DirectSound device and a Core Audio
+// endpoint alike.
+enum class AudioDirection {
+    Unknown = 0,
+    Output,
+    Input
+};
+
+// AudioDevices - a per-direction allow-list over the audio devices a game may
+// enumerate. Each direction has its own list, and the key's PRESENCE is what
+// arms the filter for that direction:
+//
+//   key absent            that direction is not filtered at all
+//   key present, empty    every device of that direction is hidden
+//   key present, entries  only devices matching an entry are shown
+//
+// Entries are literal, matched case-insensitively as a substring against every
+// string a device is known by -- friendly name, description, Core Audio
+// endpoint ID, device instance path, DirectSound GUID and the hardware IDs of
+// the physical device behind it. They are deliberately NOT regular
+// expressions: the strings a user pastes in here ("Speakers (NVIDIA
+// Broadcast)", USB\VID_0965&PID_9001) are full of characters a regex would
+// read as syntax.
+extern bool                      g_adEnabled;      // AudioDevices.Enabled
+extern bool                      g_adFilterOutput; // the Output key was present
+extern bool                      g_adFilterInput;  // the Input key was present
+extern std::vector<std::wstring> g_adOutput;       // AudioDevices.Output entries
+extern std::vector<std::wstring> g_adInput;        // AudioDevices.Input entries
+
+// Name a direction for logging.
+const wchar_t* AudioDirectionName(AudioDirection direction);
 
 // Rich presence config — read by richpresence.cpp after LoadConfig().
 extern bool        g_rpDiscordEnabled;
@@ -239,6 +275,15 @@ void LogOsVersion(const wchar_t* verb, const wchar_t* info, const wchar_t* detai
 // Per-device enumeration diagnostics. Additionally requires Logging.Level Debug
 // (or Trace), because a busy HID stack produces a line per device per call.
 void LogDirectInputDiag(const wchar_t* verb, const wchar_t* info, const wchar_t* detail = nullptr);
+
+// Log audio device enumeration and filtering. Gated by the Logging.Audio flag
+// (default false). Log-only, for the same reason as LogDirectInput.
+void LogAudio(const wchar_t* verb, const wchar_t* info, const wchar_t* detail = nullptr);
+
+// Per-device audio enumeration diagnostics. Additionally requires Logging.Level
+// Debug (or Trace) -- a machine with many endpoints produces a line per device
+// per enumeration call.
+void LogAudioDiag(const wchar_t* verb, const wchar_t* info, const wchar_t* detail = nullptr);
 
 // Redirect diagnostics. No-op below Debug level or when the subsystem flag is false.
 // Unlike LogFileAccess/LogRegistryAccess these deliberately do NOT fire plugin or

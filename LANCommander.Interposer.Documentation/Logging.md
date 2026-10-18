@@ -20,6 +20,7 @@ Logging:
   RichPresence: false
   DnsRedirects: true
   Network: false
+  Audio: false
   Level: Info
 ```
 
@@ -34,6 +35,7 @@ Logging:
 | `DnsRedirects` | bool | `true` | Log DNS redirect matches. Enabled by default because DNS redirects are deliberate user-configured actions. |
 | `Network` | bool | `false` | Log socket connections, DNS lookups, and network adapter enumeration. |
 | `DirectInput` | bool | `false` | Log DirectInput object and device creation, enumeration, and interface aliasing. At `Debug` also lists every device an enumeration found and every device the filter hid. |
+| `Audio` | bool | `false` | Log audio device enumeration. At `Debug` also lists every device an enumeration found and every device the `AudioDevices` filter hid. |
 | `OsVersion` | bool | `false` | Log the Windows version reported to the game, and which API each caller used to ask for it. Each entry point is reported only the first time it is called. |
 | `Level` | choice | `Info` | Verbosity within the subsystems enabled above. One of `Info`, `Debug`, `Trace`. |
 
@@ -152,6 +154,18 @@ Only written at `Level: Debug` or higher, and only for a subsystem that is alrea
 | `[DNS REDIRECT]` | A `DnsRedirects` rule matched a hostname lookup and substituted a replacement. The line shows the original and substituted hostnames separated by `->`. Gated by `Logging.DnsRedirects` (not `Logging.Network`). |
 | `[ADAPTER ENUM]` | The game enumerated network adapters. The line shows which API it used: `GetAdaptersInfo`, `GetAdaptersAddresses`, or `WSAIoctl SIO_GET_INTERFACE_LIST`. |
 | `[ADAPTER HIDE]` | A `NetworkAdapters` filter removed an adapter from an enumeration. The line shows the adapter's friendly name or description. |
+
+### Audio Device Operations
+
+| Verb | Meaning |
+|---|---|
+| `[AUDIO ENUM]` | The game enumerated audio devices. The line shows which API it used and, when the filter is active, how many devices survived it. |
+| `[AUDIO FOUND]` | One device an enumeration turned up, naming the `AudioDevices` entry that kept it. `Debug` level or higher. |
+| `[AUDIO HIDE]` | An `AudioDevices` filter removed a device from an enumeration, with the reason. `Debug` level or higher. |
+| `[AUDIO OPEN]` | A `WAVE_MAPPER` open was steered to the first allowed device, or fell back to `WAVE_MAPPER` after the steered device rejected the format. |
+| `[AUDIO DEFAULT]` | `GetDefaultAudioEndpoint` returned a hidden device and a substitute was supplied, or none could be. |
+| `[AUDIO RULE]` | One `AudioDevices` entry evaluated and rejected, for working out why an entry did not match. One line per device per entry. `Trace` level only. |
+| `[AUDIO]` | Construction of the device identity table, and a warning when Core Audio could not be reached and devices can only be matched on the name their own API reports. |
 
 ### Registry Operations
 
