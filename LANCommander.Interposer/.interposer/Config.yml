@@ -583,7 +583,8 @@ RichPresence:
 # defines its own sub-key under Plugins and documents the settings it
 # expects. Plugins read these values at runtime via the exported
 # InterposerGetConfigString function using dot-separated paths
-# (e.g. "Plugins.CDKey.Mask").
+# (e.g. "Plugins.CDKey.Mask"), and may save values back into their own
+# section with InterposerSetConfigString -- comments here are preserved.
 #
 # Example (CDKey plugin):
 #

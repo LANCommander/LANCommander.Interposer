@@ -2275,6 +2275,112 @@ static void RunLogTests(const std::wstring& logPath)
 // SaveRegFile() is called whenever g_dirty == true (set by any write op).
 // It writes UTF-16 LE with BOM and uppercases ALL value names.
 
+// ============================================================
+// Plugin config tests (InterposerGetConfigString / InterposerSetConfigString)
+// ============================================================
+
+using FnTestGetConfig = BOOL (*)(const wchar_t*, wchar_t*, DWORD);
+using FnTestSetConfig = BOOL (*)(const wchar_t*, const wchar_t*);
+
+static std::wstring GetConfig(FnTestGetConfig get, const wchar_t* path)
+{
+    wchar_t buf[256]{};
+    return get(path, buf, ARRAYSIZE(buf)) ? std::wstring(buf) : std::wstring(L"<missing>");
+}
+
+static void RunPluginConfigTests(HMODULE hDll)
+{
+    wprintf(L"\n--- Plugin Config Tests ---\n");
+
+    auto get = reinterpret_cast<FnTestGetConfig>(
+        reinterpret_cast<void*>(GetProcAddress(hDll, "InterposerGetConfigString")));
+    auto set = reinterpret_cast<FnTestSetConfig>(
+        reinterpret_cast<void*>(GetProcAddress(hDll, "InterposerSetConfigString")));
+
+    ASSERT(get != nullptr && set != nullptr,
+        L"C-01: InterposerGetConfigString and InterposerSetConfigString are exported");
+    if (!get || !set) return;
+
+    // Each read used to assign every child over its parent inside g_configRoot,
+    // so the first lookup left the root holding the value it ended on and every
+    // read after it -- through any path -- failed.
+    ASSERT(GetConfig(get, L"Plugins.Tester.Existing") == L"old" &&
+           GetConfig(get, L"Plugins.Tester.Existing") == L"old" &&
+           GetConfig(get, L"Player.Username") == L"TestPlayer",
+        L"C-02: repeated reads leave the config tree intact");
+
+    ASSERT(set(L"Plugins.Tester.Existing", L"new") &&
+           GetConfig(get, L"Plugins.Tester.Existing") == L"new",
+        L"C-03: overwriting an existing value is visible to the next read");
+
+    ASSERT(set(L"Plugins.Tester.Added.Leaf", L"leaf") &&
+           GetConfig(get, L"Plugins.Tester.Added.Leaf") == L"leaf",
+        L"C-04: a missing key and its intermediate map are created");
+
+    ASSERT(set(L"Plugins.Tester.Nulled", L"filled") &&
+           GetConfig(get, L"Plugins.Tester.Nulled") == L"filled",
+        L"C-05: a key with a null value takes a scalar");
+
+    ASSERT(set(L"Plugins.Tester.Empty", L"") &&
+           GetConfig(get, L"Plugins.Tester.Empty").empty(),
+        L"C-06: an empty string round-trips as empty, not null");
+
+    ASSERT(!set(L"Player.Username", L"Intruder") &&
+           GetConfig(get, L"Player.Username") == L"TestPlayer",
+        L"C-07: a write outside Plugins is refused and changes nothing");
+
+    ASSERT(!set(L"Plugins.Tester", L"x"),
+        L"C-08: a write to a whole plugin section is refused");
+
+    ASSERT(!set(L"Plugins.Tester.Nested", L"x") &&
+           GetConfig(get, L"Plugins.Tester.Nested.Deep") == L"1",
+        L"C-09: a scalar is not written over an existing map");
+
+    ASSERT(!set(L"Plugins.Tester.Existing.Sub", L"x") &&
+           GetConfig(get, L"Plugins.Tester.Existing") == L"new",
+        L"C-10: a map is not written over an existing scalar");
+
+    ASSERT(set(L"Plugins.Flow.B", L"2") &&
+           GetConfig(get, L"Plugins.Flow.A") == L"1" &&
+           GetConfig(get, L"Plugins.Flow.B") == L"2",
+        L"C-11: a write into a flow-style section succeeds and keeps its siblings");
+
+    ASSERT(set(L"Plugins.NewPlugin.Key", L"true") &&
+           GetConfig(get, L"Plugins.NewPlugin.Key") == L"true",
+        L"C-12: a write creates a plugin section that did not exist");
+}
+
+// Config.yml as InterposerSetConfigString left it.
+static void RunPluginConfigPersistenceTests(const std::wstring& yamlPath)
+{
+    wprintf(L"\n--- Plugin Config Persistence Tests ---\n");
+
+    std::string yml = ReadFileAsUtf8(yamlPath);
+    auto has = [&](const char* s) { return yml.find(s) != std::string::npos; };
+
+    ASSERT(has("    Existing: new   # kept across the write\n"),
+        L"CP-01: an overwritten value is patched in place, keeping its comment");
+
+    ASSERT(has("    Nulled: filled\n"),
+        L"CP-02: a null value is filled in on its own line");
+
+    ASSERT(has("    Added:\n      Leaf: leaf\n"),
+        L"CP-03: a created key is written as a nested block");
+
+    ASSERT(has("    Empty: ''\n"),
+        L"CP-04: an empty string is written quoted");
+
+    // The fallback re-rendered Flow, and only Flow
+    ASSERT(has("  Flow:\n    A: 1\n    B: 2\n") && !has("{A:"),
+        L"CP-05: the flow-style section is re-rendered as a block");
+
+    ASSERT(has("  NewPlugin:\n    Key: true\n"),
+        L"CP-06: a new plugin section is appended under Plugins");
+
+    ASSERT(has("# trailing comment\n") && has("  Username: TestPlayer\n"),
+        L"CP-07: content outside the written keys is untouched");
+}
+
 static void RunPersistenceTests(const std::wstring& regPath)
 {
     wprintf(L"\n--- Persistence Tests ---\n");
@@ -3170,6 +3276,7 @@ int wmain(int argc, wchar_t** argv)
     RunLogTests(logPath);
     RunPersistenceTests(regPath);
     RunOverlayPersistenceTests(baseRegPath, regPath);
+    RunPluginConfigPersistenceTests(yamlPath);
 
     // Last, because it spawns a second process that loads its own copy of the
     // DLL -- nothing after it should depend on this process's hooks.

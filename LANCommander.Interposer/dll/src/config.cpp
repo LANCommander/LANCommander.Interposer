@@ -1016,6 +1016,56 @@ void InterposerLog(const wchar_t* verb, const wchar_t* message)
     WriteLogLine(verb, message, nullptr);
 }
 
+// Split a dot-separated config path into UTF-8 segments. Returns an empty
+// vector for a malformed path (empty, or an empty segment such as "A..B").
+static std::vector<std::string> SplitDotPath(const wchar_t* dotPath)
+{
+    std::vector<std::string> segs;
+    std::wstring wpath(dotPath);
+    size_t start = 0;
+
+    while (true)
+    {
+        size_t dot = wpath.find(L'.', start);
+        std::wstring wseg = (dot == std::wstring::npos)
+            ? wpath.substr(start)
+            : wpath.substr(start, dot - start);
+
+        if (wseg.empty()) return {};
+
+        segs.push_back(WideToUtf8(wseg));
+
+        if (dot == std::wstring::npos) break;
+        start = dot + 1;
+    }
+
+    return segs;
+}
+
+// Walk `node` down `count` segments of `segs`, rebinding it to each child in turn.
+// Returns false if any segment is missing.
+//
+// Rebinding has to go through reset(). yaml-cpp's Node::operator= does not repoint
+// the handle -- it overwrites the node the handle refers to -- so the obvious
+// `node = node[seg]` writes each child over its parent and leaves the root holding
+// whatever the walk ended on. The lookup also goes through a const reference,
+// because the non-const operator[] inserts the key it is asked for.
+static bool WalkConfigPath(YAML::Node& node, const std::vector<std::string>& segs, size_t count)
+{
+    for (size_t i = 0; i < count; ++i)
+    {
+        const YAML::Node& parent = node;
+        if (!parent.IsMap()) return false;
+
+        YAML::Node child = parent[segs[i]];
+        if (!child) return false;
+
+        node.reset(child);
+    }
+
+    return true;
+}
+
 // Read a scalar value from Config.yml by dot-separated YAML path.
 // dotPath    — e.g. L"Plugins.MyPlugin.Setting"
 // buffer     — receives the null-terminated wide string value
@@ -1027,29 +1077,13 @@ BOOL InterposerGetConfigString(const wchar_t* dotPath, wchar_t* buffer, DWORD bu
 {
     if (!dotPath || !buffer || bufferSize == 0) return FALSE;
 
+    std::vector<std::string> segs = SplitDotPath(dotPath);
+    if (segs.empty()) return FALSE;
+
     std::shared_lock lk(g_configMutex);
 
-    // Traverse the node tree one segment at a time
     YAML::Node node = g_configRoot;
-    std::wstring wpath(dotPath);
-    size_t start = 0;
-
-    while (start <= wpath.size())
-    {
-        size_t dot = wpath.find(L'.', start);
-        std::wstring wseg = (dot == std::wstring::npos)
-            ? wpath.substr(start)
-            : wpath.substr(start, dot - start);
-
-        if (wseg.empty()) return FALSE;
-
-        std::string seg = WideToUtf8(wseg);
-        if (!node[seg]) return FALSE;
-        node = node[seg];
-
-        if (dot == std::wstring::npos) break;
-        start = dot + 1;
-    }
+    if (!WalkConfigPath(node, segs, segs.size())) return FALSE;
 
     if (!node.IsScalar()) return FALSE;
 
@@ -1147,10 +1181,18 @@ static std::string EmitPluginYaml(const YAML::Node& node, int indent)
             em << YAML::Flow << val;
             result += pad + key + ": " + em.c_str() + "\n";
         }
+        else if (val.IsMap() && val.size() == 0)
+        {
+            result += pad + key + ": {}\n";
+        }
         else if (val.IsMap())
         {
             result += pad + key + ":\n";
             result += EmitPluginYaml(val, indent + 2);
+        }
+        else if (val.IsNull())
+        {
+            result += pad + key + ":\n";
         }
     }
 
@@ -1323,6 +1365,481 @@ BOOL InterposerRegisterPluginConfig(const wchar_t* pluginName, const wchar_t* ya
     }
 
     LogPluginEvent(L"PLUGIN CONFIG", Utf8ToWide("Registered defaults for " + nameUtf8).c_str());
+    return TRUE;
+}
+
+// ---------------------------------------------------------------------------
+// InterposerSetConfigString
+// ---------------------------------------------------------------------------
+//
+// Config.yml is hand-edited and comment-heavy, so a write patches the one line
+// it changes rather than re-emitting the document through yaml-cpp, which would
+// drop every comment in the file. The patcher understands block-style maps and
+// single-line scalars, which is what the sample config and
+// InterposerRegisterPluginConfig produce. Anything else -- a flow map, a block
+// scalar, a quoted key -- it declines, and the Plugins section alone is
+// re-emitted from memory instead. Whichever text results is parsed back before
+// it is written, so a patch that misread the file never reaches disk.
+
+// One physical line of Config.yml, as the patcher sees it.
+struct ConfigLine
+{
+    size_t start;   // first byte of the line
+    size_t end;     // one past the last byte, excluding \r\n
+    size_t next;    // first byte of the following line
+    int    indent;  // column of the first character; -1 for a blank or comment-only line
+};
+
+static std::vector<ConfigLine> SplitConfigLines(const std::string& text)
+{
+    std::vector<ConfigLine> lines;
+    size_t pos = 0;
+
+    while (pos < text.size())
+    {
+        size_t nl   = text.find('\n', pos);
+        size_t end  = (nl == std::string::npos) ? text.size() : nl;
+        size_t next = (nl == std::string::npos) ? text.size() : nl + 1;
+
+        if (end > pos && text[end - 1] == '\r')
+            --end;
+
+        size_t first  = text.find_first_not_of(" \t", pos);
+        int    indent = -1;
+
+        if (first != std::string::npos && first < end && text[first] != '#')
+            indent = static_cast<int>(first - pos);
+
+        lines.push_back({ pos, end, next, indent });
+        pos = next;
+    }
+
+    return lines;
+}
+
+// If `line` declares the plain map key `key`, return the offset just past its
+// colon; otherwise npos.
+static size_t MatchConfigKey(const std::string& text, const ConfigLine& line, const std::string& key)
+{
+    size_t p = line.start + line.indent;
+
+    if (line.end - p < key.size() || text.compare(p, key.size(), key) != 0)
+        return std::string::npos;
+
+    p += key.size();
+    while (p < line.end && text[p] == ' ') ++p;
+
+    if (p >= line.end || text[p] != ':')
+        return std::string::npos;
+
+    ++p;
+    if (p < line.end && text[p] != ' ' && text[p] != '\t')
+        return std::string::npos;
+
+    return p;
+}
+
+// Locate the inline scalar that follows a key's colon, excluding any trailing
+// comment. Returns false when there is no inline value, or when it is something
+// the patcher does not rewrite (block scalar, flow collection, anchor, alias,
+// tag, or a quoted string that continues onto the next line).
+static bool FindScalarSpan(const std::string& text, size_t from, size_t lineEnd,
+                           size_t& valStart, size_t& valEnd)
+{
+    size_t p = text.find_first_not_of(" \t", from);
+    if (p == std::string::npos || p >= lineEnd || text[p] == '#')
+        return false;
+
+    char c = text[p];
+    if (c == '|' || c == '>' || c == '{' || c == '[' || c == '&' || c == '*' || c == '!')
+        return false;
+
+    valStart = p;
+
+    if (c == '\'' || c == '"')
+    {
+        size_t q = p + 1;
+
+        for (; q < lineEnd; ++q)
+        {
+            if (c == '"' && text[q] == '\\') { ++q; continue; }
+
+            if (text[q] == c)
+            {
+                // '' is an escaped quote inside a single-quoted scalar
+                if (c == '\'' && q + 1 < lineEnd && text[q + 1] == '\'') { ++q; continue; }
+                break;
+            }
+        }
+
+        if (q >= lineEnd) return false;
+        valEnd = q + 1;
+        return true;
+    }
+
+    // A plain scalar runs to a " #" comment or the end of the line
+    size_t q = p;
+    while (q < lineEnd && !(text[q] == '#' && (text[q - 1] == ' ' || text[q - 1] == '\t')))
+        ++q;
+    while (q > p && (text[q - 1] == ' ' || text[q - 1] == '\t'))
+        --q;
+
+    valEnd = q;
+    return true;
+}
+
+// True if any content line between line `index` and the end of its block is
+// indented deeper than `indent` -- i.e. the key on line `index` opens a nested
+// block rather than holding a null value.
+static bool HasChildBlock(const std::vector<ConfigLine>& lines, size_t index, int indent)
+{
+    for (size_t l = index + 1; l < lines.size(); ++l)
+    {
+        if (lines[l].indent < 0) continue;
+        return lines[l].indent > indent;
+    }
+
+    return false;
+}
+
+// True if the key on `line` has an inline value after its colon (as opposed to
+// nothing, or only a comment).
+static bool HasInlineValue(const std::string& text, const ConfigLine& line, size_t afterColon)
+{
+    size_t p = text.find_first_not_of(" \t", afterColon);
+    return p != std::string::npos && p < line.end && text[p] != '#';
+}
+
+// Scan the block that starts at line `first`, opened by a key at `parentIndent`
+// (-1 for the document itself), for a line declaring `key` at the block's own
+// indentation. Returns its line index or npos. Either way `childIndent` is the
+// block's indentation (-1 if it has no content yet) and `tail` is the offset
+// just past the last content line scanned -- where a new sibling would go.
+static size_t FindKeyInBlock(const std::string& text, const std::vector<ConfigLine>& lines,
+                             size_t first, int parentIndent, const std::string& key,
+                             int& childIndent, size_t& tail)
+{
+    childIndent = -1;
+    tail        = (first < lines.size()) ? lines[first].start : text.size();
+
+    for (size_t l = first; l < lines.size(); ++l)
+    {
+        const ConfigLine& line = lines[l];
+
+        if (line.indent < 0)             continue;
+        if (line.indent <= parentIndent) break;   // end of the block
+        if (childIndent < 0)             childIndent = line.indent;
+
+        tail = line.next;
+
+        if (line.indent == childIndent && MatchConfigKey(text, line, key) != std::string::npos)
+            return l;
+    }
+
+    return std::string::npos;
+}
+
+// Convert the \n line breaks in `s` to `eol`.
+static std::string WithLineEndings(std::string s, const std::string& eol)
+{
+    if (eol == "\n") return s;
+
+    for (size_t p = 0; (p = s.find('\n', p)) != std::string::npos; p += eol.size())
+        s.replace(p, 1, eol);
+
+    return s;
+}
+
+// Patch `scalar` into `text` at `segs`, preserving everything else byte for byte.
+// On success, `insertedFrom` is the index of the first segment that had to be
+// created (segs.size() if the key already existed and only its value changed).
+// Returns false when the text takes a form this patcher does not rewrite.
+static bool PatchConfigScalar(std::string& text, const std::vector<std::string>& segs,
+                              const std::string& scalar, size_t& insertedFrom)
+{
+    std::vector<ConfigLine> lines = SplitConfigLines(text);
+    std::string eol = (text.find("\r\n") != std::string::npos) ? "\r\n" : "\n";
+
+    size_t first        = 0;   // first line of the current block
+    int    parentIndent = -1;  // indent of the key that opened it; -1 for the document
+
+    for (size_t i = 0; i < segs.size(); ++i)
+    {
+        int    childIndent = -1;
+        size_t tail        = 0;
+        size_t found       = FindKeyInBlock(text, lines, first, parentIndent, segs[i], childIndent, tail);
+
+        if (found == std::string::npos)
+        {
+            // Create the rest of the path at the end of the block, matching the
+            // indentation its siblings already use.
+            int indent = (childIndent >= 0) ? childIndent
+                       : (parentIndent < 0) ? 0
+                       : parentIndent + 2;
+
+            std::string block;
+            if (tail > 0 && text[tail - 1] != '\n')
+                block += eol;
+
+            for (size_t j = i; j < segs.size(); ++j, indent += 2)
+            {
+                block += std::string(indent, ' ') + segs[j] + ":";
+                if (j + 1 == segs.size()) block += " " + scalar;
+                block += eol;
+            }
+
+            text.insert(tail, block);
+            insertedFrom = i;
+            return true;
+        }
+
+        const ConfigLine& line = lines[found];
+        size_t afterColon = MatchConfigKey(text, line, segs[i]);
+
+        if (i + 1 == segs.size())
+        {
+            size_t vs = 0, ve = 0;
+
+            if (FindScalarSpan(text, afterColon, line.end, vs, ve))
+                text.replace(vs, ve - vs, scalar);
+            else if (!HasInlineValue(text, line, afterColon))
+            {
+                // `Key:` with nothing after it is a null value -- unless it opens a block
+                if (HasChildBlock(lines, found, line.indent)) return false;
+                text.insert(afterColon, " " + scalar);
+            }
+            else
+                return false;
+
+            insertedFrom = segs.size();
+            return true;
+        }
+
+        // An intermediate key has to open an indented block. An inline value --
+        // `Plugins: {}`, a flow map, a scalar -- is left to the fallback.
+        if (HasInlineValue(text, line, afterColon))
+            return false;
+
+        parentIndent = line.indent;
+        first        = found + 1;
+    }
+
+    return false;
+}
+
+// Fallback for PatchConfigScalar: replace the block for the first `depth`
+// segments of `segs` with a fresh rendering of the in-memory node. Comments
+// inside that block are lost; everything outside it is untouched. A missing
+// top-level key (depth 1) is appended. Returns false if the block cannot be found.
+static bool ReplaceConfigBlock(std::string& text, const std::vector<std::string>& segs, size_t depth)
+{
+    std::vector<ConfigLine> lines = SplitConfigLines(text);
+    std::string eol = (text.find("\r\n") != std::string::npos) ? "\r\n" : "\n";
+
+    YAML::Node node = g_configRoot;
+    if (!WalkConfigPath(node, segs, depth))
+        return false;
+
+    size_t first        = 0;
+    int    parentIndent = -1;
+    size_t found        = std::string::npos;
+
+    for (size_t i = 0; i < depth; ++i)
+    {
+        int    childIndent = -1;
+        size_t tail        = 0;
+        found = FindKeyInBlock(text, lines, first, parentIndent, segs[i], childIndent, tail);
+
+        if (found == std::string::npos)
+        {
+            if (depth != 1) return false;
+
+            if (!text.empty() && text.back() != '\n') text += eol;
+            text += eol + WithLineEndings(segs[0] + ":\n" + EmitPluginYaml(node, 2), eol);
+            return true;
+        }
+
+        if (i + 1 < depth)
+        {
+            if (HasInlineValue(text, lines[found], MatchConfigKey(text, lines[found], segs[i])))
+                return false;
+
+            parentIndent = lines[found].indent;
+            first        = found + 1;
+        }
+    }
+
+    // Re-render at the indentation the key already has
+    int indent = lines[found].indent;
+    std::string block = WithLineEndings(
+        std::string(indent, ' ') + segs[depth - 1] + ":\n" + EmitPluginYaml(node, indent + 2), eol);
+
+    // The block ends after its last deeper-indented content line, so comment
+    // lines that introduce the next key stay where they are.
+    size_t blockEnd = lines[found].next;
+
+    for (size_t k = found + 1; k < lines.size(); ++k)
+    {
+        if (lines[k].indent < 0)       continue;
+        if (lines[k].indent <= indent) break;
+        blockEnd = lines[k].next;
+    }
+
+    // Keep the absence of a final line break if the block ran to EOF without one
+    if (blockEnd == text.size() && !text.empty() && text.back() != '\n')
+        block.resize(block.size() - eol.size());
+
+    text.replace(lines[found].start, blockEnd - lines[found].start, block);
+    return true;
+}
+
+// Parse `text` and look `count` segments of `segs` up in it.
+static bool LookupConfigText(const std::string& text, const std::vector<std::string>& segs,
+                             size_t count, YAML::Node& out)
+{
+    try
+    {
+        out = YAML::Load(text);
+        return WalkConfigPath(out, segs, count);
+    }
+    catch (...)
+    {
+        return false;
+    }
+}
+
+// Render a string as a YAML scalar that reads back as exactly that string.
+// Plain style when it round-trips (so `Enabled: true` stays `true`); otherwise
+// single-quoted like the rest of Config.yml -- e.g. an empty string, `null`, or
+// a leading `#`. The emitter itself falls back to double quotes for a value
+// single quotes cannot carry, such as one containing a line break.
+static std::string EmitConfigScalar(const std::string& value)
+{
+    {
+        YAML::Emitter em;
+        em << value;
+        std::string plain = em.c_str();
+
+        try
+        {
+            YAML::Node back = YAML::Load(plain);
+            if (!plain.empty() && plain[0] != '"' && plain[0] != '\'' &&
+                back.IsScalar() && back.as<std::string>() == value)
+                return plain;
+        }
+        catch (...) {}
+    }
+
+    YAML::Emitter em;
+    em << YAML::SingleQuoted << value;
+    return em.c_str();
+}
+
+extern "C" __declspec(dllexport)
+BOOL InterposerSetConfigString(const wchar_t* dotPath, const wchar_t* value)
+{
+    if (!dotPath || !value) return FALSE;
+
+    std::vector<std::string> segs = SplitDotPath(dotPath);
+    std::wstring             wpath(dotPath);
+
+    // Plugins write only inside a Plugins.<Name> section. Every other key is
+    // parsed once by LoadConfig into the g_* globals, so writing one would change
+    // the file without changing anything the running session does.
+    if (segs.size() < 3 || segs[0] != "Plugins")
+    {
+        LogPluginEvent(L"PLUGIN CONFIG", (L"Refused write outside Plugins.<Name>: " + wpath).c_str());
+        return FALSE;
+    }
+
+    std::string valueUtf8 = WideToUtf8(std::wstring(value));
+
+    std::unique_lock lk(g_configMutex);
+
+    // ── In memory ──────────────────────────────────────────────────────────
+    // Intermediate keys are created as maps where missing; one that already
+    // holds a scalar or sequence is a type conflict, and so is a final key that
+    // holds a map or sequence -- overwriting either would silently discard
+    // settings the plugin did not name.
+    {
+        if (!g_configRoot.IsMap())
+            g_configRoot = YAML::Node(YAML::NodeType::Map);
+
+        YAML::Node node = g_configRoot;
+
+        for (size_t i = 0; i < segs.size(); ++i)
+        {
+            const YAML::Node& parent = node;
+            YAML::Node existing = parent[segs[i]];
+            bool last = (i + 1 == segs.size());
+
+            if (existing && !existing.IsNull() &&
+                (last ? !existing.IsScalar() : !existing.IsMap()))
+            {
+                LogPluginEvent(L"PLUGIN CONFIG", (L"Type conflict, not written: " + wpath).c_str());
+                return FALSE;
+            }
+
+            if (last)
+            {
+                node[segs[i]] = valueUtf8;
+                break;
+            }
+
+            if (!existing || existing.IsNull())
+                node[segs[i]] = YAML::Node(YAML::NodeType::Map);
+
+            node.reset(static_cast<const YAML::Node&>(node)[segs[i]]);
+        }
+    }
+
+    // ── On disk ────────────────────────────────────────────────────────────
+    std::string original = ReadConfigFileUtf8();
+    std::string scalar   = EmitConfigScalar(valueUtf8);
+
+    auto verified = [&](const std::string& text) -> bool
+    {
+        YAML::Node node;
+        return LookupConfigText(text, segs, segs.size(), node)
+            && node.IsScalar() && node.as<std::string>() == valueUtf8;
+    };
+
+    std::string patched      = original;
+    size_t      insertedFrom = 0;
+    bool        ok           = PatchConfigScalar(patched, segs, scalar, insertedFrom);
+
+    // A patch that created a key the parser says was already there means the
+    // patcher failed to recognise it (a quoted key, say) and would have
+    // written a duplicate.
+    if (ok && insertedFrom < segs.size())
+    {
+        YAML::Node node;
+        if (LookupConfigText(original, segs, insertedFrom + 1, node))
+            ok = false;
+    }
+
+    // Fall back to re-rendering as little as possible: this plugin's section
+    // first, so one flow-styled section cannot cost every other plugin its
+    // comments, and the whole Plugins block only if that fails too.
+    for (size_t depth = 2; !(ok && verified(patched)); --depth)
+    {
+        if (depth == 0)
+        {
+            LogPluginEvent(L"PLUGIN CONFIG", (L"Could not update Config.yml for " + wpath).c_str());
+            return FALSE;
+        }
+
+        patched = original;
+        ok      = ReplaceConfigBlock(patched, segs, depth);
+    }
+
+    if (!WriteConfigFileUtf8(patched))
+    {
+        LogPluginEvent(L"PLUGIN CONFIG", (L"Failed to write Config.yml for " + wpath).c_str());
+        return FALSE;
+    }
+
+    LogPluginEvent(L"PLUGIN CONFIG", (L"Set " + wpath).c_str());
     return TRUE;
 }
 

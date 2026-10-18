@@ -150,6 +150,32 @@ Plugins:
 
 ---
 
+### `InterposerSetConfigString`
+
+```cpp
+BOOL InterposerSetConfigString(const wchar_t* dotPath, const wchar_t* value);
+```
+
+Writes a scalar value back to `Config.yml` by dot-separated YAML path — for state a plugin wants to keep between sessions, such as a last-used server or a generated key. The new value is visible to `InterposerGetConfigString` immediately and is saved to disk before the call returns.
+
+```cpp
+using FnInterposerSetConfigString = BOOL (*)(const wchar_t* dotPath, const wchar_t* value);
+auto pfnSetConfig = (FnInterposerSetConfigString)GetProcAddress(hInterposer, "InterposerSetConfigString");
+
+if (pfnSetConfig)
+    pfnSetConfig(L"Plugins.MyPlugin.LastServer", L"192.168.1.10");
+```
+
+- **Plugin sections only.** The path must be `Plugins.<Name>.<Key>` or deeper. Every other key is read once when the DLL loads, so writing one would change the file without changing anything in the running session; those writes are refused.
+- **Missing keys are created**, including intermediate maps (`Plugins.MyPlugin.Servers.Last` creates `Servers:` if needed).
+- **Shapes are not changed.** Writing a scalar over an existing map, or through an existing scalar as if it were a map, is refused rather than discarding the settings underneath.
+- **Comments are preserved.** The write patches the one line it changes. If the plugin's section is in a form that cannot be patched in place — a flow map such as `MyPlugin: {A: 1}` — that section alone is rewritten in block style, which drops comments inside it.
+- Values are always stored as strings. A value that YAML would read differently (an empty string, `null`, `#tag`) is written quoted, so `InterposerGetConfigString` returns exactly what was set.
+
+Returns `TRUE` on success. Returns `FALSE` if the path is outside a plugin section, the write would change a key's shape, or `Config.yml` could not be written — in the last case the in-memory value has still been updated for this session.
+
+---
+
 ### `InterposerGetUsername`
 
 ```cpp

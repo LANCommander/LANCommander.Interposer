@@ -24,6 +24,8 @@
 //                               wchar_t* buf, DWORD bufSize)      -> BOOL
 //     InterposerRegisterPluginConfig(const wchar_t* pluginName,
 //                                    const wchar_t* yamlDefaults) -> BOOL
+//     InterposerSetConfigString(const wchar_t* dotPath,
+//                               const wchar_t* value)             -> BOOL
 //
 //   Virtual Registry (wchar_t*):
 //     InterposerSetRegistryValue(const wchar_t* keyPath,

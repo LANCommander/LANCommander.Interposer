@@ -121,7 +121,7 @@ Only written at `Level: Debug` or higher, and only for a subsystem that is alrea
 |---|---|
 | `[PLUGIN LOAD]` | A plugin DLL or ASI was loaded successfully. |
 | `[PLUGIN ERROR]` | A plugin failed to load. The line includes the Win32 error code. |
-| `[PLUGIN CONFIG]` | A plugin registered default configuration via `InterposerRegisterPluginConfig`. |
+| `[PLUGIN CONFIG]` | A plugin registered default configuration via `InterposerRegisterPluginConfig`, or wrote a value via `InterposerSetConfigString` (`Set <path>`, or the reason the write was refused). |
 
 ### Identity Operations
 

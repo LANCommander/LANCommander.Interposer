@@ -17,6 +17,13 @@ namespace LANCommander.Interposer
     /// (logging, config, virtual registry, rich presence), and hook events (file,
     /// registry, DNS, network, identity).
     /// <para>
+    /// Features that are configured entirely through <c>.interposer\Config.yml</c> and
+    /// need no managed API - file redirection (including <c>%TOKEN%</c> path
+    /// expansion), DNS redirection, DirectInput fixes and OS version spoofing -
+    /// take effect as soon as the DLL is injected. Read their settings back with
+    /// <see cref="GetConfigString(string)"/>.
+    /// </para>
+    /// <para>
     /// <b>Launcher usage:</b> set override properties, then call
     /// <see cref="Inject(Process, string)"/> or <see cref="Start(ProcessStartInfo, string)"/>
     /// to inject the Interposer DLL into a game process.
@@ -51,6 +58,11 @@ namespace LANCommander.Interposer
         [return: MarshalAs(UnmanagedType.Bool)]
         private static extern bool InterposerRegisterPluginConfig(
             string pluginName, string yamlDefaults);
+
+        [DllImport(DllName, CallingConvention = CallingConvention.Cdecl, CharSet = CharSet.Unicode)]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        private static extern bool InterposerSetConfigString(
+            string dotPath, string value);
 
         [DllImport(DllName, CallingConvention = CallingConvention.Cdecl, CharSet = CharSet.Unicode)]
         private static extern void InterposerSetRegistryValue(
@@ -534,6 +546,13 @@ namespace LANCommander.Interposer
         /// Reads a scalar value from Config.yml by dot-separated YAML path.
         /// Returns null if the key is missing, not scalar, or the buffer is too small.
         /// In-process only.
+        /// <para>
+        /// The path is resolved against the whole document, not just the Plugins
+        /// section, so any top-level key the DLL reads is available: for example
+        /// "OsVersion.Version" for the selected Windows version preset,
+        /// "Player.Username", or "FastDL.BaseUrl". Sequence-valued keys such as
+        /// FileRedirects are not scalar and return null.
+        /// </para>
         /// </summary>
         /// <param name="dotPath">Dot-separated path, e.g. "Plugins.MyPlugin.Setting"</param>
         public string GetConfigString(string dotPath)
@@ -553,6 +572,24 @@ namespace LANCommander.Interposer
         public bool RegisterPluginConfig(string pluginName, string yamlDefaults)
         {
             return InterposerRegisterPluginConfig(pluginName, yamlDefaults);
+        }
+
+        /// <summary>
+        /// Writes a scalar value back to Config.yml by dot-separated YAML path.
+        /// The path must be inside a plugin section (Plugins.&lt;Name&gt;.&lt;Key&gt;...);
+        /// missing keys are created. The value is visible to GetConfigString
+        /// immediately and is patched into Config.yml in place, preserving comments.
+        /// In-process only.
+        /// </summary>
+        /// <param name="dotPath">Dot-separated path, e.g. "Plugins.MyPlugin.LastServer"</param>
+        /// <param name="value">The value to store.</param>
+        /// <returns>
+        /// False if the path is outside Plugins.&lt;Name&gt;, collides with an existing
+        /// value of a different shape, or Config.yml could not be written.
+        /// </returns>
+        public bool SetConfigString(string dotPath, string value)
+        {
+            return InterposerSetConfigString(dotPath, value);
         }
 
         // =================================================================

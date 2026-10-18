@@ -283,3 +283,19 @@ extern "C" __declspec(dllexport) BOOL InterposerGetConfigString(const wchar_t* d
 // Returns TRUE if the section already existed or defaults were written
 // successfully. Returns FALSE on error (bad YAML, file write failure).
 extern "C" __declspec(dllexport) BOOL InterposerRegisterPluginConfig(const wchar_t* pluginName, const wchar_t* yamlDefaults);
+
+// Write a scalar value back to Config.yml by dot-separated YAML path. The path
+// must lie inside a plugin section -- Plugins.<Name>.<Key>[.<Key>...] -- since
+// every other key is read once at startup and a write would not take effect.
+// Missing keys and intermediate maps are created.
+//
+// The value is visible to InterposerGetConfigString immediately and is patched
+// into Config.yml in place, preserving comments and formatting. Only when the
+// existing text is in a form the patcher does not rewrite (e.g. a flow map) is
+// the Plugins section re-emitted, which drops comments inside that section only.
+//
+// Returns FALSE if the path is outside Plugins.<Name>, if it collides with an
+// existing value of a different shape (a map where a scalar is being written,
+// or a scalar where the path needs a map), or if Config.yml could not be
+// written. On a write failure the in-memory value has still been updated.
+extern "C" __declspec(dllexport) BOOL InterposerSetConfigString(const wchar_t* dotPath, const wchar_t* value);

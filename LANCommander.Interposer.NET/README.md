@@ -1,12 +1,14 @@
 # LANCommander.Interposer
 
-.NET bindings for [LANCommander Interposer](https://github.com/LANCommander/LANCommander.Interposer) - a Windows DLL that hooks into game processes to provide virtual registry, file redirection, DNS redirection, identity overrides, FastDL, and Discord rich presence for LAN gaming.
+.NET bindings for [LANCommander Interposer](https://github.com/LANCommander/LANCommander.Interposer) - a Windows DLL that hooks into game processes to provide virtual registry, file redirection, DNS redirection, identity overrides, FastDL, DirectInput fixes, OS version spoofing, and Discord rich presence for LAN gaming.
 
 Everything goes through `InterposerService`:
 
 - **Injection** - Launch processes with `ProcessStartInfo` or inject into running `Process` instances, with optional runtime overrides for username, computer name, and FastDL URL.
 - **Plugin API** - Logging, config, virtual registry, and rich presence (in-process only).
 - **Hook Events** - Subscribe to file, registry, DNS, network, and identity events (in-process only).
+
+Everything else the DLL does is driven by `.interposer\Config.yml` next to the DLL and needs no managed calls - see [Configuration](#configuration) below.
 
 ## Launch and Inject
 
@@ -44,6 +46,7 @@ using var interposer = new InterposerService();
 interposer.Log("[MANAGED]      ", "Hello from .NET!");
 
 string setting = interposer.GetConfigString("Plugins.MyPlugin.ApiKey");
+interposer.SetConfigString("Plugins.MyPlugin.LastServer", "192.168.1.10");
 interposer.RegisterPluginConfig("MyPlugin", "ApiKey: ''\nEnabled: true");
 
 string username = interposer.GetUsername();
@@ -55,6 +58,36 @@ interposer.SetPresenceName("My Game");
 interposer.SetPresenceDetails("Playing on de_dust2");
 interposer.UpdatePresence();
 ```
+
+## Configuration
+
+The DLL reads `.interposer\Config.yml` from its own directory at load time. Redirection rules, DirectInput fixes and the reported OS version are configured there, not through this API - injecting the DLL is enough to apply them.
+
+```yaml
+# Report Windows XP SP3 to a game whose version switch has no case past 5.x
+OsVersion:
+  Version: WindowsXP
+
+# Move a save folder. %TOKEN% resolves environment variables first, then known
+# folders Windows tracks but the environment does not (%SAVEDGAMES%, %DOCUMENTS%,
+# %MYGAMES%, ...), then %GAMEDIR% and %INTERPOSERDIR%. Tokens work on both sides.
+FileRedirects:
+  - Pattern: '%APPDATA%\\My Game\\(.+)'
+    Replacement: '%SAVEDGAMES%\My Game\$1'
+```
+
+The substituted value of a token in a `Pattern` is regex-escaped automatically, so never double the backslashes inside a token - only separators you write yourself need `\\`.
+
+Read any scalar back from inside an injected process:
+
+```csharp
+string osVersion = interposer.GetConfigString("OsVersion.Version");  // "WindowsXP"
+string username = interposer.GetConfigString("Player.Username");
+```
+
+`GetConfigString` resolves the path against the whole document, so it is not limited to the `Plugins` section. Sequence-valued keys such as `FileRedirects` are not scalar and return `null`.
+
+See the [OS Version](https://github.com/LANCommander/LANCommander.Interposer/blob/main/LANCommander.Interposer.Documentation/OsVersion.md) and [File Redirection](https://github.com/LANCommander/LANCommander.Interposer/blob/main/LANCommander.Interposer.Documentation/FileRedirection.md) docs for the full option reference.
 
 ## Hook Events (in-process)
 
