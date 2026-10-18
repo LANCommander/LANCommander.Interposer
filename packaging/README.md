@@ -11,6 +11,10 @@ The LANCommander Interposer is a set of Windows API hooks designed to make games
 
 Full documentation: <https://lancommander.app/Interposer/Overview>
 
+Runs on Windows XP SP3 and later (x86) and Windows XP x64 / Server 2003 SP2 and
+later (x64). Nothing needs installing first -- the C++ runtime is built into
+every file, so no Visual C++ Redistributable is required.
+
 ## What is in this archive
 
 ```

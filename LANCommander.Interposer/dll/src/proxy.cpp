@@ -119,8 +119,12 @@ SystemModule ComObjectHost()
 // version.dll
 // ---------------------------------------------------------------------------
 
+// The stub is defined as Proxy_<name> and proxy.def maps the export onto it.
+// Defining the real name instead collides with YY-Thunks (see
+// build\Compatibility.props), which supplies GetFileVersionInfoEx* and
+// GetFileVersionInfoSizeEx* itself so the image links against XP's version.dll.
 #define FORWARD(module, ret, name, params, args, fail)                        \
-    extern "C" ret WINAPI name params                                         \
+    extern "C" ret WINAPI Proxy_##name params                                 \
     {                                                                         \
         using Fn = ret (WINAPI*) params;                                      \
         static Fn cache = nullptr;                                            \

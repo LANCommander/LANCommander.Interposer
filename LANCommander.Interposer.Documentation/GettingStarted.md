@@ -20,6 +20,17 @@ The DLL itself is placed next to the game executable. Runtime configuration live
 
 A sample `Config.yml` is included in the release package with all options documented inline. You only need to enable or configure the features you want — every option has a sensible default.
 
+### Supported Windows Versions
+
+The Interposer, the injector and the bundled plugins run on **Windows XP SP3 and later** (x86), and **Windows XP x64 / Server 2003 SP2 and later** (x64). Nothing needs to be installed first: the C++ runtime is linked into each binary, so there is no Visual C++ Redistributable dependency on any version of Windows.
+
+On older systems a feature can only work if Windows itself provides what it hooks:
+
+- **Audio devices** — Core Audio does not exist before Vista. On XP, filtering covers winmm and DirectSound and matches device names only; endpoint IDs, instance paths and hardware IDs are not available.
+- **FastDL** — XP's HTTP stack cannot negotiate modern TLS, so use a plain `http://` server.
+- **Rich presence** — Discord does not run on XP.
+- **Log noise** — a few `[HOOK INIT]` lines report an API as `not present on this version of Windows`. Those are APIs introduced after XP, which software written for it never calls.
+
 ## Choosing a Deployment Location
 
 The DLL is found relative to whichever directory the injector or host process loads it from. The simplest approach is to place all files next to the game's executable:

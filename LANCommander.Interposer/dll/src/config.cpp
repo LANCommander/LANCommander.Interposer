@@ -1027,6 +1027,11 @@ void LogHookInit(const wchar_t* module, const char* fn, MH_STATUS status)
     wchar_t msg[128]{};
     if (status == MH_OK)
         wsprintfW(msg, L"%s!%S", module, fn);
+    else if (status == MH_ERROR_MODULE_NOT_FOUND || status == MH_ERROR_FUNCTION_NOT_FOUND)
+        // Expected on older Windows rather than a fault: XP has no RegGetValue,
+        // RegDeleteTree, CreateFile2, Core Audio, ... and nothing written for it
+        // calls them. Worded so a log from such a system does not read as broken.
+        wsprintfW(msg, L"%s!%S  not present on this version of Windows", module, fn);
     else
         wsprintfW(msg, L"%s!%S  %S", module, fn, MH_StatusToString(status));
     WriteLogLine(L"HOOK INIT", msg, nullptr);

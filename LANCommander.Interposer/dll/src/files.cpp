@@ -82,6 +82,15 @@ static thread_local bool g_inFileOpHook = false;
 // degrades to a plain passthrough instead of logging and redirecting twice.
 static thread_local bool g_inCreateFileHook = false;
 
+// Reentrancy guard for the FindFirstFile family. Modern KernelBase routes all
+// four through an internal helper, but XP and Vista have no KernelBase, so the
+// hooks sit on kernel32's own implementations, and there FindFirstFileW/A call
+// the exported FindFirstFileExW. The A variants must keep their own trampolines
+// (the out-buffer is WIN32_FIND_DATAA), so the nesting cannot be avoided by
+// routing, only by recognising it. Nothing caller-supplied runs inside a find,
+// so a guard cannot hide a legitimate access.
+static thread_local bool g_inFindHook = false;
+
 // Sets a thread_local flag for the enclosing scope.
 class ScopedFlag
 {
@@ -459,8 +468,10 @@ static BOOL WINAPI HookGetFileAttributesExA(
 // ---------------------------------------------------------------------------
 static HANDLE WINAPI HookFindFirstFileW(LPCWSTR lpFileName, LPWIN32_FIND_DATAW lpFindFileData)
 {
-    if (!lpFileName)
+    if (!lpFileName || g_inFindHook)
         return g_origFindFirstFileW(lpFileName, lpFindFileData);
+
+    ScopedFlag guard(g_inFindHook);
 
     std::wstring path(lpFileName);
     std::wstring redirected = RedirectWithDiag(path);
@@ -477,8 +488,10 @@ static HANDLE WINAPI HookFindFirstFileW(LPCWSTR lpFileName, LPWIN32_FIND_DATAW l
 
 static HANDLE WINAPI HookFindFirstFileA(LPCSTR lpFileName, LPWIN32_FIND_DATAA lpFindFileData)
 {
-    if (!lpFileName)
+    if (!lpFileName || g_inFindHook)
         return g_origFindFirstFileA(lpFileName, lpFindFileData);
+
+    ScopedFlag guard(g_inFindHook);
 
     int wideLength = MultiByteToWideChar(CP_ACP, 0, lpFileName, -1, nullptr, 0);
     if (wideLength <= 0)
@@ -516,8 +529,10 @@ static HANDLE WINAPI HookFindFirstFileExW(
     LPVOID lpFindFileData, FINDEX_SEARCH_OPS fSearchOp,
     LPVOID lpSearchFilter, DWORD dwAdditionalFlags)
 {
-    if (!lpFileName || g_inFastDLHook)
+    if (!lpFileName || g_inFastDLHook || g_inFindHook)
         return g_origFindFirstFileExW(lpFileName, fInfoLevelId, lpFindFileData, fSearchOp, lpSearchFilter, dwAdditionalFlags);
+
+    ScopedFlag guard(g_inFindHook);
 
     std::wstring path(lpFileName);
     std::wstring redirected = RedirectWithDiag(path);
@@ -537,8 +552,10 @@ static HANDLE WINAPI HookFindFirstFileExA(
     LPVOID lpFindFileData, FINDEX_SEARCH_OPS fSearchOp,
     LPVOID lpSearchFilter, DWORD dwAdditionalFlags)
 {
-    if (!lpFileName || g_inFastDLHook)
+    if (!lpFileName || g_inFastDLHook || g_inFindHook)
         return g_origFindFirstFileExA(lpFileName, fInfoLevelId, lpFindFileData, fSearchOp, lpSearchFilter, dwAdditionalFlags);
+
+    ScopedFlag guard(g_inFindHook);
 
     std::wstring wpath = AnsiToWide(lpFileName);
     if (wpath.empty())
@@ -892,60 +909,17 @@ static BOOL WINAPI HookCopyFileExA(
 // ---------------------------------------------------------------------------
 // Hook implementations — LoadLibrary
 // ---------------------------------------------------------------------------
-static HMODULE WINAPI HookLoadLibraryW(LPCWSTR lpLibFileName)
+// Every hook in the family finishes on the LoadLibraryExW trampoline, never on
+// its own. LoadLibraryW(p) is LoadLibraryExW(p, NULL, 0) by definition, and on
+// XP and Vista, which have no KernelBase, these hooks sit on kernel32's real
+// implementations, which call each other through the exported (hooked) entry
+// points: LoadLibraryW -> LoadLibraryExW, LoadLibraryA -> LoadLibraryExA ->
+// LoadLibraryExW. Calling a hook's own trampoline there would log, redirect and
+// fire OnLibraryLoaded once per layer. A reentrancy guard would not do instead:
+// a DllMain may load further libraries on the same thread, and those must still
+// be redirected.
+static HMODULE LoadLibraryImpl(const std::wstring& path, HANDLE hFile, DWORD dwFlags)
 {
-    if (!lpLibFileName)
-        return g_origLoadLibraryW(nullptr);
-
-    std::wstring path(lpLibFileName);
-    std::wstring redirected = RedirectWithDiag(path);
-
-    if (redirected != path)
-        LogFileAccess(L"FILE REDIRECT", path.c_str(), redirected.c_str());
-    else
-        LogFileAccess(L"DLL LOAD", path.c_str());
-
-    HMODULE hMod = g_origLoadLibraryW(redirected.c_str());
-    OnLibraryLoaded(hMod);
-    return hMod;
-}
-
-static HMODULE WINAPI HookLoadLibraryA(LPCSTR lpLibFileName)
-{
-    if (!lpLibFileName)
-        return g_origLoadLibraryA(nullptr);
-
-    int wideLength = MultiByteToWideChar(CP_ACP, 0, lpLibFileName, -1, nullptr, 0);
-    if (wideLength <= 0)
-        return g_origLoadLibraryA(lpLibFileName);
-
-    std::wstring widePath(wideLength - 1, L'\0');
-    MultiByteToWideChar(CP_ACP, 0, lpLibFileName, -1, widePath.data(), wideLength);
-
-    std::wstring redirected = RedirectWithDiag(widePath);
-
-    HMODULE hMod;
-    if (redirected != widePath)
-    {
-        LogFileAccess(L"FILE REDIRECT", widePath.c_str(), redirected.c_str());
-        // Use the W trampoline since we already have a wide redirected path
-        hMod = g_origLoadLibraryW(redirected.c_str());
-    }
-    else
-    {
-        LogFileAccess(L"DLL LOAD", widePath.c_str());
-        hMod = g_origLoadLibraryA(lpLibFileName);
-    }
-    OnLibraryLoaded(hMod);
-    return hMod;
-}
-
-static HMODULE WINAPI HookLoadLibraryExW(LPCWSTR lpLibFileName, HANDLE hFile, DWORD dwFlags)
-{
-    if (!lpLibFileName)
-        return g_origLoadLibraryExW(nullptr, hFile, dwFlags);
-
-    std::wstring path(lpLibFileName);
     std::wstring redirected = RedirectWithDiag(path);
 
     if (redirected != path)
@@ -962,37 +936,58 @@ static HMODULE WINAPI HookLoadLibraryExW(LPCWSTR lpLibFileName, HANDLE hFile, DW
     return hMod;
 }
 
+// Converts with the code page kernel32 itself would use for this ANSI path,
+// which SetFileApisToOEM can switch away from CP_ACP. Empty on failure.
+static std::wstring LibraryNameToWide(LPCSTR name)
+{
+    UINT codePage = AreFileApisANSI() ? CP_ACP : CP_OEMCP;
+    int wideLength = MultiByteToWideChar(codePage, 0, name, -1, nullptr, 0);
+    if (wideLength <= 0)
+        return {};
+
+    std::wstring wide(wideLength - 1, L'\0');
+    MultiByteToWideChar(codePage, 0, name, -1, wide.data(), wideLength);
+    return wide;
+}
+
+static HMODULE WINAPI HookLoadLibraryW(LPCWSTR lpLibFileName)
+{
+    if (!lpLibFileName)
+        return g_origLoadLibraryW(nullptr);
+
+    return LoadLibraryImpl(lpLibFileName, nullptr, 0);
+}
+
+static HMODULE WINAPI HookLoadLibraryA(LPCSTR lpLibFileName)
+{
+    if (!lpLibFileName)
+        return g_origLoadLibraryA(nullptr);
+
+    std::wstring widePath = LibraryNameToWide(lpLibFileName);
+    if (widePath.empty())
+        return g_origLoadLibraryA(lpLibFileName);
+
+    return LoadLibraryImpl(widePath, nullptr, 0);
+}
+
+static HMODULE WINAPI HookLoadLibraryExW(LPCWSTR lpLibFileName, HANDLE hFile, DWORD dwFlags)
+{
+    if (!lpLibFileName)
+        return g_origLoadLibraryExW(nullptr, hFile, dwFlags);
+
+    return LoadLibraryImpl(lpLibFileName, hFile, dwFlags);
+}
+
 static HMODULE WINAPI HookLoadLibraryExA(LPCSTR lpLibFileName, HANDLE hFile, DWORD dwFlags)
 {
     if (!lpLibFileName)
         return g_origLoadLibraryExA(nullptr, hFile, dwFlags);
 
-    int wideLength = MultiByteToWideChar(CP_ACP, 0, lpLibFileName, -1, nullptr, 0);
-    if (wideLength <= 0)
+    std::wstring widePath = LibraryNameToWide(lpLibFileName);
+    if (widePath.empty())
         return g_origLoadLibraryExA(lpLibFileName, hFile, dwFlags);
 
-    std::wstring widePath(wideLength - 1, L'\0');
-    MultiByteToWideChar(CP_ACP, 0, lpLibFileName, -1, widePath.data(), wideLength);
-
-    std::wstring redirected = RedirectWithDiag(widePath);
-
-    HMODULE hMod;
-    if (redirected != widePath)
-    {
-        LogFileAccess(L"FILE REDIRECT", widePath.c_str(), redirected.c_str());
-        hMod = g_origLoadLibraryExW(redirected.c_str(), hFile, dwFlags);
-    }
-    else
-    {
-        LogFileAccess(L"DLL LOAD", widePath.c_str());
-        hMod = g_origLoadLibraryExA(lpLibFileName, hFile, dwFlags);
-    }
-    constexpr DWORD dataFlags = LOAD_LIBRARY_AS_DATAFILE
-                              | LOAD_LIBRARY_AS_DATAFILE_EXCLUSIVE
-                              | LOAD_LIBRARY_AS_IMAGE_RESOURCE;
-    if (!(dwFlags & dataFlags))
-        OnLibraryLoaded(hMod);
-    return hMod;
+    return LoadLibraryImpl(widePath, hFile, dwFlags);
 }
 
 // ---------------------------------------------------------------------------

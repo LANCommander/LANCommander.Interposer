@@ -57,10 +57,17 @@ jobs:
       # runner happens to ship, and the link fails on STL symbols that the
       # v143 import library does not have (e.g. __std_find_last_not_ch_pos_1).
       - name: Install native dependencies (x64)
-        run: vcpkg install --triplet x64-windows-static-md --overlay-triplets=triplets --x-install-root=vcpkg_installed
+        run: vcpkg install --triplet x64-windows-static --overlay-triplets=triplets --x-install-root=vcpkg_installed
 
       - name: Install native dependencies (x86)
-        run: vcpkg install --triplet x86-windows-static-md --overlay-triplets=triplets --x-install-root=vcpkg_installed_x86
+        run: vcpkg install --triplet x86-windows-static --overlay-triplets=triplets --x-install-root=vcpkg_installed_x86
+
+      # YY-Thunks is a build-time dependency of every shipping binary: it is what
+      # lets the v143 CRT load on Windows XP (see build/Compatibility.props).
+      # Pinned to a version and SHA-256 inside the script.
+      - name: Fetch YY-Thunks
+        shell: pwsh
+        run: powershell -NoProfile -ExecutionPolicy Bypass -File build/Get-YYThunks.ps1
 
       - name: Generate version header
         shell: pwsh

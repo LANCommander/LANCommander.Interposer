@@ -75,6 +75,13 @@
 
   <PropertyGroup Label="UserMacros" />
 
+  <!-- Own intermediate directory: the default is shared with the Injector, and both
+       compile a main.cpp to main.obj, so whichever builds second links the other's.
+       A Tests.exe that prints the injector usage text is that collision. -->
+  <PropertyGroup>
+    <IntDir>$(Platform)\$(Configuration)\Tests\</IntDir>
+  </PropertyGroup>
+
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Debug|Win32'">
     <ClCompile>
       <WarningLevel>Level3</WarningLevel>

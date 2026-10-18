@@ -80,3 +80,5 @@ version_info.h
 *.cachefile
 Generated\ Files/
 
+# YY-Thunks, fetched by build/Get-YYThunks.ps1
+build/YY-Thunks/

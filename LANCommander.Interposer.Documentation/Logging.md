@@ -185,7 +185,7 @@ These events are always written regardless of logging flags:
 
 | Verb | Meaning |
 |---|---|
-| `[HOOK INIT]` | A MinHook hook was installed. Shows the module, function name, and status. |
+| `[HOOK INIT]` | A MinHook hook was installed. Shows the module, function name, and status. On older Windows some lines read `not present on this version of Windows` — an API that did not exist yet (e.g. `RegGetValueW` or `CreateFile2` on XP), which nothing written for that system calls. |
 
 ## Example Log Output
 

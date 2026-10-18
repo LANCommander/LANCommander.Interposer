@@ -78,6 +78,8 @@ The practical consequence is that `USB\VID_0965&PID_9001` filters a winmm game c
 - **dsound** — `DirectSoundEnumerateA/W`, `DirectSoundCaptureEnumerateA/W`
 - **Core Audio** — `IMMDeviceEnumerator::EnumAudioEndpoints`, `GetDefaultAudioEndpoint` and `GetDevice`, reached through `CoCreateInstance`
 
+Core Audio was introduced in Windows Vista. On Windows XP only winmm and DirectSound exist, and neither reports endpoint IDs, instance paths or hardware IDs, so entries can only match a device's name there — and winmm truncates names to 31 characters.
+
 ### Renumbering and the default device
 
 The winmm APIs address devices by index, so hiding one renumbers the rest. `waveOutGetNumDevs` reports how many devices survived the filter, and every call that takes an index translates the game's index back to the real one. A game that walks `0..waveOutGetNumDevs()-1` sees a contiguous list of exactly the devices you allowed.

@@ -18,6 +18,8 @@ This feature was originally inspired by Valve's FastDL system for Half-Life / Go
 
 If the server returns a `X-Checksum-CRC32` header, the Interposer compares it against the local file's checksum. If the checksums match, no re-download occurs — only changed files are fetched.
 
+Requests go through the operating system's WinHTTP. On Windows XP that means TLS 1.0 at best, no SNI and an outdated set of root certificates, so an `https://` server will almost always fail there. Serve FastDL over plain `http://` for XP clients — on a LAN there is little to lose.
+
 ## Enabling FastDL
 
 Set `Enabled: true` and configure a base URL in `.interposer/Config.yml`:

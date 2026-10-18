@@ -7,6 +7,8 @@ sidebar_position: 4
 
 File redirection intercepts calls to `CreateFileW/A` and `CreateFile2`, the `GetFileAttributes` and `FindFirstFile` families, the delete/move/copy functions, and the `LoadLibrary` family, replacing path arguments on the fly before the call reaches Windows. The game opens and reads the redirected file without any knowledge that its path was changed.
 
+Interception happens at the KernelBase layer rather than kernel32, so calls that never touch kernel32 are covered too — which is most of them on a modern game. The C runtime and the C++ standard library bind directly to KernelBase, so `fopen`, `std::ifstream` and `std::filesystem` are redirected like anything else.
+
 ## Why Use It
 
 Common use cases:
