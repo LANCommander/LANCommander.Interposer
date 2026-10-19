@@ -13,12 +13,24 @@
 
 #define WIN32_LEAN_AND_MEAN
 #define NOMINMAX
+// The relay tests call gethostbyname deliberately: it is what the games do.
+#define _WINSOCK_DEPRECATED_NO_WARNINGS
 #include <windows.h>
+#include <winsock2.h>        // network relay tests (N-)
+#include <ws2tcpip.h>
+#include <wsipx.h>
+#include <wsnwlink.h>
+#include <iphlpapi.h>
+#include <icmpapi.h>
 #include <shlobj.h>          // SHGetKnownFolderPath / FOLDERID_SavedGames (F-09)
 #include <string>
 #include <vector>
 #include <cstdio>
 #include <filesystem>
+#include <mutex>
+
+#pragma comment(lib, "ws2_32.lib")
+#pragma comment(lib, "iphlpapi.lib")
 
 // ============================================================
 // Test infrastructure
@@ -3604,6 +3616,864 @@ static void RunIsolatedTests(const std::wstring& exeDir, const std::wstring& tes
 }
 
 // ============================================================
+// Network relay tests  (two peer processes + a relay server)
+// ============================================================
+// The relay needs a server and two members to be worth testing, so the parent
+// stages two child processes, each with its own copy of the DLL and its own
+// .interposer tree -- the same arrangement as the isolated-mode tests -- and
+// points both at one relay server: the proof-of-concept host in
+// LANCommander.Interposer.Relay.Server. INTERPOSER_RELAY_SERVER_EXE names its
+// executable (or its .dll, run through dotnet), started here on a free port;
+// INTERPOSER_RELAY_SERVER names a host:port that is already running one. With
+// neither set the tests are skipped, not failed.
+//
+// Both peers run on this one machine, which a real LAN never does: they cannot
+// share a port, so each uses its own, and LoopbackBroadcasts is off -- a
+// broadcast one process looped back to itself would also land on the other's
+// socket, from a portal the other knows nothing about.
+
+static const char*    kRelayAddressA = "10.13.37.10";
+static const char*    kRelayAddressB = "10.13.37.20";
+static const u_short  kRelayUdpPortA = 27960;
+static const u_short  kRelayUdpPortB = 27961;
+static const u_short  kRelayTcpPortA = 27970;
+static const u_short  kRelayIpxSocketA = 0x5000;
+static const u_short  kRelayIpxSocketB = 0x5001;
+
+// Mirrors InterposerRelayStatus in dll\src\relay.h.
+struct TestRelayStatus
+{
+    DWORD            size;
+    int              state;
+    DWORD            clientId;
+    wchar_t          virtualAddress[16];
+    wchar_t          netmask[16];
+    wchar_t          network[128];
+    wchar_t          server[256];
+    int              udpActive;
+    DWORD            peerCount;
+    unsigned __int64 bytesSent;
+    unsigned __int64 bytesReceived;
+    unsigned __int64 datagramsSent;
+    unsigned __int64 datagramsReceived;
+    DWORD            streamsOpen;
+    wchar_t          lastError[256];
+};
+
+static HANDLE RelayTestEvent(const std::wstring& tag, const wchar_t* name)
+{
+    return CreateEventW(nullptr, TRUE, FALSE, (L"Local\\InterposerRelayTest_" + tag + L"_" + name).c_str());
+}
+
+static bool WaitReadable(SOCKET s, int ms)
+{
+    fd_set rd;
+    FD_ZERO(&rd);
+    FD_SET(s, &rd);
+    timeval tv{ ms / 1000, (ms % 1000) * 1000 };
+    return select(0, &rd, nullptr, nullptr, &tv) == 1;
+}
+
+static std::string AddressText(const in_addr& a)
+{
+    char buf[16]{};
+    inet_ntop(AF_INET, const_cast<in_addr*>(&a), buf, sizeof(buf));
+    return buf;
+}
+
+static sockaddr_in RelayEndpoint(const char* ip, u_short port)
+{
+    sockaddr_in a{};
+    a.sin_family = AF_INET;
+    a.sin_port   = htons(port);
+    inet_pton(AF_INET, ip, &a.sin_addr);
+    return a;
+}
+
+// The IPX node the DLL derives from a virtual address: 02:00 then the address.
+static bool NodeIs(const char node[6], const char* ip)
+{
+    in_addr a{};
+    inet_pton(AF_INET, ip, &a);
+    const auto* b = reinterpret_cast<const unsigned char*>(&a);
+    const auto* n = reinterpret_cast<const unsigned char*>(node);
+    return n[0] == 0x02 && n[1] == 0x00 && memcmp(n + 2, b, 4) == 0;
+}
+
+// Runs in a child process. Returns the number of failed assertions.
+static int RunRelayChild(const wchar_t* dirArg, const wchar_t* roleArg, const wchar_t* tagArg)
+{
+    std::wstring dir(dirArg);
+    if (!dir.empty() && dir.back() != L'\\')
+        dir += L'\\';
+
+    const bool        isA   = roleArg[0] == L'A';
+    const std::wstring tag  = tagArg;
+    const char*       own   = isA ? kRelayAddressA : kRelayAddressB;
+
+    HANDLE myReady    = RelayTestEvent(tag, isA ? L"AReady" : L"BReady");
+    HANDLE otherReady = RelayTestEvent(tag, isA ? L"BReady" : L"AReady");
+    HANDLE myDone     = RelayTestEvent(tag, isA ? L"ADone"  : L"BDone");
+    HANDLE otherDone  = RelayTestEvent(tag, isA ? L"BDone"  : L"ADone");
+
+    // The one-shot signals between the two peers. Opened here, before either
+    // peer signals "ready", and held for the child's whole life: a named event
+    // dies with its last handle, so a peer that opened, set and closed one
+    // before the other had opened it would lose the signal outright -- and the
+    // waiter would sit out its full timeout and knock every later step out of
+    // step.
+    HANDLE aPosted = RelayTestEvent(tag, L"APosted");
+    HANDLE bIocp   = RelayTestEvent(tag, L"BIocp");
+
+    WSADATA wsa{};
+    WSAStartup(MAKEWORD(2, 2), &wsa);
+
+    wprintf(L"\n--- Network Relay Tests (peer %ls) ---\n", roleArg);
+
+    HMODULE hDll = LoadLibraryW((dir + L"LANCommander.Interposer.dll").c_str());
+    if (!hDll)
+    {
+        wprintf(L"  FAIL  N-00: peer could not load its DLL (GLE=%lu)\n", GetLastError());
+        return 1;
+    }
+
+    // N-01: our own name resolves to the requested virtual address. The hook
+    // waits for the relay's Welcome, so this is also the "connected" check.
+    {
+        char host[256]{};
+        gethostname(host, sizeof(host));
+        hostent* he = gethostbyname(host);
+
+        std::string first = (he && he->h_addr_list && he->h_addr_list[0])
+            ? AddressText(*reinterpret_cast<in_addr*>(he->h_addr_list[0]))
+            : std::string();
+
+        ASSERT(first == own, L"N-01: gethostbyname of our own name returns the virtual address");
+    }
+
+    // N-02: the status export reports Connected, with the other peer present.
+    {
+        using FnStatus = BOOL (*)(TestRelayStatus*);
+        auto getStatus = reinterpret_cast<FnStatus>(GetProcAddress(hDll, "InterposerRelayGetStatus"));
+
+        bool peered = false;
+        const DWORD start = GetTickCount();
+
+        while (getStatus && GetTickCount() - start < 20000)
+        {
+            TestRelayStatus st{};
+            st.size = sizeof(st);
+            if (getStatus(&st) && st.state == 2 && st.peerCount >= 1)
+            {
+                peered = true;
+                break;
+            }
+            Sleep(100);
+        }
+
+        ASSERT(peered, L"N-02: InterposerRelayGetStatus reports Connected with the other peer present");
+
+        // N-21: datagrams start on the TCP connection and move to UDP once the
+        // server has answered a UdpHello -- which, over loopback, it always does.
+        bool udp = false;
+        const DWORD udpStart = GetTickCount();
+
+        while (getStatus && GetTickCount() - udpStart < 10000)
+        {
+            TestRelayStatus st{};
+            st.size = sizeof(st);
+            if (getStatus(&st) && st.udpActive)
+            {
+                udp = true;
+                break;
+            }
+            Sleep(100);
+        }
+
+        ASSERT(udp, L"N-21: datagrams move from the TCP fallback to UDP");
+    }
+
+    const char* other     = isA ? kRelayAddressB : kRelayAddressA;
+    const char* otherName = isA ? "Peer B" : "Peer A";
+
+    // N-23: the async lookup of our own name, answered by a posted message.
+    {
+        HWND window = CreateWindowExW(0, L"STATIC", L"", 0, 0, 0, 0, 0, HWND_MESSAGE, nullptr, nullptr, nullptr);
+        const UINT done = WM_APP + 23;
+
+        char host[256]{};
+        gethostname(host, sizeof(host));
+
+        alignas(8) char buf[MAXGETHOSTSTRUCT]{};
+        HANDLE request = WSAAsyncGetHostByName(window, done, host, buf, sizeof(buf));
+
+        bool answered = false;
+        LPARAM reply  = 0;
+        const DWORD start = GetTickCount();
+
+        while (request && !answered && GetTickCount() - start < 10000)
+        {
+            MSG msg;
+            while (PeekMessageW(&msg, window, 0, 0, PM_REMOVE))
+            {
+                if (msg.message == done && reinterpret_cast<HANDLE>(msg.wParam) == request)
+                {
+                    answered = true;
+                    reply    = msg.lParam;
+                }
+            }
+            if (!answered)
+                Sleep(20);
+        }
+
+        auto* he = reinterpret_cast<hostent*>(buf);
+        ASSERT(answered && WSAGETASYNCERROR(reply) == 0 && he->h_addr_list && he->h_addr_list[0] &&
+               AddressText(*reinterpret_cast<in_addr*>(he->h_addr_list[0])) == own,
+            L"N-23: WSAAsyncGetHostByName of our own name answers with the virtual address");
+
+        DestroyWindow(window);
+    }
+
+    // N-24/N-25: the IP address table leads with the virtual address, under an
+    // interface index GetIfEntry knows.
+    {
+        ULONG len = 0;
+        GetIpAddrTable(nullptr, &len, FALSE);
+        std::vector<BYTE> buf(len ? len : 1);
+        auto* table = reinterpret_cast<MIB_IPADDRTABLE*>(buf.data());
+
+        const bool ok = len && GetIpAddrTable(table, &len, FALSE) == NO_ERROR && table->dwNumEntries > 0;
+        in_addr first{};
+        if (ok) first.s_addr = table->table[0].dwAddr;
+
+        ASSERT(ok && AddressText(first) == own, L"N-24: GetIpAddrTable lists the virtual address first");
+
+        MIB_IFROW row{};
+        row.dwIndex = ok ? table->table[0].dwIndex : 0;
+        ASSERT(ok && GetIfEntry(&row) == NO_ERROR && row.dwPhysAddrLen == 6,
+            L"N-25: GetIfEntry knows the virtual address's interface index");
+
+        // N-31: and a route to a peer goes out through that interface.
+        in_addr peer{};
+        inet_pton(AF_INET, other, &peer);
+        DWORD bestIndex = 0;
+        MIB_IPFORWARDROW route{};
+        ASSERT(ok && GetBestInterface(peer.s_addr, &bestIndex) == NO_ERROR &&
+               bestIndex == table->table[0].dwIndex &&
+               GetBestRoute(peer.s_addr, 0, &route) == NO_ERROR && route.dwForwardIfIndex == bestIndex,
+            L"N-31: GetBestInterface/GetBestRoute send a peer's address through the virtual interface");
+    }
+
+    // N-26/N-27: reverse lookups of a peer answer with its player name instead
+    // of asking real DNS about a 10.13.37.x address.
+    {
+        in_addr a{};
+        inet_pton(AF_INET, other, &a);
+        hostent* he = gethostbyaddr(reinterpret_cast<const char*>(&a), 4, AF_INET);
+        ASSERT(he && he->h_name && strcmp(he->h_name, otherName) == 0,
+            L"N-26: gethostbyaddr of a peer's virtual address returns its player name");
+
+        sockaddr_in sa = RelayEndpoint(other, 1234);
+        char host[256]{}, serv[32]{};
+        const int r = getnameinfo(reinterpret_cast<sockaddr*>(&sa), sizeof(sa), host, sizeof(host),
+            serv, sizeof(serv), NI_NUMERICSERV);
+        ASSERT(r == 0 && strcmp(host, otherName) == 0 && strcmp(serv, "1234") == 0,
+            L"N-27: getnameinfo of a peer's virtual address returns its name and the service");
+    }
+
+    // N-28: a ping to a peer is answered, though ICMP is not relayed.
+    {
+        HANDLE icmp = IcmpCreateFile();
+        in_addr a{};
+        inet_pton(AF_INET, other, &a);
+
+        char request[] = "ping";
+        BYTE reply[sizeof(ICMP_ECHO_REPLY) + sizeof(request) + 8 + 64]{};
+        const DWORD n = IcmpSendEcho(icmp, a.s_addr, request, sizeof(request), nullptr, reply, sizeof(reply), 2000);
+        const auto* r = reinterpret_cast<ICMP_ECHO_REPLY*>(reply);
+
+        ASSERT(n == 1 && r->Status == IP_SUCCESS && r->Address == a.s_addr && r->DataSize == sizeof(request),
+            L"N-28: IcmpSendEcho to a peer's virtual address gets a reply");
+        IcmpCloseHandle(icmp);
+    }
+
+    // N-29: GetAddrInfoExW of our own name, like getaddrinfo.
+    {
+        wchar_t host[256]{};
+        DWORD hostLen = ARRAYSIZE(host);
+        GetComputerNameExW(ComputerNameDnsHostname, host, &hostLen);
+
+        ADDRINFOEXW hints{};
+        hints.ai_family = AF_INET;
+        ADDRINFOEXW* result = nullptr;
+
+        const bool ok = GetAddrInfoExW(host, nullptr, NS_ALL, nullptr, &hints, &result,
+                                       nullptr, nullptr, nullptr, nullptr) == 0 && result;
+        ASSERT(ok && AddressText(reinterpret_cast<sockaddr_in*>(result->ai_addr)->sin_addr) == own,
+            L"N-29: GetAddrInfoExW of our own name returns the virtual address");
+        if (result) FreeAddrInfoExW(result);
+    }
+
+    // N-03..N-05: local-address discovery leads with the virtual adapter.
+    {
+        ULONG len = 0;
+        GetAdaptersInfo(nullptr, &len);
+        std::vector<BYTE> buf(len ? len : 1);
+        auto* info = reinterpret_cast<IP_ADAPTER_INFO*>(buf.data());
+
+        ASSERT(len && GetAdaptersInfo(info, &len) == ERROR_SUCCESS &&
+               strcmp(info->IpAddressList.IpAddress.String, own) == 0,
+            L"N-03: GetAdaptersInfo lists the virtual adapter first");
+    }
+
+    {
+        SOCKET s = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
+        INTERFACE_INFO list[32]{};
+        DWORD bytes = 0;
+
+        const bool ok = WSAIoctl(s, SIO_GET_INTERFACE_LIST, nullptr, 0, list, sizeof(list),
+                                 &bytes, nullptr, nullptr) == 0 && bytes >= sizeof(INTERFACE_INFO);
+
+        ASSERT(ok && AddressText(list[0].iiAddress.AddressIn.sin_addr) == own,
+            L"N-04: SIO_GET_INTERFACE_LIST lists the virtual address first");
+        closesocket(s);
+    }
+
+    {
+        char host[256]{};
+        gethostname(host, sizeof(host));
+
+        addrinfo hints{};
+        hints.ai_family = AF_INET;
+        addrinfo* result = nullptr;
+
+        const bool ok = getaddrinfo(host, nullptr, &hints, &result) == 0 && result;
+        ASSERT(ok && AddressText(reinterpret_cast<sockaddr_in*>(result->ai_addr)->sin_addr) == own,
+            L"N-05: getaddrinfo of our own name returns the virtual address");
+        if (result) freeaddrinfo(result);
+    }
+
+    // N-06/N-07: IPX exists, as far as the game can tell.
+    {
+        DWORD length = 0;
+        WSAEnumProtocolsW(nullptr, nullptr, &length);
+        std::vector<BYTE> buf(length ? length : 1);
+        auto* protocols = reinterpret_cast<WSAPROTOCOL_INFOW*>(buf.data());
+        const int count = WSAEnumProtocolsW(nullptr, protocols, &length);
+
+        bool found = false;
+        for (int i = 0; i < count; ++i)
+            if (protocols[i].iAddressFamily == AF_IPX && protocols[i].iProtocol == NSPROTO_IPX)
+                found = true;
+
+        ASSERT(found, L"N-06: WSAEnumProtocols lists an IPX protocol");
+    }
+
+    SOCKET ipx = socket(AF_IPX, SOCK_DGRAM, NSPROTO_IPX);
+    ASSERT(ipx != INVALID_SOCKET, L"N-07: socket(AF_IPX, SOCK_DGRAM, NSPROTO_IPX) succeeds");
+
+    {
+        SOCKADDR_IPX local{};
+        local.sa_family = AF_IPX;
+        local.sa_socket = htons(isA ? kRelayIpxSocketA : kRelayIpxSocketB);
+        bind(ipx, reinterpret_cast<sockaddr*>(&local), sizeof(local));
+
+        SOCKADDR_IPX name{};
+        int nameLen = sizeof(name);
+        const bool ok = getsockname(ipx, reinterpret_cast<sockaddr*>(&name), &nameLen) == 0;
+
+        ASSERT(ok && name.sa_family == AF_IPX && NodeIs(name.sa_nodenum, own) &&
+               ntohs(name.sa_socket) == (isA ? kRelayIpxSocketA : kRelayIpxSocketB),
+            L"N-08: an IPX socket is named by the virtual node and its bound socket number");
+    }
+
+    SOCKET udp = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
+    {
+        BOOL on = TRUE;
+        setsockopt(udp, SOL_SOCKET, SO_BROADCAST, reinterpret_cast<const char*>(&on), sizeof(on));
+        sockaddr_in any{};
+        any.sin_family = AF_INET;
+        any.sin_port   = htons(isA ? kRelayUdpPortA : kRelayUdpPortB);
+        bind(udp, reinterpret_cast<sockaddr*>(&any), sizeof(any));
+    }
+
+    if (isA)
+    {
+        // N-09: binding to the virtual address works, though no interface has it.
+        SOCKET listener = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
+        sockaddr_in at = RelayEndpoint(own, kRelayTcpPortA);
+        const bool bound = bind(listener, reinterpret_cast<sockaddr*>(&at), sizeof(at)) == 0 &&
+                           listen(listener, 4) == 0;
+        ASSERT(bound, L"N-09: bind() to the virtual address succeeds");
+
+        {
+            sockaddr_in name{};
+            int nameLen = sizeof(name);
+            getsockname(listener, reinterpret_cast<sockaddr*>(&name), &nameLen);
+            ASSERT(AddressText(name.sin_addr) == own,
+                L"N-10: getsockname() reports the virtual address it was bound to");
+        }
+
+        SetEvent(myReady);
+        WaitForSingleObject(otherReady, 30000);
+
+        // N-11: B's broadcast arrives, from B's virtual endpoint -- received
+        // here with an overlapped WSARecvFrom that is still pending when it
+        // returns, so the address is only filled in at completion, which
+        // WSAGetOverlappedResult reports. (B's receives cover plain recvfrom.)
+        {
+            char buf[64]{};
+            sockaddr_in from{};
+            int fromLen = sizeof(from);
+
+            WSABUF wsaBuf{ sizeof(buf) - 1, buf };
+            WSAOVERLAPPED ov{};
+            ov.hEvent = WSACreateEvent();
+            DWORD received = 0, flags = 0;
+
+            int r = WSARecvFrom(udp, &wsaBuf, 1, &received, &flags,
+                reinterpret_cast<sockaddr*>(&from), &fromLen, &ov, nullptr);
+            const bool pending = r != 0 && WSAGetLastError() == WSA_IO_PENDING;
+
+            // B broadcasts only once this receive is posted, so it is pending
+            // when the datagram lands rather than completing on the spot.
+            SetEvent(aPosted);
+
+            int n = -1;
+            if (pending || r == 0)
+            {
+                if (WaitForSingleObject(ov.hEvent, 15000) == WAIT_OBJECT_0 &&
+                    WSAGetOverlappedResult(udp, &ov, &received, FALSE, &flags))
+                    n = static_cast<int>(received);
+            }
+            WSACloseEvent(ov.hEvent);
+
+            ASSERT(pending && n == 5 && strcmp(buf, "HELLO") == 0 &&
+                   AddressText(from.sin_addr) == kRelayAddressB && ntohs(from.sin_port) == kRelayUdpPortB,
+                L"N-11: a broadcast completed by WSAGetOverlappedResult arrives from the peer's virtual endpoint");
+
+            if (n > 0)
+                sendto(udp, "REPLY", 5, 0, reinterpret_cast<sockaddr*>(&from), fromLen);
+        }
+
+        // N-30, A's half: once B has an IOCP receive pending, send to it.
+        if (WaitForSingleObject(bIocp, 15000) == WAIT_OBJECT_0)
+        {
+            sockaddr_in to = RelayEndpoint(kRelayAddressB, kRelayUdpPortB);
+            sendto(udp, "IOCP", 4, 0, reinterpret_cast<sockaddr*>(&to), sizeof(to));
+        }
+
+        // N-12..N-14: B's TCP connection arrives through the relay.
+        {
+            sockaddr_in peer{};
+            int peerLen = sizeof(peer);
+            SOCKET c = WaitReadable(listener, 15000)
+                ? accept(listener, reinterpret_cast<sockaddr*>(&peer), &peerLen)
+                : INVALID_SOCKET;
+
+            ASSERT(c != INVALID_SOCKET && AddressText(peer.sin_addr) == kRelayAddressB,
+                L"N-12: accept() reports the other peer's virtual address");
+
+            char buf[64]{};
+            int n = (c != INVALID_SOCKET && WaitReadable(c, 15000)) ? recv(c, buf, sizeof(buf) - 1, 0) : -1;
+            ASSERT(n == 4 && strcmp(buf, "PING") == 0, L"N-13: data the other peer sent over TCP arrives");
+
+            if (c != INVALID_SOCKET)
+            {
+                send(c, "PONG", 4, 0);
+
+                n = WaitReadable(c, 15000) ? recv(c, buf, sizeof(buf), 0) : -1;
+                ASSERT(n == 0, L"N-14: the other peer closing its end reads as end-of-stream");
+                closesocket(c);
+            }
+        }
+
+        // N-15: B's IPX broadcast arrives from B's node and socket.
+        {
+            char buf[64]{};
+            SOCKADDR_IPX from{};
+            int fromLen = sizeof(from);
+            int n = WaitReadable(ipx, 15000)
+                ? recvfrom(ipx, buf, sizeof(buf) - 1, 0, reinterpret_cast<sockaddr*>(&from), &fromLen)
+                : -1;
+
+            ASSERT(n == 8 && strcmp(buf, "IPXHELLO") == 0 && from.sa_family == AF_IPX &&
+                   NodeIs(from.sa_nodenum, kRelayAddressB) && ntohs(from.sa_socket) == kRelayIpxSocketB,
+                L"N-15: an IPX broadcast from the other peer arrives from its node and socket");
+
+            if (n > 0)
+                sendto(ipx, "IPXREPLY", 8, 0, reinterpret_cast<sockaddr*>(&from), fromLen);
+        }
+
+        closesocket(listener);
+    }
+    else
+    {
+        SetEvent(myReady);
+        WaitForSingleObject(otherReady, 30000);
+
+        // N-16: a broadcast reaches A, and A's unicast answer comes back from A.
+        {
+            sockaddr_in broadcast = RelayEndpoint("255.255.255.255", kRelayUdpPortA);
+            char buf[64]{};
+            sockaddr_in from{};
+            int fromLen = sizeof(from);
+            int n = -1;
+
+            WaitForSingleObject(aPosted, 15000);
+
+            for (int attempt = 0; attempt < 10 && n < 0; ++attempt)
+            {
+                sendto(udp, "HELLO", 5, 0, reinterpret_cast<sockaddr*>(&broadcast), sizeof(broadcast));
+                if (WaitReadable(udp, 1500))
+                    n = recvfrom(udp, buf, sizeof(buf) - 1, 0, reinterpret_cast<sockaddr*>(&from), &fromLen);
+            }
+
+            ASSERT(n == 5 && strcmp(buf, "REPLY") == 0 &&
+                   AddressText(from.sin_addr) == kRelayAddressA && ntohs(from.sin_port) == kRelayUdpPortA,
+                L"N-16: the reply to a broadcast comes back from the other peer's virtual endpoint");
+        }
+
+        // N-30: a receive completed through an I/O completion port.
+        {
+            HANDLE port = CreateIoCompletionPort(reinterpret_cast<HANDLE>(udp), nullptr, 1, 0);
+
+            char buf[64]{};
+            sockaddr_in from{};
+            int fromLen = sizeof(from);
+            WSABUF wsaBuf{ sizeof(buf) - 1, buf };
+            WSAOVERLAPPED ov{};
+            DWORD received = 0, flags = 0;
+
+            int r = WSARecvFrom(udp, &wsaBuf, 1, &received, &flags,
+                reinterpret_cast<sockaddr*>(&from), &fromLen, &ov, nullptr);
+
+            // Read before anything else can overwrite it.
+            const int posted = (r == 0 || WSAGetLastError() == WSA_IO_PENDING) ? 1 : WSAGetLastError();
+
+            SetEvent(bIocp);
+
+            DWORD bytes = 0;
+            ULONG_PTR key = 0;
+            LPOVERLAPPED done = nullptr;
+            const BOOL dequeued = port && posted == 1 && GetQueuedCompletionStatus(port, &bytes, &key, &done, 15000);
+            const DWORD dequeueError = GetLastError();
+            const bool ok = dequeued && done == &ov;
+
+            ASSERT(ok && bytes == 4 && strcmp(buf, "IOCP") == 0 &&
+                   AddressText(from.sin_addr) == kRelayAddressA && ntohs(from.sin_port) == kRelayUdpPortA,
+                L"N-30: a receive completed through an I/O completion port reports the peer's virtual endpoint");
+
+            if (!(ok && bytes == 4))
+                wprintf(L"        posted=%d dequeued=%d err=%lu done=%p ov=%p bytes=%lu buf=%hs from=%hs:%u\n",
+                    posted, dequeued, dequeueError, done, &ov, bytes, buf,
+                    AddressText(from.sin_addr).c_str(), ntohs(from.sin_port));
+
+            // The port stays: closing it would not detach the socket anyway.
+        }
+
+        // N-17..N-19: a TCP connection to A's virtual address.
+        {
+            SOCKET c = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
+            sockaddr_in to = RelayEndpoint(kRelayAddressA, kRelayTcpPortA);
+
+            const bool connected = connect(c, reinterpret_cast<sockaddr*>(&to), sizeof(to)) == 0;
+            ASSERT(connected, L"N-17: connect() to the other peer's virtual address succeeds");
+
+            sockaddr_in peer{};
+            int peerLen = sizeof(peer);
+            getpeername(c, reinterpret_cast<sockaddr*>(&peer), &peerLen);
+            ASSERT(AddressText(peer.sin_addr) == kRelayAddressA && ntohs(peer.sin_port) == kRelayTcpPortA,
+                L"N-18: getpeername() reports the virtual address that was connected to");
+
+            send(c, "PING", 4, 0);
+
+            char buf[64]{};
+            int n = WaitReadable(c, 15000) ? recv(c, buf, sizeof(buf) - 1, 0) : -1;
+            ASSERT(n == 4 && strcmp(buf, "PONG") == 0, L"N-19: the other peer's TCP answer arrives");
+
+            closesocket(c);
+        }
+
+        // N-20: an IPX broadcast reaches A, and A's answer comes back from A's node.
+        {
+            int type = 4; // IPX packet type: PEP, what most games used
+            setsockopt(ipx, NSPROTO_IPX, IPX_PTYPE, reinterpret_cast<const char*>(&type), sizeof(type));
+
+            SOCKADDR_IPX broadcast{};
+            broadcast.sa_family = AF_IPX;
+            memset(broadcast.sa_nodenum, 0xFF, sizeof(broadcast.sa_nodenum));
+            broadcast.sa_socket = htons(kRelayIpxSocketA);
+
+            char buf[64]{};
+            SOCKADDR_IPX from{};
+            int fromLen = sizeof(from);
+            int n = -1;
+
+            for (int attempt = 0; attempt < 10 && n < 0; ++attempt)
+            {
+                sendto(ipx, "IPXHELLO", 8, 0, reinterpret_cast<sockaddr*>(&broadcast), sizeof(broadcast));
+                if (WaitReadable(ipx, 1500))
+                    n = recvfrom(ipx, buf, sizeof(buf) - 1, 0, reinterpret_cast<sockaddr*>(&from), &fromLen);
+            }
+
+            ASSERT(n == 8 && strcmp(buf, "IPXREPLY") == 0 &&
+                   NodeIs(from.sa_nodenum, kRelayAddressA) && ntohs(from.sa_socket) == kRelayIpxSocketA,
+                L"N-20: the IPX reply comes back from the other peer's node and socket");
+        }
+    }
+
+    // Neither peer leaves until both are finished: leaving early would take
+    // the other's peer and streams down with it.
+    SetEvent(myDone);
+    WaitForSingleObject(otherDone, 30000);
+
+    closesocket(udp);
+    closesocket(ipx);
+
+    // N-22: unloading with the relay and control threads running. Their
+    // shutdown parks them and terminates them from DLL_PROCESS_DETACH, where
+    // waiting for a thread to exit would deadlock on the loader lock; getting
+    // past this line at all, and back out of the process cleanly, is the test.
+    const DWORD unloadStart = GetTickCount();
+    FreeLibrary(hDll);
+    ASSERT(GetTickCount() - unloadStart < 5000,
+        L"N-22: the DLL unloads promptly with the relay thread running");
+
+    return g_fail;
+}
+
+// The relay server's console output, kept for when something fails.
+static std::string g_relayServerOutput;
+static std::mutex  g_relayServerOutputMutex;
+
+static DWORD WINAPI DrainRelayServerOutput(LPVOID pipe)
+{
+    char buf[4096];
+    DWORD n = 0;
+    while (ReadFile(static_cast<HANDLE>(pipe), buf, sizeof(buf), &n, nullptr) && n)
+    {
+        std::lock_guard<std::mutex> lk(g_relayServerOutputMutex);
+        g_relayServerOutput.append(buf, n);
+    }
+    return 0;
+}
+
+// Start the proof-of-concept server on a free port. Returns its "host:port", or
+// empty on failure; *process receives its handle.
+static std::wstring StartRelayServer(const std::wstring& exe, HANDLE* process)
+{
+    SECURITY_ATTRIBUTES sa{ sizeof(sa), nullptr, TRUE };
+    HANDLE readEnd = nullptr, writeEnd = nullptr;
+    if (!CreatePipe(&readEnd, &writeEnd, &sa, 0))
+        return {};
+    SetHandleInformation(readEnd, HANDLE_FLAG_INHERIT, 0);
+
+    const bool viaDotnet = exe.size() > 4 && _wcsicmp(exe.c_str() + exe.size() - 4, L".dll") == 0;
+    std::wstring command = (viaDotnet ? L"dotnet \"" : L"\"") + exe + L"\" --port 0 --status 0";
+
+    STARTUPINFOW si{};
+    si.cb         = sizeof(si);
+    si.dwFlags    = STARTF_USESTDHANDLES;
+    si.hStdOutput = writeEnd;
+    si.hStdError  = writeEnd;
+    si.hStdInput  = GetStdHandle(STD_INPUT_HANDLE);
+
+    PROCESS_INFORMATION pi{};
+    const BOOL started = CreateProcessW(nullptr, command.data(), nullptr, nullptr, TRUE,
+        CREATE_NO_WINDOW, nullptr, nullptr, &si, &pi);
+    CloseHandle(writeEnd);
+
+    if (!started)
+    {
+        CloseHandle(readEnd);
+        return {};
+    }
+
+    CloseHandle(pi.hThread);
+    *process = pi.hProcess;
+
+    // Read until the LISTENING line; everything after it is drained in the
+    // background so the server never blocks on a full pipe.
+    std::string seen;
+    const DWORD start = GetTickCount();
+
+    while (GetTickCount() - start < 30000)
+    {
+        char c = 0;
+        DWORD n = 0;
+        if (!ReadFile(readEnd, &c, 1, &n, nullptr) || n == 0)
+            break;
+        seen.push_back(c);
+
+        const size_t at = seen.find("LISTENING ");
+        if (at != std::string::npos && c == '\n')
+        {
+            const int port = atoi(seen.c_str() + at + 10);
+            g_relayServerOutput = seen;
+            CloseHandle(CreateThread(nullptr, 0, DrainRelayServerOutput, readEnd, 0, nullptr));
+            return port > 0 ? L"127.0.0.1:" + std::to_wstring(port) : std::wstring();
+        }
+    }
+
+    g_relayServerOutput = seen;
+    CloseHandle(readEnd);
+    return {};
+}
+
+static std::wstring EnvironmentValue(const wchar_t* name)
+{
+    wchar_t buf[1024]{};
+    const DWORD n = GetEnvironmentVariableW(name, buf, ARRAYSIZE(buf));
+    return (n && n < ARRAYSIZE(buf)) ? std::wstring(buf) : std::wstring();
+}
+
+static void WriteRelayFixtures(const std::wstring& interposerDir, const std::wstring& server,
+                               const std::wstring& network, const char* playerName, const char* address)
+{
+    auto utf8 = [](const std::wstring& w)
+    {
+        const int n = WideCharToMultiByte(CP_UTF8, 0, w.c_str(), -1, nullptr, 0, nullptr, nullptr);
+        std::string out(n > 1 ? static_cast<size_t>(n - 1) : 0, '\0');
+        if (n > 1) WideCharToMultiByte(CP_UTF8, 0, w.c_str(), -1, out.data(), n, nullptr, nullptr);
+        return out;
+    };
+
+    const std::string serverUtf8  = utf8(server);
+    const std::string networkUtf8 = utf8(network);
+
+    // The name peers see is the username, so N-26/N-27 read Player.Username
+    // back through the other peer's reverse lookups.
+    WriteTextFile(interposerDir + L"Config.yml",
+        std::string("Player:\n"
+        "  Username: '") + playerName + "'\n"
+        "\n"
+        "Logging:\n"
+        "  Relay: true\n"
+        "  Network: true\n"
+        "  Level: Debug\n"
+        "\n"
+        "NetworkRelay:\n"
+        "  Enabled: true\n"
+        "  Server: '" + serverUtf8 + "'\n"
+        "  Network: '" + networkUtf8 + "'\n"
+        "  Address: '" + address + "'\n"
+        "  LoopbackBroadcasts: false\n"
+        "  AddressTimeout: 15000\n");
+}
+
+// Runs in the parent: starts (or finds) the relay server, runs both peers, and
+// folds their outcome into this process's tally.
+static void RunRelayTests(const std::wstring& exeDir, const std::wstring& testTmpDir)
+{
+    std::wstring server    = EnvironmentValue(L"INTERPOSER_RELAY_SERVER");
+    std::wstring serverExe = EnvironmentValue(L"INTERPOSER_RELAY_SERVER_EXE");
+
+    wprintf(L"\n--- Network Relay Tests ---\n");
+
+    if (server.empty() && serverExe.empty())
+    {
+        wprintf(L"  SKIP  N-00: set INTERPOSER_RELAY_SERVER_EXE (or INTERPOSER_RELAY_SERVER) to run them\n");
+        return;
+    }
+
+    HANDLE serverProcess = nullptr;
+
+    if (server.empty())
+    {
+        server = StartRelayServer(serverExe, &serverProcess);
+        ASSERT(!server.empty(), L"N-00: the relay server started");
+        if (server.empty())
+        {
+            wprintf(L"%hs\n", g_relayServerOutput.c_str());
+            if (serverProcess) { TerminateProcess(serverProcess, 1); CloseHandle(serverProcess); }
+            return;
+        }
+    }
+
+    const std::wstring tag     = std::to_wstring(GetCurrentProcessId()) + L"_" + std::to_wstring(GetTickCount());
+    const std::wstring network = L"relay-test-" + tag;
+
+    struct Peer { const wchar_t* role; const char* name; const char* address; std::wstring dir; HANDLE process; };
+    Peer peers[2] =
+    {
+        { L"A", "Peer A", kRelayAddressA, testTmpDir + L"RelayA\\", nullptr },
+        { L"B", "Peer B", kRelayAddressB, testTmpDir + L"RelayB\\", nullptr },
+    };
+
+    const std::wstring exePath = exeDir + L"LANCommander.Interposer.Tests.exe";
+
+    for (Peer& p : peers)
+    {
+        CreateDirs(p.dir + L".interposer\\");
+        CopyFileW((exeDir + L"LANCommander.Interposer.dll").c_str(),
+                  (p.dir + L"LANCommander.Interposer.dll").c_str(), FALSE);
+        WriteRelayFixtures(p.dir + L".interposer\\", server, network, p.name, p.address);
+
+        std::wstring command = L"\"" + exePath + L"\" --relay-peer \"" +
+            p.dir.substr(0, p.dir.size() - 1) + L"\" " + p.role + L" " + tag;
+
+        STARTUPINFOW si{};
+        si.cb = sizeof(si);
+        PROCESS_INFORMATION pi{};
+
+        if (CreateProcessW(exePath.c_str(), command.data(), nullptr, nullptr, TRUE, 0,
+                nullptr, nullptr, &si, &pi))
+        {
+            CloseHandle(pi.hThread);
+            p.process = pi.hProcess;
+        }
+    }
+
+    DWORD exitA = 1, exitB = 1;
+
+    for (Peer& p : peers)
+    {
+        if (!p.process)
+            continue;
+
+        if (WaitForSingleObject(p.process, 120 * 1000) != WAIT_OBJECT_0)
+            TerminateProcess(p.process, 1);
+
+        GetExitCodeProcess(p.process, p.role[0] == L'A' ? &exitA : &exitB);
+        CloseHandle(p.process);
+    }
+
+    ASSERT(exitA == 0, L"N-00a: relay peer A reported no failures");
+    ASSERT(exitB == 0, L"N-00b: relay peer B reported no failures");
+
+    if (exitA != 0 || exitB != 0)
+    {
+        std::lock_guard<std::mutex> lk(g_relayServerOutputMutex);
+        wprintf(L"\n  Relay server output:\n%hs\n", g_relayServerOutput.c_str());
+    }
+
+    if (serverProcess)
+    {
+        TerminateProcess(serverProcess, 0);
+        CloseHandle(serverProcess);
+    }
+
+    // Kept on failure: the peers' session logs are what explains it.
+    if (exitA != 0 || exitB != 0)
+    {
+        for (Peer& p : peers)
+            wprintf(L"  Peer %ls log: %ls.interposer\\Logs\\\n", p.role, p.dir.c_str());
+        return;
+    }
+
+    for (Peer& p : peers)
+    {
+        DeleteFileW((p.dir + L".interposer\\Config.yml").c_str());
+        DeleteFileW((p.dir + L"LANCommander.Interposer.dll").c_str());
+        ClearLogFiles(p.dir + L".interposer\\Logs\\");
+        RemoveDirectoryW((p.dir + L".interposer\\Logs").c_str());
+        RemoveDirectoryW((p.dir + L".interposer").c_str());
+        RemoveDirectoryW(p.dir.c_str());
+    }
+}
+
+// ============================================================
 // Entry point
 // ============================================================
 
@@ -3617,6 +4487,10 @@ int wmain(int argc, wchar_t** argv)
     // with the rest of the suite, so it gets one of its own.
     if (argc >= 3 && wcscmp(argv[1], L"--isolated") == 0)
         return RunIsolatedChild(argv[2]);
+
+    // Re-entry from RunRelayTests: one of the two relay peers.
+    if (argc >= 5 && wcscmp(argv[1], L"--relay-peer") == 0)
+        return RunRelayChild(argv[2], argv[3], argv[4]);
 
     std::wstring exeDir        = GetExeDir();
     std::wstring testTmpDir    = GetTestTempDir();
@@ -3733,6 +4607,9 @@ int wmain(int argc, wchar_t** argv)
     // Last, because it spawns a second process that loads its own copy of the
     // DLL -- nothing after it should depend on this process's hooks.
     RunIsolatedTests(exeDir, testTmpDir);
+
+    // Likewise separate processes: two relay peers, each with its own DLL.
+    RunRelayTests(exeDir, testTmpDir);
 
     // ── Cleanup ──────────────────────────────────────────────────────────────
     DeleteFileW(redirectTarget.c_str());

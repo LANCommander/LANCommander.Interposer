@@ -12,6 +12,7 @@ static std::atomic<InterposerRegistryCallback> g_registryCallback{nullptr};
 static std::atomic<InterposerDnsCallback>      g_dnsCallback{nullptr};
 static std::atomic<InterposerNetworkCallback>  g_networkCallback{nullptr};
 static std::atomic<InterposerIdentityCallback> g_identityCallback{nullptr};
+static std::atomic<InterposerRelayCallback>    g_relayCallback{nullptr};
 
 // ---------------------------------------------------------------------------
 // Registration exports
@@ -39,6 +40,11 @@ extern "C" __declspec(dllexport) void InterposerRegisterNetworkCallback(Interpos
 extern "C" __declspec(dllexport) void InterposerRegisterIdentityCallback(InterposerIdentityCallback cb)
 {
     g_identityCallback.store(cb, std::memory_order_release);
+}
+
+extern "C" __declspec(dllexport) void InterposerRegisterRelayCallback(InterposerRelayCallback cb)
+{
+    g_relayCallback.store(cb, std::memory_order_release);
 }
 
 // ---------------------------------------------------------------------------
@@ -77,4 +83,11 @@ void FireIdentityCallback(const wchar_t* type, const wchar_t* value)
     auto cb = g_identityCallback.load(std::memory_order_acquire);
     if (cb) cb(type, value);
     SendPipeEvent(PIPE_EVENT_IDENTITY, type, value);
+}
+
+void FireRelayCallback(const wchar_t* kind, const wchar_t* address, const wchar_t* detail, int value)
+{
+    auto cb = g_relayCallback.load(std::memory_order_acquire);
+    if (cb) cb(kind, address, detail, value);
+    SendPipeEvent(PIPE_EVENT_RELAY, kind, address, detail, value);
 }

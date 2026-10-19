@@ -7,6 +7,7 @@ Everything goes through `InterposerService`:
 - **Injection** - Launch processes with `ProcessStartInfo` or inject into running `Process` instances, with optional runtime overrides for username, computer name, and FastDL URL.
 - **Plugin API** - Logging, config, virtual registry, and rich presence (in-process only).
 - **Hook Events** - Subscribe to file, registry, DNS, network, and identity events (in-process only).
+- **Network Relay** - Put a game on a virtual LAN through a LANCommander relay server, and drive it from the launcher while it runs.
 
 Everything else the DLL does is driven by `.interposer\Config.yml` next to the DLL and needs no managed calls - see [Configuration](#configuration) below.
 
@@ -88,6 +89,37 @@ string username = interposer.GetConfigString("Player.Username");
 `GetConfigString` resolves the path against the whole document, so it is not limited to the `Plugins` section. Sequence-valued keys such as `FileRedirects` are not scalar and return `null`.
 
 See the [OS Version](https://github.com/LANCommander/LANCommander.Interposer/blob/main/LANCommander.Interposer.Documentation/OsVersion.md) and [File Redirection](https://github.com/LANCommander/LANCommander.Interposer/blob/main/LANCommander.Interposer.Documentation/FileRedirection.md) docs for the full option reference.
+
+## Network Relay
+
+The DLL can carry a game's LAN traffic - broadcasts, datagrams, TCP connections and emulated IPX - through a relay server, giving each player a virtual LAN address instead of a VPN. A launcher passes the session's options at launch, overriding `NetworkRelay` in Config.yml key by key, and controls the relay of the running game over a named pipe:
+
+```csharp
+using var interposer = new InterposerService
+{
+    Relay = new RelayOptions
+    {
+        Enabled = true,
+        Server  = "lancommander.example.com",
+        Network = sessionId,
+        Ticket  = relayTicket,
+    },
+};
+
+interposer.RelayStateChanged += (s, e) => Console.WriteLine($"Relay {e.State} as {e.VirtualAddress}");
+interposer.RelayPeerJoined   += (s, e) => Console.WriteLine($"{e.Name} joined at {e.VirtualAddress}");
+interposer.RelayPeerLeft     += (s, e) => Console.WriteLine($"{e.Name} left");
+
+Process game = interposer.Start(new ProcessStartInfo(@"C:\Games\game.exe"));
+
+RelayStatus status = await interposer.GetRelayStatusAsync();
+await interposer.ConnectRelayAsync(new RelayOptions { Network = "another-lobby" });
+await interposer.DisconnectRelayAsync();
+```
+
+Setting `Relay` at all - even with `Enabled = false` - makes the DLL install its socket hooks, which it can only do at startup; set it whenever the launcher may connect the game later. The relay events also arrive over the event pipe, so they need no `EnableEvents`. Inside the game process, `GetRelayStatus()`, `ConnectRelay()` and `DisconnectRelay()` call the DLL directly.
+
+The server side is the separate `LANCommander.Interposer.Relay` library. See the [Network Relay](https://github.com/LANCommander/LANCommander.Interposer/blob/main/LANCommander.Interposer.Documentation/NetworkRelay.md) docs.
 
 ## Hook Events (in-process)
 

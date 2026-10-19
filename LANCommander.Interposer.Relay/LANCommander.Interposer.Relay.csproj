@@ -1,0 +1,36 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFrameworks>net8.0;net9.0;net10.0</TargetFrameworks>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <LangVersion>latest</LangVersion>
+    <RootNamespace>LANCommander.Interposer.Relay</RootNamespace>
+    <AssemblyName>LANCommander.Interposer.Relay</AssemblyName>
+    <GenerateDocumentationFile>true</GenerateDocumentationFile>
+  </PropertyGroup>
+
+  <PropertyGroup>
+    <IsPackable>true</IsPackable>
+    <PackageId>LANCommander.Interposer.Relay</PackageId>
+    <Title>LANCommander.Interposer.Relay</Title>
+    <Authors>pathartl</Authors>
+    <Owners>pathartl</Owners>
+    <Company>LANCommander</Company>
+    <Copyright>Copyright © LANCommander</Copyright>
+    <Description>Relay server for the LANCommander Interposer's network relay: carries games' LAN traffic (UDP, broadcast, IPX and TCP) between players over the internet without a VPN, and hands each player a virtual LAN address. Host it from a LANCommander server or any .NET process.</Description>
+    <PackageTags>lancommander;interposer;game;relay;lan;ipx;network</PackageTags>
+    <PackageLicenseExpression>MIT</PackageLicenseExpression>
+    <PackageProjectUrl>https://github.com/LANCommander/LANCommander.Interposer</PackageProjectUrl>
+    <RepositoryUrl>https://github.com/LANCommander/LANCommander.Interposer</RepositoryUrl>
+    <RepositoryType>git</RepositoryType>
+
+    <!-- Version: set by CI from git tag, defaults to 0.0.0-local for dev builds -->
+    <Version>0.0.0-local</Version>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Microsoft.Extensions.Logging.Abstractions" Version="8.0.0" />
+  </ItemGroup>
+
+</Project>

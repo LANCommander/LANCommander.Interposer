@@ -58,6 +58,12 @@ Player:
 #               API each caller used to ask for it, false to disable (default).
 #               Each entry point is reported only the first time it is called.
 #
+#   Relay     - true to log the network relay: connecting, the virtual address
+#               assigned, peers joining and leaving, and tunnelled TCP
+#               connections, false to disable (default). At Level Debug it also
+#               logs each loopback portal created and each emulated IPX bind;
+#               at Trace, every datagram relayed in either direction.
+#
 #   Level     - Verbosity within whichever subsystems are enabled above.
 #               Unrecognized values fall back to Info.
 #
@@ -92,6 +98,7 @@ Logging:
   DirectInput: false
   Audio: false
   OsVersion: false
+  Relay: false
   Level: Info
 
 # ---------------------------------------------------------------------------
@@ -489,6 +496,70 @@ AudioDevices:
   #   - 'USB\VID_0965&PID_9001'
   # Input:
   #   - 'Voicemeeter Input (VB-Audio Voicemeeter VAIO)'
+
+# ---------------------------------------------------------------------------
+# NetworkRelay
+#
+# Carries the game's LAN traffic through a LANCommander relay server, so
+# players on different networks can play a LAN-only game together without a
+# VPN. The game is given a virtual LAN address by the server; its broadcasts,
+# datagrams and TCP connections to other players' virtual addresses travel
+# through the server, and IPX is emulated on top for games that predate TCP/IP.
+#
+#   Enabled            - true to connect to the relay, false (default) to leave
+#                        the game's networking untouched.
+#
+#   Server             - The relay server, as host or host:port.
+#
+#   Port               - The port when Server does not name one (default 41300).
+#                        The server uses it for both TCP and UDP.
+#
+#   Network            - The network to join. Players in the same network see
+#                        each other's games; different networks are isolated.
+#
+#   Ticket             - Authentication ticket, when the server requires one.
+#                        A launcher normally supplies it at launch time.
+#
+#   Address           - A virtual IPv4 address to ask for, e.g. '10.13.37.5'.
+#                        The server grants it if it is free; leave empty to
+#                        take whatever it assigns.
+#
+#   UDP                - true (default) to relay the game's UDP datagrams and
+#                        broadcasts.
+#
+#   TCP                - true (default) to tunnel the game's TCP connections to
+#                        other players' virtual addresses.
+#
+#   IPX                - true (default) to emulate IPX. Windows has had no IPX
+#                        stack since Vista; with this on, socket(AF_IPX, ...)
+#                        works again and its traffic goes through the relay.
+#
+#   LoopbackBroadcasts - true (default) to deliver the game's own broadcasts
+#                        back to it, as a real LAN does.
+#
+#   AddressTimeout     - Milliseconds a game asking for its own address (its
+#                        host name, its adapters) waits for the relay to assign
+#                        one before it is told the real address instead
+#                        (default 5000).
+#
+# Other players see this player under the username - Player.Username above,
+# or the Windows account name when that is empty.
+#
+# A launcher can override any of these per launch, and connect, disconnect or
+# switch networks while the game runs, through LANCommander.Interposer.NET.
+# ---------------------------------------------------------------------------
+NetworkRelay:
+  Enabled: false
+  Server: ''
+  Port: 41300
+  Network: ''
+  Ticket: ''
+  Address: ''
+  UDP: true
+  TCP: true
+  IPX: true
+  LoopbackBroadcasts: true
+  AddressTimeout: 5000
 
 # ---------------------------------------------------------------------------
 # FastDL

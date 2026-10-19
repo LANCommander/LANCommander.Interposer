@@ -38,6 +38,17 @@ typedef void (*InterposerIdentityCallback)(
     const wchar_t* type,  // "USERNAME" or "COMPUTERNAME"
     const wchar_t* value); // the returned value
 
+// Network relay: connection state changes and peers joining or leaving.
+//   kind     "STATE"      address = our virtual address (empty before the first
+//                         Welcome), detail = state name, value = RelayState
+//            "PEER JOIN"  address = the peer's virtual address, detail = its
+//            "PEER LEAVE" player name, value = its relay client id
+typedef void (*InterposerRelayCallback)(
+    const wchar_t* kind,
+    const wchar_t* address,
+    const wchar_t* detail,
+    int value);
+
 // ---------------------------------------------------------------------------
 // Registration exports — called by plugins via GetProcAddress or by
 // managed code via P/Invoke. Pass null to unregister.
@@ -47,6 +58,7 @@ extern "C" __declspec(dllexport) void InterposerRegisterRegistryCallback(Interpo
 extern "C" __declspec(dllexport) void InterposerRegisterDnsCallback(InterposerDnsCallback cb);
 extern "C" __declspec(dllexport) void InterposerRegisterNetworkCallback(InterposerNetworkCallback cb);
 extern "C" __declspec(dllexport) void InterposerRegisterIdentityCallback(InterposerIdentityCallback cb);
+extern "C" __declspec(dllexport) void InterposerRegisterRelayCallback(InterposerRelayCallback cb);
 
 // ---------------------------------------------------------------------------
 // Internal fire helpers — called from hook implementations. No-op when the
@@ -58,3 +70,4 @@ void FireRegistryCallback(const wchar_t* verb, const wchar_t* keyPath, const wch
 void FireDnsCallback(const wchar_t* hostname, const wchar_t* redirectedHostname);
 void FireNetworkCallback(const wchar_t* address, int port);
 void FireIdentityCallback(const wchar_t* type, const wchar_t* value);
+void FireRelayCallback(const wchar_t* kind, const wchar_t* address, const wchar_t* detail, int value);

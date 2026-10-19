@@ -173,6 +173,11 @@ OptionSchema: |
           DisplayName: OS Version
           Description: Log the Windows version reported to the game and which API asked for it
           Default: "false"
+        Relay:
+          Type: bool
+          DisplayName: Network Relay
+          Description: Log the network relay - connecting, the virtual address assigned, peers joining and leaving, and tunnelled TCP connections. Debug adds portals and IPX binds; Trace adds every datagram relayed.
+          Default: "false"
         Level:
           Type: choice
           DisplayName: Level
@@ -346,6 +351,62 @@ OptionSchema: |
           ItemType: string
           DisplayName: Input Devices
           Description: Recording devices the game may see - microphones, line-in. Each entry names a device literally - its friendly name, short description, a hardware ID such as USB\VID_0965&PID_9001, the Core Audio endpoint ID, or the DirectSound GUID - and is matched case-insensitively as a substring. Leave the list empty to hide every device of this direction; clear the option entirely to leave the direction unfiltered.
+
+    NetworkRelay:
+      DisplayName: Network Relay
+      Description: Carry the game's LAN traffic through a LANCommander relay server, so players on different networks can play a LAN-only game together without a VPN. Each player is given a virtual LAN address; broadcasts, datagrams and TCP connections between those addresses travel through the server, and IPX is emulated for games that predate TCP/IP.
+      Options:
+        Enabled:
+          Type: bool
+          DisplayName: Enabled
+          Description: Connect to the relay server. The launcher can also enable it, and choose the network, per launch. Other players see this player under their username.
+          Default: "false"
+        Server:
+          Type: string
+          DisplayName: Server
+          Description: The relay server, as host or host:port.
+        Port:
+          Type: int
+          DisplayName: Port
+          Description: The port when Server does not name one. The server uses it for both TCP and UDP.
+          Default: "41300"
+        Network:
+          Type: string
+          DisplayName: Network
+          Description: The network to join. Players in the same network see each other's games; different networks are isolated.
+        Ticket:
+          Type: string
+          DisplayName: Ticket
+          Description: Authentication ticket, when the server requires one. Normally supplied by the launcher per session rather than set here.
+        Address:
+          Type: string
+          DisplayName: Requested Address
+          Description: A virtual IPv4 address to ask for, for example 10.13.37.5. Granted when free; leave blank to take whatever the server assigns.
+        UDP:
+          Type: bool
+          DisplayName: Relay UDP
+          Description: Relay the game's UDP datagrams and broadcasts.
+          Default: "true"
+        TCP:
+          Type: bool
+          DisplayName: Tunnel TCP
+          Description: Tunnel the game's TCP connections to other players' virtual addresses.
+          Default: "true"
+        IPX:
+          Type: bool
+          DisplayName: Emulate IPX
+          Description: Make socket(AF_IPX) work again - Windows has had no IPX stack since Vista - and carry its traffic over the relay.
+          Default: "true"
+        LoopbackBroadcasts:
+          Type: bool
+          DisplayName: Loop Back Broadcasts
+          Description: Deliver the game's own broadcasts back to it, as a real LAN does.
+          Default: "true"
+        AddressTimeout:
+          Type: int
+          DisplayName: Address Timeout
+          Description: Milliseconds a game asking for its own address waits for the relay to assign one before it is told the real address instead.
+          Default: "5000"
 
     FastDL:
       DisplayName: FastDL

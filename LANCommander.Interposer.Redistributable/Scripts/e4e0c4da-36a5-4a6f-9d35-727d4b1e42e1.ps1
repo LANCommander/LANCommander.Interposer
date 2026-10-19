@@ -352,6 +352,7 @@ $loggingDefaults = [ordered]@{
     DirectInput  = $false
     Audio        = $false
     OsVersion    = $false
+    Relay        = $false
 }
 
 $lines.Add('Logging:')
@@ -443,6 +444,20 @@ foreach ($direction in @('Output', 'Input')) {
         Add-ScalarList $lines '  ' $direction (Get-ListOption $Options "AudioDevices.$direction")
     }
 }
+$lines.Add('')
+
+$lines.Add('NetworkRelay:')
+$lines.Add("  Enabled: $(Format-YamlBool (Get-BoolOption $Options 'NetworkRelay.Enabled' $false))")
+$lines.Add("  Server: $(Format-YamlString (Get-StringOption $Options 'NetworkRelay.Server'))")
+$lines.Add("  Port: $(Get-IntOption $Options 'NetworkRelay.Port' 41300)")
+$lines.Add("  Network: $(Format-YamlString (Get-StringOption $Options 'NetworkRelay.Network'))")
+$lines.Add("  Ticket: $(Format-YamlString (Get-StringOption $Options 'NetworkRelay.Ticket'))")
+$lines.Add("  Address: $(Format-YamlString (Get-StringOption $Options 'NetworkRelay.Address'))")
+$lines.Add("  UDP: $(Format-YamlBool (Get-BoolOption $Options 'NetworkRelay.UDP' $true))")
+$lines.Add("  TCP: $(Format-YamlBool (Get-BoolOption $Options 'NetworkRelay.TCP' $true))")
+$lines.Add("  IPX: $(Format-YamlBool (Get-BoolOption $Options 'NetworkRelay.IPX' $true))")
+$lines.Add("  LoopbackBroadcasts: $(Format-YamlBool (Get-BoolOption $Options 'NetworkRelay.LoopbackBroadcasts' $true))")
+$lines.Add("  AddressTimeout: $(Get-IntOption $Options 'NetworkRelay.AddressTimeout' 5000)")
 $lines.Add('')
 
 $lines.Add('FastDL:')

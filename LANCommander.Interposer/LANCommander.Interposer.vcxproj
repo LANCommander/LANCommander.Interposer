@@ -182,6 +182,7 @@
     <ClCompile Include="dll\src\audio.cpp" />
     <ClCompile Include="dll\src\callbacks.cpp" />
     <ClCompile Include="dll\src\config.cpp" />
+    <ClCompile Include="dll\src\control.cpp" />
     <ClCompile Include="dll\src\proxy.cpp" />
     <ClCompile Include="dll\src\dinput.cpp" />
     <ClCompile Include="dll\src\dllmain.cpp" />
@@ -190,10 +191,12 @@
     <ClCompile Include="dll\src\hooks.cpp" />
     <ClCompile Include="dll\src\pipe_events.cpp" />
     <ClCompile Include="dll\src\identity.cpp" />
+    <ClCompile Include="dll\src\ipx.cpp" />
     <ClCompile Include="dll\src\network.cpp" />
     <ClCompile Include="dll\src\osversion.cpp" />
     <ClCompile Include="dll\src\plugins.cpp" />
     <ClCompile Include="dll\src\registry.cpp" />
+    <ClCompile Include="dll\src\relay.cpp" />
     <ClCompile Include="dll\src\richpresence.cpp" />
     <ClCompile Include="dll\src\discord_ipc.cpp" />
   </ItemGroup>
@@ -202,16 +205,21 @@
     <ClInclude Include="dll\src\audio.h" />
     <ClInclude Include="dll\src\callbacks.h" />
     <ClInclude Include="dll\src\config.h" />
+    <ClInclude Include="dll\src\control.h" />
     <ClInclude Include="dll\src\dinput.h" />
     <ClInclude Include="dll\src\fastdl.h" />
     <ClInclude Include="dll\src\files.h" />
     <ClInclude Include="dll\src\hooks.h" />
     <ClInclude Include="dll\src\pipe_events.h" />
     <ClInclude Include="dll\src\identity.h" />
+    <ClInclude Include="dll\src\ipx.h" />
     <ClInclude Include="dll\src\network.h" />
     <ClInclude Include="dll\src\osversion.h" />
     <ClInclude Include="dll\src\plugins.h" />
     <ClInclude Include="dll\src\registry.h" />
+    <ClInclude Include="dll\src\relay.h" />
+    <ClInclude Include="dll\src\relay_protocol.h" />
+    <ClInclude Include="dll\src\relay_settings.h" />
     <ClInclude Include="dll\src\richpresence.h" />
     <ClInclude Include="dll\src\discord_ipc.h" />
   </ItemGroup>

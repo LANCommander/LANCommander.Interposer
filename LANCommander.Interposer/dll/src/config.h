@@ -9,6 +9,8 @@
 #include <array>
 #include <cstdint>
 
+#include "relay_settings.h"
+
 // A compiled file-redirect rule loaded from FileRedirects in Config.yml.
 struct FileRedirect {
     std::wregex  pattern;       // ECMAScript regex, case-insensitive
@@ -104,6 +106,7 @@ extern bool         g_logDnsRedirects;  // true = log DNS redirect matches
 extern bool         g_logNetwork;       // true = log connection/DNS events
 extern bool         g_logDirectInput;   // true = log DirectInput bridge activity
 extern bool         g_logAudio;         // true = log audio device enumeration/filtering
+extern bool         g_logRelay;         // true = log network relay connection, peers and streams
 
 extern std::vector<DnsRedirect> g_dnsRedirects; // DNS hostname redirects (case-insensitive)
 
@@ -207,6 +210,11 @@ extern std::vector<std::wstring> g_adInput;        // AudioDevices.Input entries
 // Name a direction for logging.
 const wchar_t* AudioDirectionName(AudioDirection direction);
 
+// NetworkRelay — the settings in Config.yml. relay.cpp overlays the launcher's
+// override mapping on a copy of these; this global itself is never changed
+// after LoadConfig.
+extern RelaySettings g_relayConfig;
+
 // Rich presence config — read by richpresence.cpp after LoadConfig().
 extern bool        g_rpDiscordEnabled;
 extern std::string g_rpDiscordAppId;
@@ -284,6 +292,15 @@ void LogAudio(const wchar_t* verb, const wchar_t* info, const wchar_t* detail = 
 // Debug (or Trace) -- a machine with many endpoints produces a line per device
 // per enumeration call.
 void LogAudioDiag(const wchar_t* verb, const wchar_t* info, const wchar_t* detail = nullptr);
+
+// Log network relay activity. Gated by the Logging.Relay flag (default false).
+// Log-only, for the same reason as LogDirectInput: relay state reaches .NET and
+// plugin consumers through their own events, not through these lines.
+void LogRelay(const wchar_t* verb, const wchar_t* info, const wchar_t* detail = nullptr);
+
+// Per-packet and per-portal relay diagnostics. Additionally requires
+// Logging.Level Debug; the per-datagram lines require Trace.
+void LogRelayDiag(const wchar_t* verb, const wchar_t* info, const wchar_t* detail = nullptr);
 
 // Redirect diagnostics. No-op below Debug level or when the subsystem flag is false.
 // Unlike LogFileAccess/LogRegistryAccess these deliberately do NOT fire plugin or

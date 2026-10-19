@@ -54,6 +54,7 @@ bool         g_logDnsRedirects = true;
 bool         g_logNetwork      = false;
 bool         g_logDirectInput  = false;
 bool         g_logAudio        = false;
+bool         g_logRelay        = false;
 
 std::vector<DnsRedirect> g_dnsRedirects;
 
@@ -64,6 +65,8 @@ bool                       g_diFixLegacyEnum = false;
 bool                       g_diFilterEnabled = false;
 std::vector<DiDeviceClass> g_diFilterClasses;
 std::vector<DiNameFilter>  g_diFilterNames;
+
+RelaySettings                   g_relayConfig;
 
 bool                            g_naEnabled    = false;
 bool                            g_naAnyFilters = false;
@@ -1001,6 +1004,22 @@ void LogAudio(const wchar_t* verb, const wchar_t* info, const wchar_t* detail)
     WriteLogLine(verb, info, detail);
 }
 
+void LogRelay(const wchar_t* verb, const wchar_t* info, const wchar_t* detail)
+{
+    if (!g_logRelay)
+        return;
+
+    WriteLogLine(verb, info, detail);
+}
+
+void LogRelayDiag(const wchar_t* verb, const wchar_t* info, const wchar_t* detail)
+{
+    if (!g_logRelay || g_logLevel < LogLevel::Debug)
+        return;
+
+    WriteLogLine(verb, info, detail);
+}
+
 void LogOsVersion(const wchar_t* verb, const wchar_t* info, const wchar_t* detail)
 {
     if (!g_logOsVersion)
@@ -1915,6 +1934,90 @@ BOOL InterposerSetConfigString(const wchar_t* dotPath, const wchar_t* value)
 // ---------------------------------------------------------------------------
 // LoadConfig
 // ---------------------------------------------------------------------------
+// Overlay the keys present in a NetworkRelay map onto settings. Shared by
+// LoadConfig, the launcher's override mapping and InterposerRelayConnect, so a
+// key means the same thing wherever it comes from. Presence is what counts: a
+// key that is absent keeps whatever value the settings already had.
+static void ApplyRelayNode(const YAML::Node& node, RelaySettings& s, std::vector<std::wstring>& warnings)
+{
+    auto readBool = [&](const char* key, bool& out)
+    {
+        if (!node[key])
+            return;
+        try { out = node[key].as<bool>(); }
+        catch (const YAML::Exception&)
+        {
+            warnings.push_back(L"NetworkRelay." + Utf8ToWide(key) + L" is not true or false");
+        }
+    };
+
+    auto readInt = [&](const char* key, int& out)
+    {
+        if (!node[key])
+            return;
+        try { out = node[key].as<int>(); }
+        catch (const YAML::Exception&)
+        {
+            warnings.push_back(L"NetworkRelay." + Utf8ToWide(key) + L" is not a number");
+        }
+    };
+
+    auto readString = [&](const char* key, std::wstring& out)
+    {
+        if (node[key])
+            out = Utf8ToWide(node[key].as<std::string>(""));
+    };
+
+    readBool("Enabled", s.enabled);
+    readString("Server", s.server);
+    readInt("Port", s.port);
+    readString("Network", s.network);
+    readString("Ticket", s.ticket);
+    readString("Address", s.address);
+    readBool("UDP", s.udp);
+    readBool("TCP", s.tcp);
+    readBool("IPX", s.ipx);
+    readBool("LoopbackBroadcasts", s.loopbackBroadcast);
+    readInt("AddressTimeout", s.addressTimeout);
+
+    if (s.port <= 0 || s.port > 65535)
+    {
+        warnings.push_back(L"NetworkRelay.Port out of range; using 41300");
+        s.port = 41300;
+    }
+}
+
+bool ParseRelaySettings(const std::string& yamlUtf8, RelaySettings& settings, std::wstring* error)
+{
+    YAML::Node node;
+
+    try { node = YAML::Load(yamlUtf8); }
+    catch (const YAML::Exception& e)
+    {
+        if (error) *error = Utf8ToWide(e.what());
+        return false;
+    }
+
+    if (node.IsNull())
+        return true;
+
+    if (!node.IsMap())
+    {
+        if (error) *error = L"expected a map of NetworkRelay keys";
+        return false;
+    }
+
+    RelaySettings next = settings;
+    std::vector<std::wstring> warnings;
+    ApplyRelayNode(node, next, warnings);
+
+    for (const std::wstring& warning : warnings)
+        InterposerLog(L"RELAY", warning.c_str());
+
+    settings = next;
+    return true;
+}
+
 void LoadConfig()
 {
     // Locate the DLL's own directory
@@ -2039,6 +2142,8 @@ void LoadConfig()
             g_logAudio = logging["Audio"].as<bool>(false);
         if (logging["OsVersion"])
             g_logOsVersion = logging["OsVersion"].as<bool>(false);
+        if (logging["Relay"])
+            g_logRelay = logging["Relay"].as<bool>(false);
 
         // Verbosity within whichever subsystems are enabled above. Unrecognized
         // values fall back to Info so a typo never silently suppresses output.
@@ -2072,10 +2177,10 @@ void LoadConfig()
             {
                 std::string pattern = item["Pattern"] ? item["Pattern"].as<std::string>("") : "";
                 std::string replacement = item["Replacement"] ? item["Replacement"].as<std::string>("") : "";
-                
-                if (pattern.empty()) 
+
+                if (pattern.empty())
                     continue;
-                
+
                 try
                 {
                     std::vector<std::wstring> unresolved;
@@ -2385,6 +2490,19 @@ void LoadConfig()
         g_naAnyFilters = !g_naSubnets.empty() || !g_naNames.empty() || !g_naMacs.empty();
     }
 
+    // ── NetworkRelay ────────────────────────────────────────────────────────────
+    //
+    // Deferred warnings, like OsVersion's: the session log does not exist yet.
+    std::vector<std::wstring> relayWarnings;
+
+    if (YAML::Node relay = root["NetworkRelay"])
+    {
+        if (relay.IsMap())
+            ApplyRelayNode(relay, g_relayConfig, relayWarnings);
+        else
+            relayWarnings.push_back(L"NetworkRelay is not a map; ignored");
+    }
+
     // -- AudioDevices ----------------------------------------------------------
     //
     // One allow-list per direction, armed by the key's presence rather than by
@@ -2405,7 +2523,7 @@ void LoadConfig()
     {
         if (fastDl["Enabled"])
             g_fastdlEnabled = fastDl["Enabled"].as<bool>(false);
-        
+
         if (fastDl["BaseUrl"])
             g_fastdlBaseUrl = Utf8ToWide(fastDl["BaseUrl"].as<std::string>(""));
 
@@ -2447,20 +2565,20 @@ void LoadConfig()
                 for (const auto& allowedExtension : allowedExtensions)
                 {
                     std::wstring extension = Utf8ToWide(allowedExtension.as<std::string>(""));
-                    
+
                     if (extension.empty())
                         continue;
-                    
+
                     for (auto& character : extension) character = towlower(character);
-                    
+
                     if (extension[0] != L'.')
                         extension = L'.' + extension;
-                    
+
                     g_fastdlAllowedExtensions.push_back(extension);
                 }
             }
         }
-        
+
         if (YAML::Node paths = fastDl["Paths"])
         {
             if (paths.IsSequence())
@@ -2469,12 +2587,12 @@ void LoadConfig()
                 {
                     std::wstring local  = item["Local"]  ? Utf8ToWide(item["Local"].as<std::string>(""))  : L"";
                     std::wstring remote = item["Remote"] ? Utf8ToWide(item["Remote"].as<std::string>("")) : L"";
-                    
+
                     if (local.empty())
                         continue;
 
                     FastDLPath path;
-                    
+
                     path.localPrefix   = std::move(local);
                     path.remoteSubPath = std::move(remote);
 
@@ -2603,4 +2721,7 @@ void LoadConfig()
 
     for (const std::wstring& warning : registryWarnings)
         InterposerLog(L"REGISTRY", warning.c_str());
+
+    for (const std::wstring& warning : relayWarnings)
+        InterposerLog(L"RELAY", warning.c_str());
 }

@@ -7,7 +7,9 @@
 void InstallHooks();
 
 // Remove all hooks and uninitialize MinHook. Called from DllMain on DLL_PROCESS_DETACH.
-void RemoveHooks();
+// processTerminating is DllMain's lpvReserved != nullptr: the process is exiting
+// and the OS has already ended every other thread, so none are waited for.
+void RemoveHooks(bool processTerminating);
 
 // Called from LoadLibrary hooks after a DLL is successfully loaded.
 // Checks whether any hooks that failed at startup (module not yet loaded) can

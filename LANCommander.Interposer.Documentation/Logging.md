@@ -21,6 +21,7 @@ Logging:
   DnsRedirects: true
   Network: false
   Audio: false
+  Relay: false
   Level: Info
 ```
 
@@ -37,6 +38,7 @@ Logging:
 | `DirectInput` | bool | `false` | Log DirectInput object and device creation, enumeration, and interface aliasing. At `Debug` also lists every device an enumeration found and every device the filter hid. |
 | `Audio` | bool | `false` | Log audio device enumeration. At `Debug` also lists every device an enumeration found and every device the `AudioDevices` filter hid. |
 | `OsVersion` | bool | `false` | Log the Windows version reported to the game, and which API each caller used to ask for it. Each entry point is reported only the first time it is called. |
+| `Relay` | bool | `false` | Log the [network relay](/Interposer/NetworkRelay): connecting, the virtual address assigned, peers joining and leaving, and tunnelled TCP connections. At `Debug` also each loopback portal created and each emulated IPX bind; at `Trace`, every datagram relayed in either direction. |
 | `Level` | choice | `Info` | Verbosity within the subsystems enabled above. One of `Info`, `Debug`, `Trace`. |
 
 ## Log Level
@@ -154,6 +156,21 @@ Only written at `Level: Debug` or higher, and only for a subsystem that is alrea
 | `[DNS REDIRECT]` | A `DnsRedirects` rule matched a hostname lookup and substituted a replacement. The line shows the original and substituted hostnames separated by `->`. Gated by `Logging.DnsRedirects` (not `Logging.Network`). |
 | `[ADAPTER ENUM]` | The game enumerated network adapters. The line shows which API it used: `GetAdaptersInfo`, `GetAdaptersAddresses`, or `WSAIoctl SIO_GET_INTERFACE_LIST`. |
 | `[ADAPTER HIDE]` | A `NetworkAdapters` filter removed an adapter from an enumeration. The line shows the adapter's friendly name or description. |
+
+### Network Relay Operations
+
+Gated by `Logging.Relay`. Like the DirectInput and audio verbs these are log-only: a launcher follows the relay through its own events (`RelayStateChanged`, `RelayPeerJoined`, `RelayPeerLeft`) rather than through these lines.
+
+| Verb | Meaning |
+|---|---|
+| `[RELAY]` | Connecting, the virtual address assigned and the network joined, losing the server, and the UDP path being confirmed or lost. A refusal from the server, an unparseable `NetworkRelay` value and a virtual address that changed across a reconnect are written regardless of the flag. |
+| `[RELAY STATE]` | The connection state changed: `Connecting`, `Connected`, `Reconnecting`, `Failed` or `Disabled`. |
+| `[RELAY PEER]` | Another player joined or left the network, with their virtual address and name. |
+| `[RELAY STREAM]` | A tunnelled TCP connection opened, connected, was refused, or closed. |
+| `[RELAY PORTAL]` | A loopback portal was created to stand in for a remote endpoint. `Debug` level or higher. |
+| `[IPX BIND]` | An emulated IPX socket was bound, with its socket number and the loopback port behind it. `Debug` level or higher. |
+| `[IPX]` | An emulated IPX socket was created, or a request the emulation cannot serve was refused (SPX, an overlapped receive). |
+| `[RELAY SEND]` / `[RELAY RECV]` | One datagram relayed out or delivered in, with its size and ports. `Trace` level only. |
 
 ### Audio Device Operations
 

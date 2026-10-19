@@ -6,6 +6,7 @@ using System.IO;
 using System.IO.Pipes;
 using System.Runtime.InteropServices;
 using System.Text;
+using System.Text.Json;
 using System.Threading;
 using System.Threading.Tasks;
 using LANCommander.Interposer.Events;
@@ -154,6 +155,53 @@ namespace LANCommander.Interposer
             [Out] NativeAudioDevice[] buffer, uint capacity, out uint outCount);
 
         // =================================================================
+        // P/Invoke - Network relay
+        // =================================================================
+
+        [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
+        private struct NativeRelayStatus
+        {
+            public uint Size;
+            public int State;
+            public uint ClientId;
+            [MarshalAs(UnmanagedType.ByValTStr, SizeConst = 16)]  public string VirtualAddress;
+            [MarshalAs(UnmanagedType.ByValTStr, SizeConst = 16)]  public string Netmask;
+            [MarshalAs(UnmanagedType.ByValTStr, SizeConst = 128)] public string Network;
+            [MarshalAs(UnmanagedType.ByValTStr, SizeConst = 256)] public string Server;
+            public int UdpActive;
+            public uint PeerCount;
+            public ulong BytesSent;
+            public ulong BytesReceived;
+            public ulong DatagramsSent;
+            public ulong DatagramsReceived;
+            public uint StreamsOpen;
+            [MarshalAs(UnmanagedType.ByValTStr, SizeConst = 256)] public string LastError;
+        }
+
+        [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
+        private struct NativeRelayPeer
+        {
+            public uint ClientId;
+            [MarshalAs(UnmanagedType.ByValTStr, SizeConst = 16)]  public string VirtualAddress;
+            [MarshalAs(UnmanagedType.ByValTStr, SizeConst = 128)] public string Name;
+        }
+
+        [DllImport(DllName, CallingConvention = CallingConvention.Cdecl)]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        private static extern bool InterposerRelayGetStatus(ref NativeRelayStatus status);
+
+        [DllImport(DllName, CallingConvention = CallingConvention.Cdecl)]
+        private static extern uint InterposerRelayEnumPeers(
+            [Out] NativeRelayPeer[] buffer, uint capacity, out uint outCount);
+
+        [DllImport(DllName, CallingConvention = CallingConvention.Cdecl, CharSet = CharSet.Unicode)]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        private static extern bool InterposerRelayConnect(string yamlOverrides);
+
+        [DllImport(DllName, CallingConvention = CallingConvention.Cdecl)]
+        private static extern void InterposerRelayDisconnect();
+
+        // =================================================================
         // P/Invoke - Callback registration
         // =================================================================
 
@@ -171,6 +219,9 @@ namespace LANCommander.Interposer
 
         [DllImport(DllName, CallingConvention = CallingConvention.Cdecl)]
         private static extern void InterposerRegisterIdentityCallback(IntPtr cb);
+
+        [DllImport(DllName, CallingConvention = CallingConvention.Cdecl)]
+        private static extern void InterposerRegisterRelayCallback(IntPtr cb);
 
         // =================================================================
         // Native callback delegate types
@@ -191,6 +242,9 @@ namespace LANCommander.Interposer
         [UnmanagedFunctionPointer(CallingConvention.Cdecl, CharSet = CharSet.Unicode)]
         private delegate void NativeIdentityCallback(IntPtr type, IntPtr value);
 
+        [UnmanagedFunctionPointer(CallingConvention.Cdecl, CharSet = CharSet.Unicode)]
+        private delegate void NativeRelayCallback(IntPtr kind, IntPtr address, IntPtr detail, int value);
+
         // =================================================================
         // Instance state
         // =================================================================
@@ -200,11 +254,15 @@ namespace LANCommander.Interposer
         private NativeDnsCallback _dnsDelegate;
         private NativeNetworkCallback _networkDelegate;
         private NativeIdentityCallback _identityDelegate;
+        private NativeRelayCallback? _relayDelegate;
         private bool _eventsEnabled;
 
         private IntPtr _fastDlMmf;
         private IntPtr _usernameMmf;
         private IntPtr _computerNameMmf;
+        private IntPtr _relayMmf;
+
+        private ControlChannel? _control;
 
         private NamedPipeServerStream _eventPipe;
         private CancellationTokenSource _eventCts;
@@ -233,6 +291,20 @@ namespace LANCommander.Interposer
         /// is created so the DLL returns this name from GetComputerNameW/A.
         /// </summary>
         public string ComputerName { get; set; }
+
+        /// <summary>
+        /// Optional network relay settings, overriding the <c>NetworkRelay</c> section
+        /// of Config.yml key by key. When set, a named memory-mapped file carries them
+        /// to the DLL.
+        /// <para>
+        /// Setting this at all -- even to options with <see cref="RelayOptions.Enabled"/>
+        /// false -- makes the DLL install its socket hooks, which it can only do at
+        /// startup. Do that when the launcher may want to call
+        /// <see cref="ConnectRelayAsync"/> later, for a game that was started before its
+        /// relay session existed.
+        /// </para>
+        /// </summary>
+        public RelayOptions? Relay { get; set; }
 
         // =================================================================
         // Events
@@ -275,6 +347,28 @@ namespace LANCommander.Interposer
         /// <see cref="Start"/>, and in-process via <see cref="EnableEvents"/>.
         /// </summary>
         public event EventHandler<IdentityEventArgs> IdentityQueried;
+
+        /// <summary>
+        /// Fires when the network relay connects, loses its server, reconnects, is
+        /// refused, or is disconnected.
+        /// Works cross-process via named pipe when using <see cref="Inject"/> or
+        /// <see cref="Start"/>, and in-process via <see cref="EnableEvents"/>.
+        /// </summary>
+        public event EventHandler<RelayStateChangedEventArgs>? RelayStateChanged;
+
+        /// <summary>
+        /// Fires when another player joins the relay network, including once for each
+        /// member already present when the game connects.
+        /// Works cross-process via named pipe and in-process via <see cref="EnableEvents"/>.
+        /// </summary>
+        public event EventHandler<RelayPeerEventArgs>? RelayPeerJoined;
+
+        /// <summary>
+        /// Fires when another player leaves the relay network, and for every peer when
+        /// the game loses its connection to the relay server.
+        /// Works cross-process via named pipe and in-process via <see cref="EnableEvents"/>.
+        /// </summary>
+        public event EventHandler<RelayPeerEventArgs>? RelayPeerLeft;
 
         // =================================================================
         // Injection - Process integration
@@ -477,6 +571,17 @@ namespace LANCommander.Interposer
             InterposerRegisterIdentityCallback(
                 Marshal.GetFunctionPointerForDelegate(_identityDelegate));
 
+            // Absent from DLLs that predate the network relay.
+            try
+            {
+                _relayDelegate = OnRelayCallback;
+                InterposerRegisterRelayCallback(Marshal.GetFunctionPointerForDelegate(_relayDelegate));
+            }
+            catch (EntryPointNotFoundException)
+            {
+                _relayDelegate = null;
+            }
+
             _eventsEnabled = true;
         }
 
@@ -495,6 +600,10 @@ namespace LANCommander.Interposer
             InterposerRegisterNetworkCallback(IntPtr.Zero);
             InterposerRegisterIdentityCallback(IntPtr.Zero);
 
+            if (_relayDelegate != null)
+                InterposerRegisterRelayCallback(IntPtr.Zero);
+
+            _relayDelegate = null;
             _fileDelegate = null;
             _registryDelegate = null;
             _dnsDelegate = null;
@@ -533,10 +642,152 @@ namespace LANCommander.Interposer
                 _eventPipe = null;
             }
 
+            _control?.Dispose();
+            _control = null;
+
             CloseMmf(ref _fastDlMmf);
             CloseMmf(ref _usernameMmf);
             CloseMmf(ref _computerNameMmf);
+            CloseMmf(ref _relayMmf);
         }
+
+        // =================================================================
+        // Network relay - cross-process control
+        // =================================================================
+
+        /// <summary>
+        /// True once the injected DLL has connected its control pipe, which it does
+        /// during injection. Only processes started or injected by this instance have one.
+        /// </summary>
+        public bool IsControlConnected => _control?.IsConnected == true;
+
+        /// <summary>
+        /// (Re)connects the injected game's network relay, applying <paramref name="options"/>
+        /// on top of its current settings; null reconnects with the settings it has.
+        /// Connecting implies enabling, whatever <see cref="RelayOptions.Enabled"/> says.
+        /// Returns false if the DLL rejected the options.
+        /// <para>
+        /// The game's socket hooks must already be installed: set <see cref="Relay"/>
+        /// before injecting, or enable <c>NetworkRelay</c> in Config.yml.
+        /// </para>
+        /// </summary>
+        public async Task<bool> ConnectRelayAsync(RelayOptions? options = null, CancellationToken cancellationToken = default)
+        {
+            var (ok, _) = await RequireControl()
+                .SendAsync(ControlChannel.CommandRelayConnect, options?.ToYaml(), cancellationToken)
+                .ConfigureAwait(false);
+            return ok;
+        }
+
+        /// <summary>
+        /// Disconnects the injected game from the relay server and stops it retrying.
+        /// Its virtual address stays assigned, so a later <see cref="ConnectRelayAsync"/>
+        /// asks for the same one.
+        /// </summary>
+        public async Task DisconnectRelayAsync(CancellationToken cancellationToken = default)
+        {
+            await RequireControl()
+                .SendAsync(ControlChannel.CommandRelayDisconnect, null, cancellationToken)
+                .ConfigureAwait(false);
+        }
+
+        /// <summary>Reads the injected game's relay state, address, peers and traffic counters.</summary>
+        public async Task<RelayStatus> GetRelayStatusAsync(CancellationToken cancellationToken = default)
+        {
+            var (_, json) = await RequireControl()
+                .SendAsync(ControlChannel.CommandRelayStatus, null, cancellationToken)
+                .ConfigureAwait(false);
+
+            return JsonSerializer.Deserialize<RelayStatus>(json) ?? new RelayStatus();
+        }
+
+        /// <summary>
+        /// Reads a scalar from the injected game's Config.yml by dot path -- the
+        /// cross-process counterpart of <see cref="GetConfigString(string)"/>.
+        /// Returns null when the key is missing or not a scalar.
+        /// </summary>
+        public async Task<string?> QueryConfigStringAsync(string dotPath, CancellationToken cancellationToken = default)
+        {
+            var (ok, value) = await RequireControl()
+                .SendAsync(ControlChannel.CommandGetConfig, dotPath, cancellationToken)
+                .ConfigureAwait(false);
+            return ok ? value : null;
+        }
+
+        /// <summary>Round-trips a request to the injected DLL. True when it answered.</summary>
+        public async Task<bool> PingAsync(CancellationToken cancellationToken = default)
+        {
+            var (ok, reply) = await RequireControl()
+                .SendAsync(ControlChannel.CommandPing, null, cancellationToken)
+                .ConfigureAwait(false);
+            return ok && reply == "pong";
+        }
+
+        private ControlChannel RequireControl()
+            => _control ?? throw new InvalidOperationException(
+                "No control pipe: only a process started or injected by this InterposerService has one.");
+
+        // =================================================================
+        // Network relay - in-process
+        // =================================================================
+
+        /// <summary>
+        /// Reads the relay state of the DLL loaded in this process. In-process only;
+        /// a launcher uses <see cref="GetRelayStatusAsync"/>.
+        /// </summary>
+        public RelayStatus GetRelayStatus()
+        {
+            var native = new NativeRelayStatus { Size = (uint)Marshal.SizeOf<NativeRelayStatus>() };
+
+            if (!InterposerRelayGetStatus(ref native))
+                return new RelayStatus();
+
+            var status = new RelayStatus
+            {
+                State             = (RelayState)native.State,
+                ClientId          = native.ClientId,
+                VirtualAddress    = native.VirtualAddress ?? string.Empty,
+                Netmask           = native.Netmask ?? string.Empty,
+                Network           = native.Network ?? string.Empty,
+                Server            = native.Server ?? string.Empty,
+                UdpActive         = native.UdpActive != 0,
+                BytesSent         = native.BytesSent,
+                BytesReceived     = native.BytesReceived,
+                DatagramsSent     = native.DatagramsSent,
+                DatagramsReceived = native.DatagramsReceived,
+                StreamsOpen       = native.StreamsOpen,
+                LastError         = native.LastError ?? string.Empty,
+            };
+
+            var total = InterposerRelayEnumPeers(null!, 0, out _);
+            if (total > 0)
+            {
+                var peers = new NativeRelayPeer[total];
+                InterposerRelayEnumPeers(peers, total, out var written);
+
+                for (var i = 0; i < Math.Min(written, total); i++)
+                    status.Peers.Add(new RelayPeerInfo
+                    {
+                        ClientId       = peers[i].ClientId,
+                        VirtualAddress = peers[i].VirtualAddress ?? string.Empty,
+                        Name           = peers[i].Name ?? string.Empty,
+                    });
+            }
+
+            return status;
+        }
+
+        /// <summary>
+        /// (Re)connects the relay of the DLL loaded in this process. In-process only;
+        /// see <see cref="ConnectRelayAsync"/>.
+        /// </summary>
+        public bool ConnectRelay(RelayOptions? options = null) => InterposerRelayConnect(options?.ToYaml() ?? string.Empty);
+
+        /// <summary>
+        /// Disconnects the relay of the DLL loaded in this process. In-process only;
+        /// see <see cref="DisconnectRelayAsync"/>.
+        /// </summary>
+        public void DisconnectRelay() => InterposerRelayDisconnect();
 
         // =================================================================
         // Config & Logging (in-process only)
@@ -803,6 +1054,16 @@ namespace LANCommander.Interposer
             if (!string.IsNullOrEmpty(ComputerName))
                 _computerNameMmf = CreateUtf8Mmf($"Local\\InterposerComputerName_{pid}", ComputerName, 512);
 
+            // Written even when every option is null: its mere presence tells the DLL
+            // a launcher may drive the relay, so the socket hooks go in at startup.
+            if (Relay != null)
+                _relayMmf = CreateUtf8Mmf($"Local\\InterposerRelay_{pid}", Relay.ToYaml(), 8192);
+
+            // Like the event pipe, listening before injection: the DLL connects once,
+            // from DLL_PROCESS_ATTACH.
+            _control?.Dispose();
+            _control = new ControlChannel(pid);
+
             // Create a named pipe for the injected DLL to send events back.
             // The pipe must be in a listening state before the DLL is injected
             // so it can connect during DLL_PROCESS_ATTACH.
@@ -1031,6 +1292,26 @@ namespace LANCommander.Interposer
                 case 5: // IDENTITY
                     IdentityQueried?.Invoke(this, new IdentityEventArgs(field1, field2));
                     break;
+                case 6: // RELAY
+                    DispatchRelayEvent(field1, field2, field3, intField);
+                    break;
+            }
+        }
+
+        // kind is "STATE", "PEER JOIN" or "PEER LEAVE"; see InterposerRelayCallback in callbacks.h.
+        private void DispatchRelayEvent(string? kind, string? address, string? detail, int value)
+        {
+            switch (kind)
+            {
+                case "STATE":
+                    RelayStateChanged?.Invoke(this, new RelayStateChangedEventArgs((RelayState)value, address));
+                    break;
+                case "PEER JOIN":
+                    RelayPeerJoined?.Invoke(this, new RelayPeerEventArgs(unchecked((uint)value), address, detail));
+                    break;
+                case "PEER LEAVE":
+                    RelayPeerLeft?.Invoke(this, new RelayPeerEventArgs(unchecked((uint)value), address, detail));
+                    break;
             }
         }
 
@@ -1073,6 +1354,15 @@ namespace LANCommander.Interposer
             IdentityQueried?.Invoke(this, new IdentityEventArgs(
                 Marshal.PtrToStringUni(type),
                 Marshal.PtrToStringUni(value)));
+        }
+
+        private void OnRelayCallback(IntPtr kind, IntPtr address, IntPtr detail, int value)
+        {
+            DispatchRelayEvent(
+                Marshal.PtrToStringUni(kind),
+                address != IntPtr.Zero ? Marshal.PtrToStringUni(address) : null,
+                detail != IntPtr.Zero ? Marshal.PtrToStringUni(detail) : null,
+                value);
         }
     }
 }

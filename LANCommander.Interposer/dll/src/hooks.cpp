@@ -1,6 +1,7 @@
 #include "hooks.h"
 #include "audio.h"
 #include "config.h"
+#include "control.h"
 #include "dinput.h"
 #include "fastdl.h"
 #include "files.h"
@@ -10,6 +11,7 @@
 #include "pipe_events.h"
 #include "plugins.h"
 #include "registry.h"
+#include "relay.h"
 #include "richpresence.h"
 
 #include <MinHook.h>
@@ -33,6 +35,7 @@ void InstallHooks()
     InstallRegistryHooks();
     InstallFileHooks();
     InitFastDL();
+    InitRelay();            // decides RelayHooksWanted, which InstallNetworkHooks reads
     InstallNetworkHooks();
     InstallIdentityHooks();
     InstallOsVersionHooks();
@@ -42,6 +45,7 @@ void InstallHooks()
     MH_EnableHook(MH_ALL_HOOKS);
 
     ConnectEventPipe();
+    StartControlPipe();
 
     InitRichPresence();
 
@@ -63,8 +67,10 @@ void OnLibraryLoaded(HMODULE hModule)
     LateInstallAudioHooks(name);
 }
 
-void RemoveHooks()
+void RemoveHooks(bool processTerminating)
 {
+    StopControlPipe(processTerminating);
+    ShutdownRelay(processTerminating);
     DisconnectEventPipe();
     UnloadPlugins();
     ShutdownRichPresence();

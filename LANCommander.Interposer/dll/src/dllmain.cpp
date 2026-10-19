@@ -24,7 +24,7 @@ static void WriteLog(const wchar_t* message)
     CloseHandle(fileHandle);
 }
 
-BOOL APIENTRY DllMain(HMODULE hInstance, DWORD fdwReason, LPVOID /*lpvReserved*/)
+BOOL APIENTRY DllMain(HMODULE hInstance, DWORD fdwReason, LPVOID lpvReserved)
 {
     switch (fdwReason)
     {
@@ -45,7 +45,7 @@ BOOL APIENTRY DllMain(HMODULE hInstance, DWORD fdwReason, LPVOID /*lpvReserved*/
         break;
 
     case DLL_PROCESS_DETACH:
-        RemoveHooks();
+        RemoveHooks(lpvReserved != nullptr);
         break;
 
     default:
