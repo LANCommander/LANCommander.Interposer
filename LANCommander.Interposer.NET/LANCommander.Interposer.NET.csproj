@@ -39,12 +39,22 @@
     <None Include="README.md" Pack="true" PackagePath="\" />
   </ItemGroup>
 
-  <!-- Native Interposer DLLs embedded in the package. CI populates the runtimes/
-       directory before pack; local dev builds work without them (injection
-       requires an explicit dllPath or the DLL next to the app). -->
+  <!-- Native Interposer binaries embedded in the package. CI stages the DLL and
+       injector for each architecture under runtimes/ before pack; local dev builds
+       work without them (injection requires an explicit dllPath or the DLL next to
+       the app). -->
   <ItemGroup Condition="Exists('runtimes')">
-    <None Include="runtimes\win-x64\native\**" Pack="true" PackagePath="runtimes\win-x64\native" />
-    <None Include="runtimes\win-x86\native\**" Pack="true" PackagePath="runtimes\win-x86\native" />
+    <!-- The DLL as each runtime's native asset, as it has always shipped -->
+    <None Include="runtimes\win-x64\native\LANCommander.Interposer.dll" Pack="true" PackagePath="runtimes\win-x64\native" />
+    <None Include="runtimes\win-x86\native\LANCommander.Interposer.dll" Pack="true" PackagePath="runtimes\win-x86\native" />
+
+    <!--
+      Both architectures' DLL and injector again, outside runtimes/, for the build targets to copy
+      into x86\ and x64\. Under runtimes/ the build's own architecture would be a native asset, which
+      a RID-specific publish bundles into a single-file app and drops from x64\ as a duplicate.
+    -->
+    <None Include="runtimes\win-x64\native\*" Pack="true" PackagePath="native\x64" />
+    <None Include="runtimes\win-x86\native\*" Pack="true" PackagePath="native\x86" />
   </ItemGroup>
 
   <!-- MSBuild targets that copy the native DLL to the consumer's output directory -->

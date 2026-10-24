@@ -86,6 +86,22 @@ interposer.Inject(existingProcess);
 interposer.Inject(1234);  // by PID
 ```
 
+The game may be 32-bit or 64-bit, whatever the application is. A remote `LoadLibraryW` only works
+between processes of one architecture, so a game of the other architecture is injected through
+`LANCommander.Interposer.Injector.exe` built for it. The package copies both architectures' DLL and
+injector into `x86\` and `x64\` in the application's output, and `InterposerService` picks the pair
+it needs.
+
+A game that already loads the Interposer as a proxy DLL beside its executable must not be injected
+as well, or the DLL is loaded twice. `StartWithProxy` launches it with the same overrides and pipes
+in place, and lets the proxy pick them up:
+
+```csharp
+Process game = InterposerService.IsDeployedAsProxy(startInfo.FileName)
+    ? interposer.StartWithProxy(startInfo)
+    : interposer.Start(startInfo);
+```
+
 ### In-process plugin API and hook events
 
 ```csharp

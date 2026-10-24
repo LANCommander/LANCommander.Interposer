@@ -73,28 +73,34 @@ jobs:
         shell: pwsh
         run: powershell -NoProfile -ExecutionPolicy Bypass -File generate_version.ps1 -Output version_info.h -Version '${{ github.ref_name }}'
 
-      - name: Build native DLL (x64)
+      # The injector ships too: InterposerService runs the one matching a game whose
+      # architecture differs from the host's, since a remote LoadLibraryW only works
+      # between processes of one architecture.
+      - name: Build native DLL and injector (x64)
         run: >
           msbuild LANCommander.Interposer.slnx
-          /t:LANCommander_Interposer
+          /t:LANCommander_Interposer,LANCommander_Interposer_Injector
           /p:Configuration=Release /p:Platform=x64
 
-      - name: Build native DLL (x86)
+      - name: Build native DLL and injector (x86)
         run: >
           msbuild LANCommander.Interposer.slnx
-          /t:LANCommander_Interposer
+          /t:LANCommander_Interposer,LANCommander_Interposer_Injector
           /p:Configuration=Release /p:Platform=x86
 
-      - name: Stage native DLLs for NuGet package
+      - name: Stage native binaries for NuGet package
         shell: pwsh
         run: |
           $netDir = 'LANCommander.Interposer.NET'
 
-          New-Item -ItemType Directory -Force "$netDir\runtimes\win-x64\native" | Out-Null
-          New-Item -ItemType Directory -Force "$netDir\runtimes\win-x86\native" | Out-Null
+          foreach ($arch in 'x64', 'x86') {
+            $target = "$netDir\runtimes\win-$arch\native"
 
-          Copy-Item 'Release\Injector\x64\LANCommander.Interposer.dll' "$netDir\runtimes\win-x64\native\"
-          Copy-Item 'Release\Injector\x86\LANCommander.Interposer.dll' "$netDir\runtimes\win-x86\native\"
+            New-Item -ItemType Directory -Force $target | Out-Null
+
+            Copy-Item "Release\Injector\$arch\LANCommander.Interposer.dll" "$target\"
+            Copy-Item "Release\Injector\$arch\LANCommander.Interposer.Injector.exe" "$target\"
+          }
 
       - name: Build .NET bindings
         run: dotnet build LANCommander.Interposer.NET/LANCommander.Interposer.NET.csproj -c Release -p:Version=${{ steps.version.outputs.version }}
@@ -129,10 +135,11 @@ jobs:
           $netDir = 'LANCommander.Interposer.NET'
 
           # The managed binding, once per target framework, plus the native DLL
-          # staged for each runtime identifier.
+          # and injector staged for each runtime identifier.
           $files = @(
             Get-ChildItem -Path "$netDir\bin\Release" -Recurse -File -Filter 'LANCommander.Interposer.NET.dll'
             Get-ChildItem -Path "$netDir\runtimes"     -Recurse -File -Filter 'LANCommander.Interposer.dll'
+            Get-ChildItem -Path "$netDir\runtimes"     -Recurse -File -Filter 'LANCommander.Interposer.Injector.exe'
           ) | Select-Object -ExpandProperty FullName | Sort-Object -Unique
 
           if (-not $files) {

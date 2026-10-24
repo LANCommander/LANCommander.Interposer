@@ -392,18 +392,17 @@ namespace LANCommander.Interposer
         }
 
         /// <summary>
-        /// Injects the Interposer DLL into a process identified by PID.
+        /// Injects the Interposer DLL into a process identified by PID. The process may be
+        /// 32-bit or 64-bit whatever this process is; see <see cref="Start(ProcessStartInfo, string)"/>.
         /// </summary>
         /// <param name="processId">Target process ID.</param>
         /// <param name="dllPath">
-        /// Path to the Interposer DLL. If null, searches for interposer.dll or
-        /// LANCommander.Interposer.dll next to the application.
+        /// Path to the Interposer DLL, which must match the target's architecture. If null,
+        /// the DLL for the target's architecture is found next to the application.
         /// </param>
         /// <exception cref="InjectionException">Thrown if injection fails.</exception>
         public void Inject(int processId, string dllPath = null)
         {
-            dllPath = ResolveDllPath(dllPath);
-
             var hProcess = NativeMethods.OpenProcess(
                 NativeMethods.PROCESS_CREATE_THREAD |
                 NativeMethods.PROCESS_VM_OPERATION |
@@ -418,8 +417,11 @@ namespace LANCommander.Interposer
 
             try
             {
+                var architecture = GetProcessArchitecture(hProcess);
+                var binaries = ResolveBinaries(dllPath, architecture);
+
                 CreateMappings((uint)processId);
-                InjectDll(hProcess, dllPath);
+                InjectInto(hProcess, (uint)processId, binaries);
             }
             finally
             {
@@ -436,25 +438,148 @@ namespace LANCommander.Interposer
         /// <see cref="ProcessStartInfo.WorkingDirectory"/>, and
         /// <see cref="ProcessStartInfo.Environment"/> are respected.
         /// </para>
+        /// <para>
+        /// The game may be 32-bit or 64-bit whatever this process is. A process of the
+        /// same architecture is injected directly; one of the other architecture through
+        /// <c>LANCommander.Interposer.Injector.exe</c> built for it, since a remote
+        /// <c>LoadLibraryW</c> only works between processes of one architecture. The
+        /// <c>LANCommander.Interposer</c> package puts both architectures' DLL and
+        /// injector under <c>x86\</c> and <c>x64\</c> beside the application.
+        /// </para>
+        /// <para>
+        /// Do not use this for a game that already loads the Interposer as a proxy DLL
+        /// beside its executable: the DLL would be loaded twice. Use
+        /// <see cref="StartWithProxy"/>, and <see cref="IsDeployedAsProxy"/> to tell.
+        /// </para>
         /// </summary>
         /// <param name="startInfo">Describes the process to launch.</param>
         /// <param name="dllPath">
-        /// Path to the Interposer DLL. If null, searches for interposer.dll or
-        /// LANCommander.Interposer.dll next to the application.
+        /// Path to the Interposer DLL, which must match the game's architecture. If null,
+        /// the DLL for the game's architecture is found next to the application.
         /// </param>
         /// <returns>The launched <see cref="Process"/> with the Interposer DLL loaded.</returns>
         /// <exception cref="InjectionException">Thrown if the process cannot be created or injection fails.</exception>
         public Process Start(ProcessStartInfo startInfo, string dllPath = null)
+            => StartCore(startInfo, dllPath, inject: true);
+
+        /// <summary>
+        /// Launches a game that loads the Interposer itself, as a proxy DLL beside its
+        /// executable (<c>version.dll</c>, <c>dinput8.dll</c>, ...), with this instance's
+        /// overrides in place. Everything <see cref="Start(ProcessStartInfo, string)"/>
+        /// sets up before injecting -- <see cref="Username"/>, <see cref="Relay"/> and the
+        /// other overrides, the control pipe the relay methods use, and the event pipe --
+        /// is set up here too, but nothing is injected: the proxy picks it all up when the
+        /// game loads it.
+        /// </summary>
+        /// <param name="startInfo">Describes the process to launch.</param>
+        /// <returns>The launched <see cref="Process"/>.</returns>
+        /// <exception cref="InjectionException">Thrown if the process cannot be created.</exception>
+        public Process StartWithProxy(ProcessStartInfo startInfo)
+            => StartCore(startInfo, null, inject: false);
+
+        /// <summary>
+        /// True when the Interposer is deployed as a proxy DLL beside
+        /// <paramref name="executablePath"/>, under one of the names Windows or an ASI
+        /// loader loads by itself. Such a game must be started with
+        /// <see cref="StartWithProxy"/> rather than injected. Recognises the Interposer by
+        /// its exports, so a game's own <c>dinput8.dll</c> does not count.
+        /// </summary>
+        public static bool IsDeployedAsProxy(string executablePath)
+        {
+            var directory = Path.GetDirectoryName(Path.GetFullPath(executablePath));
+
+            if (directory == null || !Directory.Exists(directory))
+                return false;
+
+            foreach (var name in ProxyNames)
+            {
+                var path = Path.Combine(directory, name);
+
+                if (File.Exists(path) && IsInterposer(path))
+                    return true;
+            }
+
+            foreach (var path in Directory.EnumerateFiles(directory, "*.asi"))
+            {
+                if (IsInterposer(path))
+                    return true;
+            }
+
+            return false;
+        }
+
+        // The names the Interposer can stand in for; see "Release Variants" in the README.
+        private static readonly string[] ProxyNames = { "version.dll", "dinput8.dll", "dinput.dll" };
+
+        /// <summary>
+        /// Whether the DLL at <paramref name="path"/> is the Interposer, whatever it has been
+        /// renamed to: it exports the <c>Interposer*</c> plugin API. Not every build carries a
+        /// version resource, so the exports are what identify it.
+        /// </summary>
+        private const string ExportPrefix = "Interposer";
+
+        private static bool IsInterposer(string path)
+        {
+            try
+            {
+                using var stream = File.OpenRead(path);
+                using var pe = new System.Reflection.PortableExecutable.PEReader(stream);
+
+                var directory = pe.PEHeaders.PEHeader?.ExportTableDirectory;
+
+                if (directory is not { Size: > 0 } exports)
+                    return false;
+
+                var image = pe.GetEntireImage();
+                var reader = image.GetReader();
+
+                int Offset(int rva)
+                {
+                    foreach (var section in pe.PEHeaders.SectionHeaders)
+                    {
+                        if (rva >= section.VirtualAddress && rva < section.VirtualAddress + Math.Max(section.VirtualSize, section.SizeOfRawData))
+                            return rva - section.VirtualAddress + section.PointerToRawData;
+                    }
+
+                    throw new BadImageFormatException();
+                }
+
+                // IMAGE_EXPORT_DIRECTORY: NumberOfNames at +24, AddressOfNames at +32
+                reader.Offset = Offset(exports.RelativeVirtualAddress) + 24;
+                var count = reader.ReadInt32();
+                reader.Offset += 4;
+                var names = Offset(reader.ReadInt32());
+
+                for (var i = 0; i < count; i++)
+                {
+                    reader.Offset = names + i * 4;
+                    reader.Offset = Offset(reader.ReadInt32());
+
+                    if (reader.RemainingBytes >= ExportPrefix.Length && reader.ReadUTF8(ExportPrefix.Length) == ExportPrefix)
+                        return true;
+                }
+
+                return false;
+            }
+            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or BadImageFormatException or ArgumentOutOfRangeException)
+            {
+                return false;
+            }
+        }
+
+        private Process StartCore(ProcessStartInfo startInfo, string dllPath, bool inject)
         {
             if (startInfo == null)
                 throw new ArgumentNullException(nameof(startInfo));
-
-            dllPath = ResolveDllPath(dllPath);
 
             var exePath = Path.GetFullPath(startInfo.FileName);
 
             if (!File.Exists(exePath))
                 throw new InjectionException($"Executable not found: {exePath}");
+
+            // Found before the process exists, so a missing DLL or injector fails the launch
+            // rather than a game that has already started.
+            var binaries = inject ? ResolveBinaries(dllPath, GetImageArchitecture(exePath)) : null;
 
             var workingDirectory = string.IsNullOrEmpty(startInfo.WorkingDirectory)
                 ? Path.GetDirectoryName(exePath)
@@ -522,7 +647,9 @@ namespace LANCommander.Interposer
             try
             {
                 CreateMappings(pi.dwProcessId);
-                InjectDll(pi.hProcess, dllPath);
+
+                if (binaries != null)
+                    InjectInto(pi.hProcess, pi.dwProcessId, binaries);
 
                 NativeMethods.ResumeThread(pi.hThread);
 
@@ -1015,7 +1142,34 @@ namespace LANCommander.Interposer
         // Private - injection helpers
         // =================================================================
 
-        private static string ResolveDllPath(string dllPath)
+        // =================================================================
+        // Injection - binaries and architectures
+        // =================================================================
+
+        private const string InjectorName = "LANCommander.Interposer.Injector.exe";
+
+        private enum Architecture { X86, X64 }
+
+        /// <summary>The DLL to load into a target, and the injector to load it with when the target's architecture is not ours.</summary>
+        private sealed record Binaries(Architecture Architecture, string DllPath, string? InjectorPath);
+
+        private static Architecture CurrentArchitecture => Environment.Is64BitProcess ? Architecture.X64 : Architecture.X86;
+
+        private static string FolderName(Architecture architecture) => architecture == Architecture.X64 ? "x64" : "x86";
+
+        private static string Describe(Architecture architecture) => architecture == Architecture.X64 ? "64-bit" : "32-bit";
+
+        private static Binaries ResolveBinaries(string dllPath, Architecture architecture)
+        {
+            var dll = ResolveDllPath(dllPath, architecture);
+
+            // Only needed, and only looked for, when the target is not our own architecture.
+            var injector = architecture == CurrentArchitecture ? null : ResolveInjectorPath(architecture);
+
+            return new Binaries(architecture, dll, injector);
+        }
+
+        private static string ResolveDllPath(string dllPath, Architecture architecture)
         {
             if (!string.IsNullOrEmpty(dllPath))
             {
@@ -1027,20 +1181,188 @@ namespace LANCommander.Interposer
                 return dllPath;
             }
 
-            var baseDir = AppDomain.CurrentDomain.BaseDirectory;
-            var candidates = new[] { "interposer.dll", "LANCommander.Interposer.dll" };
+            var candidates = new List<string>(ArchitectureCandidates(architecture, DllName));
+
+            // The layout before the package carried both architectures: a single DLL beside
+            // the application, of the application's own architecture.
+            if (architecture == CurrentArchitecture)
+            {
+                foreach (var directory in ApplicationDirectories())
+                {
+                    candidates.Add(Path.Combine(directory, "interposer.dll"));
+                    candidates.Add(Path.Combine(directory, DllName));
+                }
+            }
 
             foreach (var candidate in candidates)
             {
-                var path = Path.Combine(baseDir, candidate);
-
-                if (File.Exists(path))
-                    return path;
+                if (File.Exists(candidate))
+                    return candidate;
             }
 
             throw new InjectionException(
-                "No DLL path specified and neither interposer.dll nor " +
-                "LANCommander.Interposer.dll was found next to the application.");
+                $"No DLL path specified and no {Describe(architecture)} {DllName} was found. Looked in: " +
+                string.Join(", ", candidates));
+        }
+
+        private static string ResolveInjectorPath(Architecture architecture)
+        {
+            var candidates = ArchitectureCandidates(architecture, InjectorName);
+
+            foreach (var candidate in candidates)
+            {
+                if (File.Exists(candidate))
+                    return candidate;
+            }
+
+            throw new InjectionException(
+                $"The target is {Describe(architecture)} and this process is not, so it has to be injected by the " +
+                $"{Describe(architecture)} {InjectorName}, which was not found. Looked in: " + string.Join(", ", candidates));
+        }
+
+        private static List<string> ArchitectureCandidates(Architecture architecture, string fileName)
+        {
+            var candidates = new List<string>();
+
+            foreach (var directory in ApplicationDirectories())
+            {
+                // Where the package's build targets copy them
+                candidates.Add(Path.Combine(directory, FolderName(architecture), fileName));
+                // The package's own layout, for hosts that copy runtimes\ as is
+                candidates.Add(Path.Combine(directory, "runtimes", "win-" + FolderName(architecture), "native", fileName));
+            }
+
+            return candidates;
+        }
+
+        /// <summary>
+        /// Where the application's files are: its base directory, and the directory of its
+        /// executable when that differs -- as it does for a single-file app that extracts its
+        /// content to a temporary directory, while files kept out of the bundle stay beside it.
+        /// </summary>
+        private static IEnumerable<string> ApplicationDirectories()
+        {
+            var baseDirectory = AppContext.BaseDirectory;
+
+            yield return baseDirectory;
+
+            var processDirectory = Path.GetDirectoryName(Environment.ProcessPath);
+
+            if (!string.IsNullOrEmpty(processDirectory)
+                && !string.Equals(Path.GetFullPath(processDirectory).TrimEnd('\\'), Path.GetFullPath(baseDirectory).TrimEnd('\\'), StringComparison.OrdinalIgnoreCase))
+            {
+                yield return processDirectory;
+            }
+        }
+
+        /// <summary>The architecture of a running process.</summary>
+        private static Architecture GetProcessArchitecture(IntPtr hProcess)
+        {
+            if (!Environment.Is64BitOperatingSystem)
+                return Architecture.X86;
+
+            if (!NativeMethods.IsWow64Process(hProcess, out var wow64))
+                throw new InjectionException("IsWow64Process failed.", new Win32Exception());
+
+            return wow64 ? Architecture.X86 : Architecture.X64;
+        }
+
+        /// <summary>The architecture an executable runs as, read from its PE header.</summary>
+        private static Architecture GetImageArchitecture(string exePath)
+        {
+            const ushort machineI386 = 0x014C;
+            const ushort machineAmd64 = 0x8664;
+
+            ushort machine;
+
+            try
+            {
+                using var stream = File.OpenRead(exePath);
+                using var reader = new BinaryReader(stream);
+
+                if (reader.ReadUInt16() != 0x5A4D) // MZ
+                    throw new InjectionException($"Not a Windows executable: {exePath}");
+
+                stream.Position = 0x3C;
+                stream.Position = reader.ReadInt32();
+
+                if (reader.ReadUInt32() != 0x00004550) // PE\0\0
+                    throw new InjectionException($"Not a Windows executable: {exePath}");
+
+                machine = reader.ReadUInt16();
+            }
+            catch (EndOfStreamException)
+            {
+                throw new InjectionException($"Not a Windows executable: {exePath}");
+            }
+
+            return machine switch
+            {
+                machineI386 => Architecture.X86,
+                machineAmd64 => Architecture.X64,
+                _ => throw new InjectionException(
+                    $"{Path.GetFileName(exePath)} is built for machine type 0x{machine:X4}; the Interposer is only built for x86 and x64."),
+            };
+        }
+
+        /// <summary>
+        /// Loads the DLL into a process whose overrides and pipes are already set up: directly
+        /// when it shares our architecture, through the injector built for its architecture
+        /// when it does not.
+        /// </summary>
+        private static void InjectInto(IntPtr hProcess, uint processId, Binaries binaries)
+        {
+            if (binaries.InjectorPath == null)
+                InjectDll(hProcess, binaries.DllPath);
+            else
+                InjectWithInjector(processId, binaries);
+        }
+
+        private static void InjectWithInjector(uint processId, Binaries binaries)
+        {
+            var startInfo = new ProcessStartInfo(binaries.InjectorPath!)
+            {
+                UseShellExecute = false,
+                CreateNoWindow = true,
+                RedirectStandardOutput = true,
+                RedirectStandardError = true,
+            };
+
+            // The injector's "inject into a running process" mode: by PID, with no options, so
+            // it creates no overrides of its own; ours are already in place.
+            startInfo.ArgumentList.Add(processId.ToString(System.Globalization.CultureInfo.InvariantCulture));
+            startInfo.ArgumentList.Add(binaries.DllPath);
+
+            using var injector = Process.Start(startInfo)
+                ?? throw new InjectionException($"Could not start {binaries.InjectorPath}.");
+
+            var output = injector.StandardOutput.ReadToEndAsync();
+            var error = injector.StandardError.ReadToEndAsync();
+
+            // LoadLibraryW runs the DLL's initialisation, which installs every hook; that is
+            // quick, but leave room for a slow disk.
+            if (!injector.WaitForExit(60_000))
+            {
+                try { injector.Kill(); } catch (InvalidOperationException) { }
+
+                throw new InjectionException($"The {Describe(binaries.Architecture)} injector did not finish injecting into PID {processId}.");
+            }
+
+            if (injector.ExitCode != 0)
+            {
+                // The injector reports failures on lines starting with [!]
+                var reasons = string.Join(" ", (output.Result + error.Result)
+                    .Split('\n')
+                    .Select(line => line.Trim())
+                    .Where(line => line.StartsWith("[!]", StringComparison.Ordinal))
+                    .Select(line => line.Substring(3).Trim()));
+
+                if (reasons.Length == 0)
+                    reasons = $"exit code {injector.ExitCode}";
+
+                throw new InjectionException(
+                    $"The {Describe(binaries.Architecture)} injector could not inject into PID {processId}: {reasons}");
+            }
         }
 
         private void CreateMappings(uint pid)

@@ -1,0 +1,195 @@
+name: Relay NuGet
+
+# Publishes LANCommander.Interposer.Relay, the relay server library a LANCommander server plugin
+# hosts, to NuGet for every vX.Y.Z or vX.Y.Z-suffix tag, alongside the LANCommander.Interposer
+# package from the NuGet workflow and under the same version.
+#
+# Triggered by the tag rather than by the GitHub release, as LANCommander's release workflows are:
+# here the release is created by the Release workflow with GITHUB_TOKEN, and events raised with that
+# token do not start other workflows.
+#
+# The assemblies are Authenticode-signed with Azure Artifact Signing before they are packed, using
+# the same secrets, variables and federated credential as the Release and NuGet workflows. Leaving
+# AZURE_SIGNING_ENDPOINT unset skips signing and publishes an unsigned package.
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Package version (e.g. 1.3.0 or 1.3.0-beta.1). Leave empty to use the tag version.'
+        required: false
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: read
+
+jobs:
+  prep:
+    runs-on: ubuntu-latest
+    outputs:
+      publish: ${{ steps.version.outputs.publish }}
+      version_tag: ${{ steps.version.outputs.version_tag }}
+      version_semver: ${{ steps.version.outputs.version_semver }}
+    steps:
+      - name: Parse Version
+        id: version
+        run: |
+          if [ -n "${{ inputs.version }}" ]; then
+            VERSION="${{ inputs.version }}"
+          else
+            VERSION="${GITHUB_REF_NAME#v}"
+          fi
+
+          # Anything else (a branch run without a version, a malformed tag) is skipped, not failed
+          if [[ ! "$VERSION" =~ ^([0-9]+\.[0-9]+\.[0-9]+)(-.+)?$ ]]; then
+            echo "::notice::'$VERSION' is not X.Y.Z or X.Y.Z-suffix. Skipping publish."
+            echo "publish=false" >> $GITHUB_OUTPUT
+            exit 0
+          fi
+
+          # version_tag keeps the prerelease suffix for the package version; version_semver drops it
+          # because AssemblyVersion only accepts numeric parts
+          echo "publish=true" >> $GITHUB_OUTPUT
+          echo "version_tag=$VERSION" >> $GITHUB_OUTPUT
+          echo "version_semver=${BASH_REMATCH[1]}" >> $GITHUB_OUTPUT
+
+  publish:
+    needs: prep
+    if: needs.prep.outputs.publish == 'true'
+    runs-on: windows-latest
+
+    # Load-bearing for code signing: the Azure federated credential's subject ends in
+    # ":environment:release", which only appears in the OIDC token when the job declares an
+    # environment. See the Release workflow for the full note.
+    environment: release
+
+    permissions:
+      contents: read
+      id-token: write # OIDC token for Azure Artifact Signing
+
+    env:
+      SIGNING_ENABLED: ${{ vars.AZURE_SIGNING_ENDPOINT != '' && 'true' || 'false' }}
+      PROJECT: LANCommander.Interposer.Relay/LANCommander.Interposer.Relay.csproj
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # 8.0 is also the runtime the signing action documents as a prerequisite
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: |
+            8.0.x
+            9.0.x
+            10.0.x
+
+      - name: Restore
+        run: dotnet restore ${{ env.PROJECT }}
+
+      - name: Build
+        run: dotnet build ${{ env.PROJECT }} --no-restore -c Release -p:Version="${{ needs.prep.outputs.version_tag }}" -p:AssemblyVersion="${{ needs.prep.outputs.version_semver }}"
+
+      - name: Report signing configuration
+        shell: pwsh
+        run: |
+          if ($env:SIGNING_ENABLED -ne 'true') {
+            Write-Host "::warning::AZURE_SIGNING_ENDPOINT is not set. Publishing an unsigned package."
+          }
+
+      # One assembly per target framework, signed in bin/ where pack --no-build takes them from
+      - name: Collect Files to Sign
+        id: targets
+        if: env.SIGNING_ENABLED == 'true'
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+
+          $files = Get-ChildItem -Path 'LANCommander.Interposer.Relay\bin\Release' -Recurse -File -Filter 'LANCommander.Interposer.Relay.dll' |
+            Select-Object -ExpandProperty FullName | Sort-Object -Unique
+
+          if (-not $files) {
+            throw "Found no assemblies to sign. Refusing to sign nothing."
+          }
+
+          $files | ForEach-Object { Write-Host "  $($_.Substring($PWD.Path.Length + 1))" }
+
+          "files<<SIGNTARGETS" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
+          $files               | Out-File -FilePath $env:GITHUB_OUTPUT -Append
+          "SIGNTARGETS"        | Out-File -FilePath $env:GITHUB_OUTPUT -Append
+
+      - name: Azure Login
+        if: env.SIGNING_ENABLED == 'true'
+        uses: azure/login@v3
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Sign Assemblies
+        if: env.SIGNING_ENABLED == 'true'
+        uses: azure/artifact-signing-action@v2
+        with:
+          endpoint: ${{ vars.AZURE_SIGNING_ENDPOINT }}
+          signing-account-name: ${{ vars.AZURE_SIGNING_ACCOUNT_NAME }}
+          certificate-profile-name: ${{ vars.AZURE_SIGNING_CERT_PROFILE_NAME }}
+          files: ${{ steps.targets.outputs.files }}
+          file-digest: SHA256
+          timestamp-rfc3161: http://timestamp.acs.microsoft.com
+          timestamp-digest: SHA256
+          # Pin authentication to the session established by azure/login rather than
+          # letting DefaultAzureCredential fall through a chain of unconfigured options.
+          exclude-environment-credential: true
+          exclude-azure-cli-credential: false
+
+      - name: Pack NuGet package with symbols
+        run: dotnet pack ${{ env.PROJECT }} --no-build -c Release -p:Version="${{ needs.prep.outputs.version_tag }}" -p:AssemblyVersion="${{ needs.prep.outputs.version_semver }}" -o ./artifacts
+
+      # Checks the copies inside the package, so a pack that picked up an unsigned build fails here
+      - name: Verify Signatures
+        if: env.SIGNING_ENABLED == 'true'
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+
+          $package = Get-Item ./artifacts/*.nupkg | Where-Object Name -notlike '*.symbols.nupkg' | Select-Object -First 1
+          $staging = Join-Path $PWD 'verify-staging'
+          [System.IO.Compression.ZipFile]::ExtractToDirectory($package.FullName, $staging)
+
+          $assemblies = Get-ChildItem -Path (Join-Path $staging 'lib') -Recurse -File -Filter 'LANCommander.Interposer.Relay.dll'
+          if (-not $assemblies) { throw "$($package.Name) holds no assemblies" }
+
+          $failed = @()
+
+          foreach ($assembly in $assemblies) {
+            $signature = Get-AuthenticodeSignature -FilePath $assembly.FullName
+            $relative = $assembly.FullName.Substring($staging.Length + 1)
+
+            if ($signature.Status -ne 'Valid') {
+              $failed += "$relative : $($signature.Status) - $($signature.StatusMessage)"
+            } elseif (-not $signature.TimeStamperCertificate) {
+              $failed += "$relative : signed but not timestamped"
+            }
+          }
+
+          if ($failed) { throw "Signature verification failed:`n$($failed -join "`n")" }
+
+          Write-Host "$($package.Name) : $($assemblies.Count) assemblies valid"
+
+      # The glob is expanded here because dotnet nuget push on Windows treats ./artifacts/*.nupkg as a
+      # literal path. The .snupkg next to the package is pushed automatically; --skip-duplicate so
+      # re-running a tag does not fail on 409.
+      - name: Publish NuGet package
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+
+          $packages = Get-ChildItem ./artifacts -Filter *.nupkg
+          if (-not $packages) { throw "No .nupkg found in ./artifacts" }
+
+          foreach ($package in $packages) {
+            dotnet nuget push $package.FullName --api-key ${{ secrets.NUGET_API_KEY }} --source https://api.nuget.org/v3/index.json --skip-duplicate
+            if ($LASTEXITCODE -ne 0) { throw "Failed to push $($package.Name)" }
+          }

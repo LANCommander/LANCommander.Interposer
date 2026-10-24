@@ -1,14 +1,50 @@
 <Project xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
-  <!-- Copy the native Interposer DLL matching the consumer's platform to the output directory. -->
-  <ItemGroup Condition="'$(PlatformTarget)' == 'x86' Or '$(RuntimeIdentifier)' == 'win-x86'">
-    <None Include="$(MSBuildThisFileDirectory)..\runtimes\win-x86\native\LANCommander.Interposer.dll"
-          Condition="Exists('$(MSBuildThisFileDirectory)..\runtimes\win-x86\native\LANCommander.Interposer.dll')"
+  <PropertyGroup>
+    <_InterposerRuntimes>$(MSBuildThisFileDirectory)..\runtimes\</_InterposerRuntimes>
+    <_InterposerNative>$(MSBuildThisFileDirectory)..\native\</_InterposerNative>
+    <_InterposerForWindows Condition="'$(RuntimeIdentifier)' == '' Or $(RuntimeIdentifier.StartsWith('win'))">true</_InterposerForWindows>
+  </PropertyGroup>
+
+  <!--
+    Both architectures' DLL and injector, under x86\ and x64\ in the output. InterposerService
+    picks the pair matching each game it launches: it injects a game of its own architecture
+    directly, and one of the other architecture through that architecture's injector. They are
+    excluded from single-file bundles because they are loaded into, and run as, other processes,
+    which can only use real files. Left out of builds for other operating systems.
+  -->
+  <ItemGroup Condition="'$(_InterposerForWindows)' == 'true'">
+    <None Include="$(_InterposerNative)x86\LANCommander.Interposer.dll"
+          Condition="Exists('$(_InterposerNative)x86\LANCommander.Interposer.dll')"
+          CopyToOutputDirectory="PreserveNewest"
+          ExcludeFromSingleFile="true"
+          Link="x86\LANCommander.Interposer.dll" />
+    <None Include="$(_InterposerNative)x86\LANCommander.Interposer.Injector.exe"
+          Condition="Exists('$(_InterposerNative)x86\LANCommander.Interposer.Injector.exe')"
+          CopyToOutputDirectory="PreserveNewest"
+          ExcludeFromSingleFile="true"
+          Link="x86\LANCommander.Interposer.Injector.exe" />
+    <None Include="$(_InterposerNative)x64\LANCommander.Interposer.dll"
+          Condition="Exists('$(_InterposerNative)x64\LANCommander.Interposer.dll')"
+          CopyToOutputDirectory="PreserveNewest"
+          ExcludeFromSingleFile="true"
+          Link="x64\LANCommander.Interposer.dll" />
+    <None Include="$(_InterposerNative)x64\LANCommander.Interposer.Injector.exe"
+          Condition="Exists('$(_InterposerNative)x64\LANCommander.Interposer.Injector.exe')"
+          CopyToOutputDirectory="PreserveNewest"
+          ExcludeFromSingleFile="true"
+          Link="x64\LANCommander.Interposer.Injector.exe" />
+  </ItemGroup>
+
+  <!-- The DLL matching the consumer's platform beside the application, as before, for hosts that pass its path themselves. -->
+  <ItemGroup Condition="'$(_InterposerForWindows)' == 'true' And ('$(PlatformTarget)' == 'x86' Or '$(RuntimeIdentifier)' == 'win-x86')">
+    <None Include="$(_InterposerRuntimes)win-x86\native\LANCommander.Interposer.dll"
+          Condition="Exists('$(_InterposerRuntimes)win-x86\native\LANCommander.Interposer.dll')"
           CopyToOutputDirectory="PreserveNewest"
           Link="LANCommander.Interposer.dll" />
   </ItemGroup>
-  <ItemGroup Condition="'$(PlatformTarget)' != 'x86' And '$(RuntimeIdentifier)' != 'win-x86'">
-    <None Include="$(MSBuildThisFileDirectory)..\runtimes\win-x64\native\LANCommander.Interposer.dll"
-          Condition="Exists('$(MSBuildThisFileDirectory)..\runtimes\win-x64\native\LANCommander.Interposer.dll')"
+  <ItemGroup Condition="'$(_InterposerForWindows)' == 'true' And '$(PlatformTarget)' != 'x86' And '$(RuntimeIdentifier)' != 'win-x86'">
+    <None Include="$(_InterposerRuntimes)win-x64\native\LANCommander.Interposer.dll"
+          Condition="Exists('$(_InterposerRuntimes)win-x64\native\LANCommander.Interposer.dll')"
           CopyToOutputDirectory="PreserveNewest"
           Link="LANCommander.Interposer.dll" />
   </ItemGroup>

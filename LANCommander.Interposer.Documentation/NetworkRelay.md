@@ -98,7 +98,10 @@ interposer.RelayStateChanged += (_, e) => Log($"relay {e.State} {e.VirtualAddres
 interposer.RelayPeerJoined   += (_, e) => Log($"{e.Name} joined at {e.VirtualAddress}");
 interposer.RelayPeerLeft     += (_, e) => Log($"{e.Name} left");
 
-var game = interposer.Start(new ProcessStartInfo(gameExe));
+// A game with the Interposer beside it as a proxy DLL loads it itself; injecting would load it twice
+var game = InterposerService.IsDeployedAsProxy(gameExe)
+    ? interposer.StartWithProxy(new ProcessStartInfo(gameExe))
+    : interposer.Start(new ProcessStartInfo(gameExe));
 
 RelayStatus status = await interposer.GetRelayStatusAsync();   // state, address, peers, counters
 await interposer.ConnectRelayAsync(new RelayOptions { Network = "another-lobby" });
@@ -107,6 +110,7 @@ await interposer.DisconnectRelayAsync();
 
 | Member | Purpose |
 |---|---|
+| `Start` / `StartWithProxy` | Launch the game with the DLL injected, or, for a game that loads the Interposer as a proxy DLL, with the options in place for the proxy to read. Either works for 32-bit and 64-bit games, whatever the launcher is. |
 | `Relay` | Options for the next `Start` / `Inject`. Setting it at all — even with `Enabled = false` — installs the socket hooks, which the DLL can only do at startup. Set it whenever the launcher may want to connect later. |
 | `ConnectRelayAsync(options)` | Connect or reconnect, applying new options on top of the current ones. |
 | `DisconnectRelayAsync()` | Leave the network and stop retrying. The address stays assigned for the next connect. |

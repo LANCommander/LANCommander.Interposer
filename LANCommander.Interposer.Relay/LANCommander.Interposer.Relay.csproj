@@ -24,10 +24,19 @@
     <PackageProjectUrl>https://github.com/LANCommander/LANCommander.Interposer</PackageProjectUrl>
     <RepositoryUrl>https://github.com/LANCommander/LANCommander.Interposer</RepositoryUrl>
     <RepositoryType>git</RepositoryType>
+    <PackageIcon>icon.png</PackageIcon>
+    <PackageReadmeFile>README.md</PackageReadmeFile>
+    <IncludeSymbols>true</IncludeSymbols>
+    <SymbolPackageFormat>snupkg</SymbolPackageFormat>
 
     <!-- Version: set by CI from git tag, defaults to 0.0.0-local for dev builds -->
     <Version>0.0.0-local</Version>
   </PropertyGroup>
+
+  <ItemGroup>
+    <None Include="..\LANCommander.Interposer.NET\icon.png" Pack="true" PackagePath="\" />
+    <None Include="README.md" Pack="true" PackagePath="\" />
+  </ItemGroup>
 
   <ItemGroup>
     <PackageReference Include="Microsoft.Extensions.Logging.Abstractions" Version="8.0.0" />
