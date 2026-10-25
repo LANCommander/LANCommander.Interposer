@@ -4,7 +4,7 @@
 
 Everything goes through `InterposerService`:
 
-- **Injection** - Launch processes with `ProcessStartInfo` or inject into running `Process` instances, with optional runtime overrides for username, computer name, and FastDL URL.
+- **Injection** - Launch processes with `ProcessStartInfo` or inject into running `Process` instances, with optional runtime overrides for username, computer name, FastDL URL, a config overlay and a per-game base directory.
 - **Plugin API** - Logging, config, virtual registry, and rich presence (in-process only).
 - **Hook Events** - Subscribe to file, registry, DNS, network, and identity events (in-process only).
 - **Network Relay** - Put a game on a virtual LAN through a LANCommander relay server, and drive it from the launcher while it runs.
@@ -120,6 +120,36 @@ await interposer.DisconnectRelayAsync();
 Setting `Relay` at all - even with `Enabled = false` - makes the DLL install its socket hooks, which it can only do at startup; set it whenever the launcher may connect the game later. The relay events also arrive over the event pipe, so they need no `EnableEvents`. Inside the game process, `GetRelayStatus()`, `ConnectRelay()` and `DisconnectRelay()` call the DLL directly.
 
 The server side is the separate `LANCommander.Interposer.Relay` library. See the [Network Relay](https://github.com/LANCommander/LANCommander.Interposer/blob/main/LANCommander.Interposer.Documentation/NetworkRelay.md) docs.
+
+## One DLL, Many Games
+
+The package puts the DLL beside your application, and the DLL reads `.interposer\` from beside itself, so every game injected from it would share one Config.yml, one virtual registry and one log folder. Give each launch a base directory and a config overlay instead:
+
+```csharp
+using var interposer = new InterposerService
+{
+    // Stands in for the DLL's own directory: .interposer\ (Config.yml, Registry.reg,
+    // Logs, Downloads, Plugins) lives under it, and %INTERPOSERDIR% expands to it
+    BaseDirectory = @"C:\Games\MyGame\.lancommander\interposer",
+
+    // Merged over Config.yml for this launch only; the file is not changed
+    ConfigOverlay = """
+        OsVersion:
+          Version: WindowsXP
+        RichPresence:
+          Discord:
+            Enabled: true
+            ApplicationId: '123456789012345678'
+        AudioDevices: ~
+        """,
+};
+
+Process game = interposer.Start(new ProcessStartInfo(@"C:\Games\MyGame\game.exe"));
+```
+
+The overlay merges key by key: maps merge recursively, a null (`~`) removes the key (above, it turns off an `AudioDevices` filter the file sets), and any other value replaces the file's, so a `FileRedirects` list in the overlay is the whole list. `Username`, `ComputerName`, `FastDlUrl` and `Relay` are applied on top of the merged config. A game that has the Interposer installed beside it (`InterposerService.IsDeployedAsProxy`) takes the overlay too, through `StartWithProxy`; leave `BaseDirectory` unset for it, because its own Config.yml and Registry.reg are beside the DLL.
+
+`InterposerOptionSchema` carries the Interposer redistributable's Id and its LANCommander option schema, read from the redistributable's manifest at build time, so a host that bundles the DLL can offer the same options the redistributable does.
 
 ## Hook Events (in-process)
 

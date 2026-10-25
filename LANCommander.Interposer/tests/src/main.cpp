@@ -3616,6 +3616,323 @@ static void RunIsolatedTests(const std::wstring& exeDir, const std::wstring& tes
 }
 
 // ============================================================
+// Launcher config tests  (separate processes)
+// ============================================================
+// A launcher that injects one copy of the DLL into many games hands each its own
+// base directory (Local\InterposerBaseDirectory_<pid>) and a config overlay
+// (Local\InterposerConfig_<pid>). Both are read once, in DLL_PROCESS_ATTACH, and
+// change where every .interposer file lives, so they cannot share this process:
+// each mode re-runs the EXE with --launcher-config against a DLL copy of its
+// own. The child creates the mappings itself, under its own PID, before it loads
+// the DLL -- exactly what InterposerService does for the game it starts.
+//
+//   merge         Config.yml in the base directory, overlay merged over it.
+//   overlay-only  No Config.yml anywhere the DLL should look; the base directory
+//                 does not exist yet. The bundled-launcher case.
+//
+// Both modes put a decoy Config.yml beside the DLL, which must be ignored.
+
+static HANDLE CreateLauncherMapping(const wchar_t* prefix, const std::string& utf8)
+{
+    wchar_t name[96]{};
+    swprintf_s(name, L"Local\\%ls_%lu", prefix, GetCurrentProcessId());
+
+    const DWORD size = static_cast<DWORD>(utf8.size() + 1);
+    HANDLE mapping = CreateFileMappingW(INVALID_HANDLE_VALUE, nullptr, PAGE_READWRITE, 0, size, name);
+
+    if (!mapping)
+        return nullptr;
+
+    if (void* view = MapViewOfFile(mapping, FILE_MAP_WRITE, 0, 0, size))
+    {
+        memcpy(view, utf8.c_str(), size);
+        UnmapViewOfFile(view);
+    }
+
+    return mapping;
+}
+
+static std::wstring QueryUserName()
+{
+    wchar_t buf[256]{};
+    DWORD cch = ARRAYSIZE(buf);
+    return GetUserNameW(buf, &cch) ? std::wstring(buf) : std::wstring();
+}
+
+static std::wstring QueryComputerName()
+{
+    wchar_t buf[256]{};
+    DWORD cch = ARRAYSIZE(buf);
+    return GetComputerNameW(buf, &cch) ? std::wstring(buf) : std::wstring();
+}
+
+static std::wstring WithSeparator(std::wstring path)
+{
+    if (!path.empty() && path.back() != L'\\')
+        path += L'\\';
+    return path;
+}
+
+// Runs in the child process. Returns the number of failed assertions.
+static int RunLauncherConfigChild(const wchar_t* dllDirArg, const wchar_t* baseDirArg, const wchar_t* modeArg)
+{
+    // Passed without trailing separators; see RunIsolatedChild.
+    const std::wstring dllDir  = WithSeparator(dllDirArg);
+    const std::wstring baseDir = WithSeparator(baseDirArg);
+    const bool merge = wcscmp(modeArg, L"merge") == 0;
+
+    const std::wstring baseInterposer = baseDir + L".interposer\\";
+    const std::wstring dllInterposer  = dllDir + L".interposer\\";
+
+    wprintf(merge ? L"\n--- Launcher Config Tests: overlay over Config.yml (child process) ---\n"
+                  : L"\n--- Launcher Config Tests: overlay only (child process) ---\n");
+
+    std::string baseUtf8 = WideToUtf8(baseDir);
+
+    const std::string overlay = merge
+        ? "Player:\n"
+          "  Username: OverlayUser\n"
+          "OsVersion: ~\n"
+          "Plugins:\n"
+          "  Probe:\n"
+          "    Shared: overlay\n"
+          "    FromOverlay: overlay\n"
+        : "Player:\n"
+          "  Username: OnlyOverlay\n"
+          "Plugins:\n"
+          "  Probe:\n"
+          "    Key: value\n";
+
+    HANDLE baseMapping    = CreateLauncherMapping(L"InterposerBaseDirectory", baseUtf8);
+    HANDLE overlayMapping = CreateLauncherMapping(L"InterposerConfig", overlay);
+
+    if (!baseMapping || !overlayMapping)
+    {
+        wprintf(L"  FAIL  LC-00: creating the launcher mappings (GLE=%lu)\n", GetLastError());
+        return 1;
+    }
+
+    HMODULE hDll = LoadLibraryW((dllDir + L"LANCommander.Interposer.dll").c_str());
+
+    if (!hDll)
+    {
+        wprintf(L"  FAIL  LC-00: child could not load the DLL (GLE=%lu)\n", GetLastError());
+        return 1;
+    }
+
+    auto get = reinterpret_cast<FnTestGetConfig>(
+        reinterpret_cast<void*>(GetProcAddress(hDll, "InterposerGetConfigString")));
+    auto set = reinterpret_cast<FnTestSetConfig>(
+        reinterpret_cast<void*>(GetProcAddress(hDll, "InterposerSetConfigString")));
+
+    if (merge)
+    {
+        ASSERT(QueryUserName() == L"OverlayUser",
+            L"LC-01: a key the overlay sets wins over Config.yml");
+
+        // FileComputer, not DecoyComputer: the base directory's Config.yml was
+        // read, the one beside the DLL was not, and a sibling key the overlay did
+        // not name survived the merge.
+        ASSERT(QueryComputerName() == L"FileComputer",
+            L"LC-02: Config.yml comes from the base directory and keys the overlay omits survive");
+
+        // Config.yml asks for Windows XP; the overlay's null removes the section.
+        {
+            using FnRtlGetVersion = LONG (WINAPI*)(OSVERSIONINFOW*);
+            auto rtlGetVersion = reinterpret_cast<FnRtlGetVersion>(
+                reinterpret_cast<void*>(GetProcAddress(GetModuleHandleW(L"ntdll.dll"), "RtlGetVersion")));
+
+            OSVERSIONINFOW info{};
+            info.dwOSVersionInfoSize = sizeof(info);
+
+            ASSERT(rtlGetVersion && rtlGetVersion(&info) == 0 && info.dwMajorVersion >= 6,
+                L"LC-03: a null in the overlay removes the section Config.yml set");
+        }
+
+        ASSERT(get && GetConfig(get, L"Plugins.Probe.Shared") == L"overlay" &&
+                      GetConfig(get, L"Plugins.Probe.FromFile") == L"file" &&
+                      GetConfig(get, L"Plugins.Probe.FromOverlay") == L"overlay",
+            L"LC-04: maps merge key by key, all the way down");
+
+        ASSERT(set && set(L"Plugins.Probe.Written", L"yes") &&
+                      GetConfig(get, L"Plugins.Probe.Written") == L"yes",
+            L"LC-05: a plugin write succeeds under an overlay");
+
+        // The base directory's store is seeded with this key, so it is virtual.
+        {
+            const wchar_t* written = L"LauncherWrite";
+            LSTATUS st = RegSetKeyValueW(HKEY_CURRENT_USER, L"Software\\LauncherConfigSeed", L"Probe",
+                REG_SZ, written, static_cast<DWORD>((wcslen(written) + 1) * sizeof(wchar_t)));
+
+            ASSERT(st == ERROR_SUCCESS, L"LC-06: a write to a key the base directory's store defines succeeds");
+        }
+
+        // %INTERPOSERDIR% is the base directory, not the DLL's.
+        {
+            HANDLE h = CreateFileW((dllDir + L"lc_redirect_probe.txt").c_str(), GENERIC_WRITE, 0,
+                nullptr, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
+
+            // (No percent signs in ASSERT messages: they become part of a wprintf format.)
+            ASSERT(h != INVALID_HANDLE_VALUE, L"LC-07: a write through an INTERPOSERDIR redirect opens");
+
+            if (h != INVALID_HANDLE_VALUE)
+            {
+                DWORD w = 0;
+                ::WriteFile(h, "x", 1, &w, nullptr);
+                CloseHandle(h);
+            }
+        }
+    }
+    else
+    {
+        ASSERT(QueryUserName() == L"OnlyOverlay",
+            L"LO-01: the overlay applies with no Config.yml at all");
+
+        ASSERT(QueryComputerName() != L"DecoyComputer",
+            L"LO-02: the Config.yml beside the DLL is not read");
+
+        ASSERT(get && GetConfig(get, L"Plugins.Probe.Key") == L"value",
+            L"LO-03: the overlay is what config reads see");
+    }
+
+    FreeLibrary(hDll);
+    CloseHandle(baseMapping);
+    CloseHandle(overlayMapping);
+
+    // Hooks are gone; what follows sees the real file system.
+    const std::string log = ReadFileAsUtf8(FindFirstLogFile(baseInterposer + L"Logs\\"));
+
+    if (merge)
+    {
+        ASSERT(ReadFileAsWide(baseInterposer + L"Registry.reg").find(L"LauncherWrite") != std::wstring::npos &&
+               GetFileAttributesW((dllInterposer + L"Registry.reg").c_str()) == INVALID_FILE_ATTRIBUTES,
+            L"LC-08: the virtual registry persists to the base directory, not beside the DLL");
+
+        ASSERT(log.find("applied the launcher's config overlay") != std::string::npos &&
+               FindFirstLogFile(dllInterposer + L"Logs\\").empty(),
+            L"LC-09: the session log is written under the base directory and records the overlay");
+
+        // Probe is a flow map in the file, so the patcher declines and the
+        // fallback re-renders the section -- from the file's own tree, so none of
+        // the overlay's values leak into the file.
+        {
+            const std::string yml = ReadFileAsUtf8(baseInterposer + L"Config.yml");
+
+            ASSERT(yml.find("Written: yes") != std::string::npos &&
+                   yml.find("FromFile: file") != std::string::npos &&
+                   yml.find("overlay") == std::string::npos &&
+                   yml.find("OverlayUser") == std::string::npos,
+                L"LC-10: a plugin write reaches Config.yml without baking the overlay into it");
+        }
+
+        ASSERT(GetFileAttributesW((baseDir + L"redirected.txt").c_str()) != INVALID_FILE_ATTRIBUTES,
+            L"LC-11: the INTERPOSERDIR token expands to the base directory");
+    }
+    else
+    {
+        ASSERT(log.find("no Config.yml") != std::string::npos,
+            L"LO-04: the base directory is created, and the log there records the overlay");
+    }
+
+    return g_fail;
+}
+
+// Runs in the parent. Stages one child per mode and folds the outcomes into
+// this process's tally.
+static void RunLauncherConfigTests(const std::wstring& exeDir, const std::wstring& testTmpDir)
+{
+    const std::wstring root    = testTmpDir + L"LauncherConfig\\";
+    const std::wstring exePath = exeDir + L"LANCommander.Interposer.Tests.exe";
+
+    for (const wchar_t* mode : { L"merge", L"overlay-only" })
+    {
+        const bool merge = wcscmp(mode, L"merge") == 0;
+
+        const std::wstring childDir = root + mode + L"\\";
+        const std::wstring dllDir   = childDir + L"Dll\\";
+
+        // The overlay-only base directory is left uncreated, two levels deep.
+        const std::wstring baseDir  = merge ? childDir + L"Base\\" : childDir + L"Base\\Nested\\Deeper\\";
+
+        CreateDirs(dllDir + L".interposer\\");
+
+        if (!CopyFileW((exeDir + L"LANCommander.Interposer.dll").c_str(),
+                       (dllDir + L"LANCommander.Interposer.dll").c_str(), FALSE))
+        {
+            ASSERT(false, L"LC-00: staging a launcher-config child's copy of the DLL");
+            continue;
+        }
+
+        // The decoy: read only if the base directory override were ignored.
+        WriteTextFile(dllDir + L".interposer\\Config.yml",
+            "Player:\n"
+            "  ComputerName: DecoyComputer\n");
+
+        if (merge)
+        {
+            CreateDirs(baseDir + L".interposer\\");
+
+            WriteTextFile(baseDir + L".interposer\\Config.yml",
+                "Logging:\n"
+                "  Identity: true\n"
+                "\n"
+                "Player:\n"
+                "  Username: FileUser\n"
+                "  ComputerName: FileComputer\n"
+                "\n"
+                "OsVersion:\n"
+                "  Version: 'Windows XP'\n"
+                "\n"
+                "FileRedirects:\n"
+                "  - Pattern: '.*\\\\lc_redirect_probe\\.txt$'\n"
+                "    Replacement: '%INTERPOSERDIR%\\redirected.txt'\n"
+                "\n"
+                "Plugins:\n"
+                "  Probe: { FromFile: file, Shared: file }\n");
+
+            WriteTextFile(baseDir + L".interposer\\Registry.reg",
+                "Windows Registry Editor Version 5.00\r\n"
+                "\r\n"
+                "[HKEY_CURRENT_USER\\Software\\LauncherConfigSeed]\r\n"
+                "\"Seeded\"=\"yes\"\r\n");
+        }
+
+        // Trailing separators come off for the command line; see RunIsolatedTests.
+        const std::wstring command = L"\"" + exePath + L"\" --launcher-config \"" +
+            dllDir.substr(0, dllDir.size() - 1) + L"\" \"" +
+            baseDir.substr(0, baseDir.size() - 1) + L"\" " + mode;
+
+        STARTUPINFOW si{};
+        si.cb = sizeof(si);
+        PROCESS_INFORMATION pi{};
+
+        std::wstring mutableCommand = command;
+
+        if (!CreateProcessW(exePath.c_str(), mutableCommand.data(), nullptr, nullptr,
+                TRUE, 0, nullptr, nullptr, &si, &pi))
+        {
+            ASSERT(false, L"LC-00: launching a launcher-config child process");
+            continue;
+        }
+
+        WaitForSingleObject(pi.hProcess, 120 * 1000);
+
+        DWORD exitCode = 1;
+        GetExitCodeProcess(pi.hProcess, &exitCode);
+        CloseHandle(pi.hThread);
+        CloseHandle(pi.hProcess);
+
+        if (merge)
+            ASSERT(exitCode == 0, L"LC-00: the overlay-over-Config.yml child reported no failures");
+        else
+            ASSERT(exitCode == 0, L"LO-00: the overlay-only child reported no failures");
+    }
+
+    std::error_code ignored;
+    std::filesystem::remove_all(root, ignored);
+}
+
+// ============================================================
 // Network relay tests  (two peer processes + a relay server)
 // ============================================================
 // The relay needs a server and two members to be worth testing, so the parent
@@ -4488,6 +4805,11 @@ int wmain(int argc, wchar_t** argv)
     if (argc >= 3 && wcscmp(argv[1], L"--isolated") == 0)
         return RunIsolatedChild(argv[2]);
 
+    // Re-entry from RunLauncherConfigTests: one child per mode, each with a base
+    // directory and config overlay of its own.
+    if (argc >= 5 && wcscmp(argv[1], L"--launcher-config") == 0)
+        return RunLauncherConfigChild(argv[2], argv[3], argv[4]);
+
     // Re-entry from RunRelayTests: one of the two relay peers.
     if (argc >= 5 && wcscmp(argv[1], L"--relay-peer") == 0)
         return RunRelayChild(argv[2], argv[3], argv[4]);
@@ -4607,6 +4929,9 @@ int wmain(int argc, wchar_t** argv)
     // Last, because it spawns a second process that loads its own copy of the
     // DLL -- nothing after it should depend on this process's hooks.
     RunIsolatedTests(exeDir, testTmpDir);
+
+    // Likewise: a base directory and config overlay are read once, at load.
+    RunLauncherConfigTests(exeDir, testTmpDir);
 
     // Likewise separate processes: two relay peers, each with its own DLL.
     RunRelayTests(exeDir, testTmpDir);

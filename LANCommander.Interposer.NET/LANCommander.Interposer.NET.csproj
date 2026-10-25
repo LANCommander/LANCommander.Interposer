@@ -57,6 +57,13 @@
     <None Include="runtimes\win-x86\native\*" Pack="true" PackagePath="native\x86" />
   </ItemGroup>
 
+  <!-- The redistributable's manifest, for InterposerOptionSchema: hosts that bundle the
+       DLL describe the same options the redistributable does. -->
+  <ItemGroup>
+    <EmbeddedResource Include="..\LANCommander.Interposer.Redistributable\Manifest.yml"
+                      LogicalName="LANCommander.Interposer.Redistributable.Manifest.yml" />
+  </ItemGroup>
+
   <!-- MSBuild targets that copy the native DLL to the consumer's output directory -->
   <ItemGroup>
     <None Include="buildTransitive\**" Pack="true" PackagePath="buildTransitive" />

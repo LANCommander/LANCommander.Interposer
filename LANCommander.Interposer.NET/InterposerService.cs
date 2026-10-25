@@ -261,6 +261,8 @@ namespace LANCommander.Interposer
         private IntPtr _usernameMmf;
         private IntPtr _computerNameMmf;
         private IntPtr _relayMmf;
+        private IntPtr _configOverlayMmf;
+        private IntPtr _baseDirectoryMmf;
 
         private ControlChannel? _control;
 
@@ -305,6 +307,42 @@ namespace LANCommander.Interposer
         /// </para>
         /// </summary>
         public RelayOptions? Relay { get; set; }
+
+        /// <summary>
+        /// Optional YAML document layered over <c>.interposer\Config.yml</c> for this
+        /// launch only; the file is never changed. When set, a named memory-mapped file
+        /// carries it to the DLL, which merges it before reading any setting:
+        /// <list type="bullet">
+        /// <item>maps merge key by key, recursively;</item>
+        /// <item>a null (<c>~</c>) removes the key, e.g. <c>OsVersion: ~</c> turns off
+        /// an OS version the file sets;</item>
+        /// <item>anything else -- a scalar, a sequence -- replaces the file's value, so a
+        /// <c>FileRedirects</c> list here is the whole list.</item>
+        /// </list>
+        /// <para>
+        /// The overrides above still win over it: <see cref="Username"/>,
+        /// <see cref="ComputerName"/>, <see cref="FastDlUrl"/> and <see cref="Relay"/>
+        /// are applied on top of the merged config. Values the overlay sets read back
+        /// through <see cref="QueryConfigStringAsync"/>. A malformed overlay is ignored
+        /// and reported in the session log.
+        /// </para>
+        /// </summary>
+        public string? ConfigOverlay { get; set; }
+
+        /// <summary>
+        /// Optional directory for the DLL to treat as its own: <c>.interposer\</c>
+        /// (Config.yml, the virtual registry, logs, FastDL downloads and plugins) is
+        /// looked up under it, relative <c>Registry.Files</c> entries resolve against
+        /// it, and <c>%INTERPOSERDIR%</c> expands to it. It is created if missing.
+        /// <para>
+        /// Set this when one copy of the DLL -- the one beside the launcher -- is
+        /// injected into many games, so each game gets its own config, registry and
+        /// logs. Leave it unset for a game that has the Interposer installed beside it
+        /// (<see cref="IsDeployedAsProxy"/>): that game's Config.yml and Registry.reg
+        /// are beside the DLL, and a base directory would hide them.
+        /// </para>
+        /// </summary>
+        public string? BaseDirectory { get; set; }
 
         // =================================================================
         // Events
@@ -776,6 +814,8 @@ namespace LANCommander.Interposer
             CloseMmf(ref _usernameMmf);
             CloseMmf(ref _computerNameMmf);
             CloseMmf(ref _relayMmf);
+            CloseMmf(ref _configOverlayMmf);
+            CloseMmf(ref _baseDirectoryMmf);
         }
 
         // =================================================================
@@ -1381,6 +1421,17 @@ namespace LANCommander.Interposer
             if (Relay != null)
                 _relayMmf = CreateUtf8Mmf($"Local\\InterposerRelay_{pid}", Relay.ToYaml(), 8192);
 
+            // The DLL maps these whole and reads up to the first NUL, so they are sized
+            // to their content rather than to a fixed limit.
+            if (!string.IsNullOrWhiteSpace(ConfigOverlay))
+                _configOverlayMmf = CreateUtf8Mmf($"Local\\InterposerConfig_{pid}", ConfigOverlay, Utf8Size(ConfigOverlay));
+
+            if (!string.IsNullOrWhiteSpace(BaseDirectory))
+            {
+                var baseDirectory = Path.GetFullPath(BaseDirectory);
+                _baseDirectoryMmf = CreateUtf8Mmf($"Local\\InterposerBaseDirectory_{pid}", baseDirectory, Utf8Size(baseDirectory));
+            }
+
             // Like the event pipe, listening before injection: the DLL connects once,
             // from DLL_PROCESS_ATTACH.
             _control?.Dispose();
@@ -1404,6 +1455,9 @@ namespace LANCommander.Interposer
             // The task continues reading in the background once a client connects.
             _eventPipeTask = ReadEventPipeAsync(_eventCts.Token);
         }
+
+        /// <summary>The bytes <paramref name="value"/> takes as UTF-8, with its terminating NUL.</summary>
+        private static uint Utf8Size(string value) => (uint)Encoding.UTF8.GetByteCount(value) + 1;
 
         private static IntPtr CreateUtf8Mmf(string name, string value, uint size)
         {

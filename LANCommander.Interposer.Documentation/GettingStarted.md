@@ -46,6 +46,17 @@ C:\Games\MyGame\
 
 The DLL locates `Config.yml` and `Registry.reg` inside the `.interposer\` directory relative to its own path, not the working directory, so the exact placement of the game executable does not matter as long as the DLL and its `.interposer\` subdirectory share a directory.
 
+### One DLL, Many Games
+
+A launcher that injects a single copy of the DLL into every game it starts would, by the rule above, give them all one `.interposer\` directory. Two launcher overrides, written to named memory-mapped files before the DLL loads, avoid that:
+
+| Mapping | Effect |
+|---|---|
+| `Local\InterposerBaseDirectory_<pid>` | A directory the DLL treats as its own. `.interposer\` (Config.yml, Registry.reg, Logs, Downloads, Plugins) is looked up under it and created if missing, relative `Registry.Files` and `FastDL.DownloadDirectory` entries resolve against it, and `%INTERPOSERDIR%` expands to it. |
+| `Local\InterposerConfig_<pid>` | A YAML document merged over Config.yml before any setting is read. Maps merge key by key, a null (`~`) removes the key, and any other value replaces the file's. Config.yml itself is never changed. |
+
+Both hold UTF-8 text up to the first NUL. The session log records each one the DLL applied, and reports an overlay it could not parse. The .NET `InterposerService` sets them through its `BaseDirectory` and `ConfigOverlay` properties. The other launcher overrides (username, computer name, FastDL URL and the network relay) still apply on top of the merged config.
+
 ## Injecting the DLL
 
 ### Using the Injector

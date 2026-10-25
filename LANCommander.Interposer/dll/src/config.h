@@ -233,8 +233,25 @@ extern std::string g_rpDefaultButton1Url;
 extern std::string g_rpDefaultButton2Text;
 extern std::string g_rpDefaultButton2Url;
 
-// Parse <dlldir>\.interposer\Config.yml and open <dlldir>\.interposer\Logs\<timestamp>.log. Call before MH_EnableHook.
+// Parse <base>\.interposer\Config.yml, merge the launcher's config overlay over it,
+// and open <base>\.interposer\Logs\<timestamp>.log. Call before MH_EnableHook.
+//
+// <base> is the DLL's own directory unless the launcher named another one in
+// Local\InterposerBaseDirectory_<pid>, which is how one injected copy of the DLL
+// serves many games without them sharing a config, a registry store or a log.
+// The overlay, Local\InterposerConfig_<pid>, is a YAML document applied over
+// Config.yml before anything is parsed: maps merge key by key, any other value
+// replaces the file's, and a null removes the key.
 void LoadConfig();
+
+// The directory the Interposer treats as its own: the DLL's directory, or the
+// launcher's base directory override. .interposer\ is looked up under it, relative
+// Registry.Files and FastDL.DownloadDirectory entries resolve against it, and
+// %INTERPOSERDIR% expands to it. Ends with a backslash. Valid after LoadConfig.
+const std::wstring& GetInterposerBaseDirectory();
+
+// GetInterposerBaseDirectory() + L".interposer\\".
+std::wstring GetInterposerDataDirectory();
 
 // Flush and close the log file. Call from RemoveHooks().
 void CloseLog();

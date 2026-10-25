@@ -560,6 +560,10 @@ void InitFastDL()
             dllDir.resize(slash + 1);
     }
 
+    // Where .interposer\ lives: the DLL's directory unless the launcher named
+    // another. The injector, by contrast, is always beside the DLL.
+    const std::wstring& baseDir = GetInterposerBaseDirectory();
+
     // Resolve overlay download directory
     if (g_fastdlUseDownloadDir)
     {
@@ -573,11 +577,11 @@ void InitFastDL()
                 (g_fastdlDownloadDir.size() >= 2 &&
                  g_fastdlDownloadDir[0] == L'\\' && g_fastdlDownloadDir[1] == L'\\');
 
-            candidate = isAbsolute ? g_fastdlDownloadDir : (dllDir + g_fastdlDownloadDir);
+            candidate = isAbsolute ? g_fastdlDownloadDir : (baseDir + g_fastdlDownloadDir);
         }
         else
         {
-            candidate = dllDir + L".interposer\\Downloads";
+            candidate = baseDir + L".interposer\\Downloads";
         }
 
         wchar_t resolved[MAX_PATH]{};
@@ -602,11 +606,11 @@ void InitFastDL()
         };
 
         addBlocked(dllPath);                                               // interposer DLL itself
-        addBlocked(dllDir + L".interposer\\Config.yml");                   // config file
+        addBlocked(baseDir + L".interposer\\Config.yml");                  // config file
 
         // The virtual registry store: the default location, plus wherever
         // Registry.Files moved the overlay to.
-        addBlocked(dllDir + L".interposer\\Registry.reg");
+        addBlocked(baseDir + L".interposer\\Registry.reg");
 
         for (const std::wstring& registryFile : g_registryFiles)
             addBlocked(registryFile);

@@ -14,22 +14,15 @@ using FnInterposerPluginInit = void (WINAPI*)(HMODULE hInterposer);
 // ---------------------------------------------------------------------------
 void LoadPlugins()
 {
-    // Locate <dlldir>\.interposer\Plugins and our own HMODULE (passed to plugins).
+    // Locate <base>\.interposer\Plugins -- the base directory is the DLL's own
+    // unless the launcher named another -- and our own HMODULE (passed to plugins).
     HMODULE hSelf = nullptr;
     GetModuleHandleExW(
         GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
         reinterpret_cast<LPCWSTR>(&LoadPlugins),
         &hSelf);
 
-    wchar_t dllPathBuffer[MAX_PATH] = {};
-    GetModuleFileNameW(hSelf, dllPathBuffer, MAX_PATH);
-
-    std::wstring dllDir(dllPathBuffer);
-    auto slash = dllDir.find_last_of(L"\\/");
-    if (slash != std::wstring::npos)
-        dllDir.resize(slash + 1);
-
-    std::wstring pluginsDir = dllDir + L".interposer\\Plugins\\";
+    std::wstring pluginsDir = GetInterposerDataDirectory() + L"Plugins\\";
 
     // Recursively enumerate .dll and .asi files in Plugins and all subdirectories
     std::vector<std::wstring> dirs;

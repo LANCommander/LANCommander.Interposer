@@ -11,6 +11,7 @@
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
+#include <cstring>
 #include <yaml-cpp/yaml.h>
 
 // ---------------------------------------------------------------------------
@@ -104,8 +105,14 @@ static std::mutex                g_logMutex;
 static std::wstring              g_configFilePath; // set by LoadConfig(), used by InterposerRegisterPluginConfig
 
 // Persisted YAML root for plugin config queries (read-only after LoadConfig).
+// Config.yml with the launcher's overlay merged over it: what the session runs on.
 static YAML::Node        g_configRoot;
 static std::shared_mutex g_configMutex;
+
+// Config.yml alone, without the overlay. Writes back to the file are rendered
+// from this, so a fallback re-render never bakes an overlay value into a file
+// that the next launch may give a different overlay. Guarded by g_configMutex.
+static YAML::Node        g_fileRoot;
 
 // ---------------------------------------------------------------------------
 // ExpandEnvVars
@@ -135,6 +142,10 @@ std::wstring ExpandEnvVars(const std::wstring& input)
 // walking the module list again on every rule.
 static std::wstring g_gameDirectory;
 static std::wstring g_interposerDirectory;
+
+// What GetInterposerBaseDirectory returns: g_interposerDirectory with its
+// trailing backslash, which is how every caller wants to append to it.
+static std::wstring g_baseDirectory;
 
 // Known folders that have no environment variable equivalent, resolved from
 // HKCU\...\Explorer\User Shell Folders rather than SHGetKnownFolderPath:
@@ -1330,6 +1341,20 @@ BOOL InterposerRegisterPluginConfig(const wchar_t* pluginName, const wchar_t* ya
 
     g_configRoot["Plugins"][nameUtf8] = defaults;
 
+    // And into the file's own tree, which a later fallback re-render writes from
+    {
+        if (!g_fileRoot.IsMap())
+            g_fileRoot = YAML::Node(YAML::NodeType::Map);
+
+        const YAML::Node& fileConst = g_fileRoot;
+        YAML::Node filePlugins = fileConst["Plugins"];
+
+        if (!filePlugins || !filePlugins.IsMap())
+            g_fileRoot["Plugins"] = YAML::Node(YAML::NodeType::Map);
+
+        g_fileRoot["Plugins"][nameUtf8] = YAML::Clone(defaults);
+    }
+
     // Build the text block to append/insert into Config.yml on disk
     std::string pluginBlock;
     pluginBlock += "  " + nameUtf8 + ":\n";
@@ -1716,7 +1741,8 @@ static bool PatchConfigScalar(std::string& text, const std::vector<std::string>&
 }
 
 // Fallback for PatchConfigScalar: replace the block for the first `depth`
-// segments of `segs` with a fresh rendering of the in-memory node. Comments
+// segments of `segs` with a fresh rendering of the file's in-memory tree,
+// g_fileRoot -- never the merged one, which carries the overlay. Comments
 // inside that block are lost; everything outside it is untouched. A missing
 // top-level key (depth 1) is appended. Returns false if the block cannot be found.
 static bool ReplaceConfigBlock(std::string& text, const std::vector<std::string>& segs, size_t depth)
@@ -1724,7 +1750,7 @@ static bool ReplaceConfigBlock(std::string& text, const std::vector<std::string>
     std::vector<ConfigLine> lines = SplitConfigLines(text);
     std::string eol = (text.find("\r\n") != std::string::npos) ? "\r\n" : "\n";
 
-    YAML::Node node = g_configRoot;
+    YAML::Node node = g_fileRoot;
     if (!WalkConfigPath(node, segs, depth))
         return false;
 
@@ -1823,6 +1849,43 @@ static std::string EmitConfigScalar(const std::string& value)
     return em.c_str();
 }
 
+// Set the scalar at `segs` inside `root`. Intermediate keys are created as maps
+// where missing; one that already holds a scalar or sequence is a type conflict,
+// and so is a final key that holds a map or sequence -- overwriting either would
+// silently discard settings the plugin did not name. Returns false on a conflict.
+static bool SetConfigScalarInTree(YAML::Node& root, const std::vector<std::string>& segs,
+                                  const std::string& value)
+{
+    if (!root.IsMap())
+        root = YAML::Node(YAML::NodeType::Map);
+
+    YAML::Node node = root;
+
+    for (size_t i = 0; i < segs.size(); ++i)
+    {
+        const YAML::Node& parent = node;
+        YAML::Node existing = parent[segs[i]];
+        bool last = (i + 1 == segs.size());
+
+        if (existing && !existing.IsNull() &&
+            (last ? !existing.IsScalar() : !existing.IsMap()))
+            return false;
+
+        if (last)
+        {
+            node[segs[i]] = value;
+            break;
+        }
+
+        if (!existing || existing.IsNull())
+            node[segs[i]] = YAML::Node(YAML::NodeType::Map);
+
+        node.reset(static_cast<const YAML::Node&>(node)[segs[i]]);
+    }
+
+    return true;
+}
+
 extern "C" __declspec(dllexport)
 BOOL InterposerSetConfigString(const wchar_t* dotPath, const wchar_t* value)
 {
@@ -1845,40 +1908,13 @@ BOOL InterposerSetConfigString(const wchar_t* dotPath, const wchar_t* value)
     std::unique_lock lk(g_configMutex);
 
     // ── In memory ──────────────────────────────────────────────────────────
-    // Intermediate keys are created as maps where missing; one that already
-    // holds a scalar or sequence is a type conflict, and so is a final key that
-    // holds a map or sequence -- overwriting either would silently discard
-    // settings the plugin did not name.
+    // The session's merged tree first, then the file's own tree, which is what a
+    // fallback re-render writes out. A conflict in either stops the write.
+    if (!SetConfigScalarInTree(g_configRoot, segs, valueUtf8) ||
+        !SetConfigScalarInTree(g_fileRoot, segs, valueUtf8))
     {
-        if (!g_configRoot.IsMap())
-            g_configRoot = YAML::Node(YAML::NodeType::Map);
-
-        YAML::Node node = g_configRoot;
-
-        for (size_t i = 0; i < segs.size(); ++i)
-        {
-            const YAML::Node& parent = node;
-            YAML::Node existing = parent[segs[i]];
-            bool last = (i + 1 == segs.size());
-
-            if (existing && !existing.IsNull() &&
-                (last ? !existing.IsScalar() : !existing.IsMap()))
-            {
-                LogPluginEvent(L"PLUGIN CONFIG", (L"Type conflict, not written: " + wpath).c_str());
-                return FALSE;
-            }
-
-            if (last)
-            {
-                node[segs[i]] = valueUtf8;
-                break;
-            }
-
-            if (!existing || existing.IsNull())
-                node[segs[i]] = YAML::Node(YAML::NodeType::Map);
-
-            node.reset(static_cast<const YAML::Node&>(node)[segs[i]]);
-        }
+        LogPluginEvent(L"PLUGIN CONFIG", (L"Type conflict, not written: " + wpath).c_str());
+        return FALSE;
     }
 
     // ── On disk ────────────────────────────────────────────────────────────
@@ -2018,6 +2054,105 @@ bool ParseRelaySettings(const std::string& yamlUtf8, RelaySettings& settings, st
     return true;
 }
 
+const std::wstring& GetInterposerBaseDirectory()
+{
+    return g_baseDirectory;
+}
+
+std::wstring GetInterposerDataDirectory()
+{
+    return g_baseDirectory + L".interposer\\";
+}
+
+// Create every missing directory along `path`. CreateDirectoryW makes one level
+// only, and a launcher's base directory is typically several levels below
+// anything that exists yet.
+static void CreateDirectoryTree(const std::wstring& path)
+{
+    if (path.empty() || CreateDirectoryW(path.c_str(), nullptr) ||
+        GetLastError() == ERROR_ALREADY_EXISTS)
+        return;
+
+    std::wstring parent = path;
+    TrimTrailingSlash(parent);
+
+    const size_t slash = parent.find_last_of(L"\\/");
+
+    // Stop at the root: a drive ("C:") or nothing left to strip
+    if (slash == std::wstring::npos || slash < 3)
+        return;
+
+    parent.resize(slash);
+
+    CreateDirectoryTree(parent);
+    CreateDirectoryW(path.c_str(), nullptr);
+}
+
+// Read Local\<prefix>_<pid>, a UTF-8 string the launcher wrote before injecting.
+// Empty when it did not write one. The whole view is mapped and read up to its
+// first NUL, so the launcher sizes the mapping to its content rather than to a
+// limit agreed in advance.
+static std::string ReadLauncherMapping(const wchar_t* prefix)
+{
+    wchar_t name[96]{};
+    swprintf_s(name, L"Local\\%ls_%lu", prefix, GetCurrentProcessId());
+
+    HANDLE mapping = OpenFileMappingW(FILE_MAP_READ, FALSE, name);
+    if (!mapping)
+        return {};
+
+    std::string text;
+
+    if (const char* view = static_cast<const char*>(MapViewOfFile(mapping, FILE_MAP_READ, 0, 0, 0)))
+    {
+        MEMORY_BASIC_INFORMATION info{};
+        const SIZE_T size = VirtualQuery(view, &info, sizeof(info)) ? info.RegionSize : 0;
+
+        text.assign(view, strnlen(view, size));
+        UnmapViewOfFile(view);
+    }
+
+    CloseHandle(mapping);
+    return text;
+}
+
+// Merge `overlay` over `base` and return the result; neither input is changed.
+// Maps merge key by key, recursively. A null in the overlay removes the key, so a
+// launcher can take back something Config.yml armed by its mere presence
+// (AudioDevices.Input, say). Anything else -- a scalar, a sequence -- replaces
+// the base value outright: a FileRedirects list from the launcher is the whole
+// list, not an addition to the file's.
+//
+// Lookups go through a const reference: the non-const operator[] inserts.
+static YAML::Node MergeConfigNodes(const YAML::Node& base, const YAML::Node& overlay)
+{
+    if (!base.IsMap() || !overlay.IsMap())
+        return YAML::Clone(overlay);
+
+    YAML::Node merged = YAML::Clone(base);
+
+    for (auto it = overlay.begin(); it != overlay.end(); ++it)
+    {
+        const std::string key = it->first.as<std::string>("");
+
+        if (key.empty())
+            continue;
+
+        if (it->second.IsNull())
+        {
+            merged.remove(key);
+            continue;
+        }
+
+        const YAML::Node& mergedConst = merged;
+        YAML::Node existing = mergedConst[key];
+
+        merged[key] = existing ? MergeConfigNodes(existing, it->second) : YAML::Clone(it->second);
+    }
+
+    return merged;
+}
+
 void LoadConfig()
 {
     // Locate the DLL's own directory
@@ -2037,15 +2172,46 @@ void LoadConfig()
     if (slash != std::wstring::npos)
         dllDirectory.resize(slash + 1);
 
-    std::wstring interposerDir = dllDirectory + L".interposer\\";
+    // Warnings are deferred, like OsVersion's below: the session log does not
+    // exist until the end of this function.
+    std::vector<std::wstring> configWarnings;
+
+    // The launcher may name a directory to stand in for the DLL's own, so one
+    // copy of the DLL injected into many games gives each its own .interposer
+    // tree. Everything below that would have been relative to the DLL is
+    // relative to this instead.
+    std::wstring baseDirectory = dllDirectory;
+
+    if (std::string requested = ReadLauncherMapping(L"InterposerBaseDirectory"); !requested.empty())
+    {
+        std::wstring wide = Utf8ToWide(requested);
+        wchar_t fullPath[MAX_PATH]{};
+
+        if (GetFullPathNameW(wide.c_str(), MAX_PATH, fullPath, nullptr) > 0)
+        {
+            baseDirectory = fullPath;
+
+            if (baseDirectory.back() != L'\\' && baseDirectory.back() != L'/')
+                baseDirectory += L'\\';
+
+            configWarnings.push_back(L"base directory from the launcher: " + baseDirectory);
+        }
+        else
+        {
+            configWarnings.push_back(L"ignoring the launcher's base directory, which is not a usable path: " + wide);
+        }
+    }
+
+    std::wstring interposerDir = baseDirectory + L".interposer\\";
     std::wstring yamlPath      = interposerDir + L"Config.yml";
 
     g_configFilePath = yamlPath;
+    g_baseDirectory  = baseDirectory;
 
     // Backing values for %INTERPOSERDIR% and %GAMEDIR%. Captured here, before
     // any rule is parsed, and stored without a trailing separator so the config
     // author's own backslash is the only one in the result.
-    g_interposerDirectory = dllDirectory;
+    g_interposerDirectory = baseDirectory;
     TrimTrailingSlash(g_interposerDirectory);
 
     wchar_t exePathBuffer[MAX_PATH] = {};
@@ -2064,57 +2230,63 @@ void LoadConfig()
 
     ResolveKnownFolders();
 
-    HANDLE fileHandle = CreateFileW(yamlPath.c_str(), GENERIC_READ, FILE_SHARE_READ,
-        nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+    // Config.yml, then the launcher's overlay over it. Either may be missing; a
+    // launcher-injected copy of the DLL usually has no Config.yml at all.
+    YAML::Node fileRoot;
+    bool       haveFile = false;
 
-    if (fileHandle == INVALID_HANDLE_VALUE)
-        return;
-
-    LARGE_INTEGER fileSize{};
-    GetFileSizeEx(fileHandle, &fileSize);
-    if (fileSize.QuadPart == 0 || fileSize.QuadPart > 4 * 1024 * 1024)
+    if (std::string fileText = ReadConfigFileUtf8(); !fileText.empty())
     {
-        CloseHandle(fileHandle);
-        return;
-    }
-
-    std::vector<BYTE> raw(static_cast<size_t>(fileSize.QuadPart));
-    DWORD bytesRead = 0;
-
-    ReadFile(fileHandle, raw.data(), static_cast<DWORD>(raw.size()), &bytesRead, nullptr);
-    CloseHandle(fileHandle);
-
-    // Decode to UTF-8 std::string (supports UTF-16 LE BOM, UTF-8 BOM, or plain UTF-8)
-    std::string utf8str;
-
-    if (raw.size() >= 2 && raw[0] == 0xFF && raw[1] == 0xFE)
-    {
-        // UTF-16 LE BOM — convert to UTF-8
-        size_t characterCount = (raw.size() - 2) / 2;
-        const wchar_t* wptr = reinterpret_cast<const wchar_t*>(raw.data() + 2);
-        int utf8len = WideCharToMultiByte(CP_UTF8, 0, wptr, static_cast<int>(characterCount),
-            nullptr, 0, nullptr, nullptr);
-        if (utf8len > 0)
+        try
         {
-            utf8str.resize(utf8len);
-            WideCharToMultiByte(CP_UTF8, 0, wptr, static_cast<int>(characterCount),
-                utf8str.data(), utf8len, nullptr, nullptr);
+            fileRoot = YAML::Load(fileText);
+            haveFile = true;
+        }
+        catch (const YAML::Exception& e)
+        {
+            configWarnings.push_back(L"Config.yml could not be parsed and was ignored: " + Utf8ToWide(e.what()));
         }
     }
-    else
+
+    YAML::Node overlay;
+    bool       haveOverlay = false;
+
+    if (std::string overlayText = ReadLauncherMapping(L"InterposerConfig"); !overlayText.empty())
     {
-        // UTF-8 BOM — skip 3 bytes; otherwise use raw bytes as-is
-        int offset = (raw.size() >= 3 && raw[0] == 0xEF && raw[1] == 0xBB && raw[2] == 0xBF) ? 3 : 0;
-        utf8str.assign(reinterpret_cast<const char*>(raw.data()) + offset, raw.size() - offset);
+        try
+        {
+            overlay = YAML::Load(overlayText);
+
+            if (overlay.IsMap())
+                haveOverlay = true;
+            else if (!overlay.IsNull())
+                configWarnings.push_back(L"ignoring the launcher's config overlay, which is not a map");
+        }
+        catch (const YAML::Exception& e)
+        {
+            configWarnings.push_back(L"ignoring the launcher's config overlay, which could not be parsed: " + Utf8ToWide(e.what()));
+        }
     }
 
-    YAML::Node root;
-    try { root = YAML::Load(utf8str); }
-    catch (...) { return; }
+    // Nothing to run on: as before there was an overlay, a DLL with no usable
+    // Config.yml opens no log -- unless the launcher is involved, in which case
+    // whatever it asked for, and anything that went wrong with it, gets a log.
+    if (!haveFile && !haveOverlay && baseDirectory == dllDirectory)
+        return;
+
+    if (!fileRoot.IsMap())
+        fileRoot = YAML::Node(YAML::NodeType::Map);
+
+    YAML::Node root = haveOverlay ? MergeConfigNodes(fileRoot, overlay) : YAML::Clone(fileRoot);
+
+    if (haveOverlay)
+        configWarnings.push_back(L"applied the launcher's config overlay over " +
+            (haveFile ? yamlPath : std::wstring(L"an empty config (no Config.yml)")));
 
     {
         std::unique_lock lk(g_configMutex);
         g_configRoot = root;
+        g_fileRoot   = fileRoot;
     }
 
     // ── settings ─────────────────────────────────────────────────────────────
@@ -2218,8 +2390,9 @@ void LoadConfig()
     // Files is an overlay stack, applied in the order written: a later file
     // wins wherever it names the same key and value as an earlier one, and the
     // last entry is the only one ever written back to. Anything not
-    // drive-qualified or rooted is resolved against the DLL's directory, so the
-    // historical '.interposer\Registry.reg' stays spelled the way it always was.
+    // drive-qualified or rooted is resolved against the base directory (the
+    // DLL's, unless the launcher named another), so the historical
+    // '.interposer\Registry.reg' stays spelled the way it always was.
     //
     // Warnings are deferred for the same reason as OsVersion's: the session log
     // does not exist yet.
@@ -2251,7 +2424,7 @@ void LoadConfig()
                 }
 
                 if (!IsAbsolutePath(resolved))
-                    resolved = dllDirectory + resolved;
+                    resolved = baseDirectory + resolved;
 
                 g_registryFiles.push_back(std::move(resolved));
             }
@@ -2667,7 +2840,7 @@ void LoadConfig()
     }
 
     // ── Open log at .interposer\Logs\<timestamp>.log ──────────────────────────
-    CreateDirectoryW(interposerDir.c_str(), nullptr);
+    CreateDirectoryTree(interposerDir);
 
     std::wstring logsDir = interposerDir + L"Logs\\";
     CreateDirectoryW(logsDir.c_str(), nullptr);
@@ -2713,6 +2886,9 @@ void LoadConfig()
     // Deferred from the OsVersion parse above, which ran before the log existed.
     // InterposerLog writes regardless of the logging flags, which is what a
     // misconfiguration warrants.
+    for (const std::wstring& warning : configWarnings)
+        InterposerLog(L"CONFIG", warning.c_str());
+
     for (const std::wstring& warning : osVersionWarnings)
         InterposerLog(L"OSVERSION", warning.c_str());
 

@@ -3125,25 +3125,9 @@ static void HookRegistryApi(const char* name, Fn detour, Fn* orig)
 
 void InstallRegistryHooks()
 {
-    // Locate the default store, .interposer\Registry.reg, next to our DLL
-    HMODULE hSelf = nullptr;
-
-    GetModuleHandleExW(
-        GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
-        reinterpret_cast<LPCWSTR>(&InstallRegistryHooks),
-        &hSelf);
-
-    wchar_t dllPath[MAX_PATH] = {};
-
-    GetModuleFileNameW(hSelf, dllPath, MAX_PATH);
-
-    std::wstring directory(dllPath);
-    auto slash = directory.find_last_of(L"\\/");
-
-    if (slash != std::wstring::npos)
-        directory.resize(slash + 1);
-
-    std::wstring interposerDir = directory + L".interposer\\";
+    // Locate the default store, .interposer\Registry.reg, in the base directory:
+    // next to our DLL, unless the launcher named another (see LoadConfig)
+    std::wstring interposerDir = GetInterposerDataDirectory();
     CreateDirectoryW(interposerDir.c_str(), nullptr);
 
     // Config.yml may replace the single default file with an overlay stack. The
