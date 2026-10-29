@@ -10,6 +10,7 @@
 #include "fastdl.h"
 #include "config.h"
 #include "http.h"
+#include "instance.h"
 
 // Response header that a LANCommander FastDL endpoint must return.
 // Any value is accepted — its mere presence confirms the endpoint is ours.
@@ -28,6 +29,11 @@ static std::vector<std::wstring> g_blockedPaths;              // absolute lowerc
 static std::wstring      g_probedBaseUrlVerified;
 static std::wstring      g_probedBaseUrl;
 static std::shared_mutex g_probedUrlMutex;
+
+// The URL a plugin or game patch set with InterposerSetFastDLBaseUrl (the game
+// server's own, typically). Protected by g_probedUrlMutex. Wins over BaseUrl
+// and the probes: the server the player joined knows best where its files are.
+static std::wstring      g_serverBaseUrl;
 
 // ---------------------------------------------------------------------------
 // CRC32 (ISO 3309 / ITU-T V.42, polynomial 0xEDB88320)
@@ -131,14 +137,25 @@ static ProbeResult DoProbeRequest(const std::wstring& url, const std::wstring& a
 }
 
 // Returns the effective FastDL base URL.
-// Priority: configured BaseUrl > verified probe URL > unverified probe URL.
+// Priority: URL set at run time (the game server's own) > configured BaseUrl >
+// verified probe URL > unverified probe URL.
 static std::wstring GetEffectiveBaseUrl()
 {
+    std::shared_lock<std::shared_mutex> lk(g_probedUrlMutex);
+
+    if (!g_serverBaseUrl.empty())
+        return g_serverBaseUrl;
+
     if (!g_fastdlBaseUrl.empty())
         return g_fastdlBaseUrl;
 
-    std::shared_lock<std::shared_mutex> lk(g_probedUrlMutex);
     return g_probedBaseUrlVerified.empty() ? g_probedBaseUrl : g_probedBaseUrlVerified;
+}
+
+static bool HasServerBaseUrl()
+{
+    std::shared_lock<std::shared_mutex> lk(g_probedUrlMutex);
+    return !g_serverBaseUrl.empty();
 }
 
 // The FastDLPath whose Local prefix covers localPath, with the part of the path
@@ -389,7 +406,7 @@ static bool FastDLImpl(const std::wstring& localPath, bool headOnly)
     // If no base URL is configured, probe any server addresses collected by the
     // network hooks that haven't been probed yet. This runs synchronously so that
     // a discovered FastDL endpoint is available immediately for this download.
-    if (g_fastdlBaseUrl.empty())
+    if (g_fastdlBaseUrl.empty() && !HasServerBaseUrl())
         ProbeAllDiscoveredAddresses();
 
     std::wstring url = BuildFastDLUrl(localPath);
@@ -548,4 +565,37 @@ std::wstring GetExistingOverlayPath(const std::wstring& localPath)
 bool FastDLFileExists(const std::wstring& localPath)
 {
     return FastDLImpl(localPath, true);
+}
+
+extern "C" INTERPOSER_API
+BOOL InterposerSetFastDLBaseUrl(const wchar_t* baseUrl)
+{
+    FORWARD_TO_PRIMARY(InterposerSetFastDLBaseUrl, baseUrl);
+
+    std::wstring url = baseUrl ? baseUrl : L"";
+
+    if (!url.empty())
+    {
+        const std::wstring lower = ToLowerFastDL(url);
+
+        if (!g_fastdlEnabled || !(lower.starts_with(L"http://") || lower.starts_with(L"https://")))
+            return FALSE;
+
+        if (url.back() != L'/')
+            url += L'/';
+    }
+
+    {
+        std::unique_lock<std::shared_mutex> lk(g_probedUrlMutex);
+
+        if (url == g_serverBaseUrl)
+            return g_fastdlEnabled ? TRUE : FALSE;
+
+        g_serverBaseUrl = url;
+    }
+
+    if (g_fastdlEnabled)
+        LogFastDLAccess(L"FASTDL SERVER", url.empty() ? L"(none)" : url.c_str(), nullptr);
+
+    return g_fastdlEnabled ? TRUE : FALSE;
 }
