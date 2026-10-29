@@ -20,6 +20,9 @@ namespace
     }
 }
 
+// MinHook detours only fire while enabled, so this is bookkeeping for callers.
+static bool g_enabled = false;
+
 bool Initialize()
 {
     return MH_Initialize() == MH_OK;
@@ -33,11 +36,18 @@ void Uninitialize()
 void EnableAll()
 {
     MH_EnableHook(MH_ALL_HOOKS);
+    g_enabled = true;
 }
 
 void DisableAll()
 {
+    g_enabled = false;
     MH_DisableHook(MH_ALL_HOOKS);
+}
+
+bool Enabled()
+{
+    return g_enabled;
 }
 
 Status HookExport(const wchar_t* module, const char* function, void* detour, void** original)

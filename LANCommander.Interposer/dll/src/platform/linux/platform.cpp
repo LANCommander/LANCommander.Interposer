@@ -1,4 +1,5 @@
 #include "platform.h"
+#include "version_info.h"
 
 #include <algorithm>
 #include <cerrno>
@@ -14,7 +15,9 @@
 #include <dlfcn.h>
 #include <fcntl.h>
 #include <pwd.h>
+#include <sys/socket.h>
 #include <sys/stat.h>
+#include <sys/un.h>
 #include <unistd.h>
 
 namespace platform
@@ -193,11 +196,11 @@ bool GetFullPath(const std::wstring& path, std::wstring& out)
 namespace
 {
     // The file this function's code lives in: the Interposer itself.
-    std::string ModulePath()
+    std::string ModulePathUtf8()
     {
         Dl_info info{};
 
-        if (!dladdr(reinterpret_cast<void*>(&ModulePath), &info) || !info.dli_fname)
+        if (!dladdr(reinterpret_cast<void*>(&ModulePathUtf8), &info) || !info.dli_fname)
             return {};
 
         char resolved[PATH_MAX];
@@ -205,13 +208,26 @@ namespace
     }
 }
 
+std::wstring ModulePath()
+{
+    return Utf8ToWide(ModulePathUtf8());
+}
+
 std::wstring ModuleDirectory()
 {
-    std::string path = ModulePath();
+    std::string path = ModulePathUtf8();
     const size_t slash = path.rfind('/');
 
     path.resize(slash == std::string::npos ? 0 : slash + 1);
     return Utf8ToWide(path);
+}
+
+std::wstring ExecutablePath()
+{
+    char buffer[PATH_MAX];
+    const ssize_t length = readlink("/proc/self/exe", buffer, sizeof(buffer) - 1);
+
+    return length > 0 ? Utf8ToWide(std::string(buffer, static_cast<size_t>(length))) : std::wstring();
 }
 
 std::wstring ExecutableDirectory()
@@ -381,6 +397,22 @@ bool WriteWholeFile(const std::wstring& path, const std::string& content)
     const bool ok = WriteAll(fd, content.data(), content.size());
     close(fd);
     return ok;
+}
+
+bool PathExists(const std::wstring& path)
+{
+    struct stat st{};
+    return stat(Narrow(path).c_str(), &st) == 0;
+}
+
+bool ReplaceFile(const std::wstring& from, const std::wstring& to)
+{
+    return rename(Narrow(from).c_str(), Narrow(to).c_str()) == 0;
+}
+
+void RemoveFile(const std::wstring& path)
+{
+    unlink(Narrow(path).c_str());
 }
 
 // ── Environment ───────────────────────────────────────────────────────────────
@@ -606,6 +638,53 @@ std::string ReadLauncherValue(const wchar_t* name)
     return value ? std::string(value) : std::string();
 }
 
+FileHandle ConnectEventChannel()
+{
+    const std::string path = ReadLauncherValue(L"InterposerEventSocket");
+
+    if (path.empty() || path.size() >= sizeof(sockaddr_un::sun_path))
+        return kInvalidFile;
+
+    const int fd = socket(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0);
+
+    if (fd < 0)
+        return kInvalidFile;
+
+    sockaddr_un address{};
+    address.sun_family = AF_UNIX;
+    memcpy(address.sun_path, path.c_str(), path.size());
+
+    if (connect(fd, reinterpret_cast<sockaddr*>(&address), sizeof(address)) != 0)
+    {
+        close(fd);
+        return kInvalidFile;
+    }
+
+    return static_cast<FileHandle>(fd);
+}
+
+bool WriteEventChannel(FileHandle channel, const void* data, size_t bytes)
+{
+    const auto* p = static_cast<const char*>(data);
+
+    while (bytes > 0)
+    {
+        // MSG_NOSIGNAL: a launcher that went away must not kill the game with SIGPIPE.
+        const ssize_t sent = send(static_cast<int>(channel), p, bytes, MSG_NOSIGNAL);
+
+        if (sent < 0 && errno == EINTR)
+            continue;
+
+        if (sent <= 0)
+            return false;
+
+        p     += sent;
+        bytes -= static_cast<size_t>(sent);
+    }
+
+    return true;
+}
+
 // ── Modules ───────────────────────────────────────────────────────────────────
 
 Module SelfModule()
@@ -624,6 +703,15 @@ Module SelfModule()
         dlclose(handle);
 
     return handle;
+}
+
+// Stamped in at build time from the git tag (build/GenerateVersion.cmake).
+std::wstring ModuleVersion()
+{
+    if (VER_MAJOR == 0 && VER_MINOR == 0 && VER_PATCH == 0)
+        return L"1.0";
+
+    return Utf8ToWide(VER_FILEVERSION_STR);
 }
 
 Module LoadModule(const std::wstring& path, std::wstring& error)

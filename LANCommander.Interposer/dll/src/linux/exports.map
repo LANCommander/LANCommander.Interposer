@@ -1,12 +1,26 @@
-/* The shared object's dynamic symbol table: the public API and nothing else.
+/* The shared object's dynamic symbol table: the public API, the libc entry
+ * points the file hooks interpose, and nothing else.
  *
  * -fvisibility=hidden is not enough on its own. libstdc++ declares namespace std
  * default-visible, so every std:: template our code instantiates (regex, deque,
  * map ...) would otherwise be exported, and could interpose on the game's own
- * instantiations of the same templates. */
+ * instantiations of the same templates.
+ *
+ * The file-hook names must be listed too: preloaded, these definitions come
+ * first in symbol resolution, so the game's calls land on ours. */
 {
   global:
     Interposer*;
+
+    /* File hooks (linux/files.cpp). */
+    open; open64; openat;
+    fopen; fopen64; freopen;
+    stat; lstat; stat64; lstat64; __xstat; __lxstat; statx;
+    access;
+    opendir;
+    unlink; remove; rename;
+    dlopen;
+
   local:
     *;
 };

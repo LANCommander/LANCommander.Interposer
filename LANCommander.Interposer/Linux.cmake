@@ -8,10 +8,12 @@ find_package(Threads REQUIRED)
 add_library(LANCommander.Interposer SHARED
     ${INTERPOSER_CORE_SOURCES}
     dll/src/platform/linux/hooking.cpp
+    dll/src/platform/linux/http.cpp
     dll/src/platform/linux/platform.cpp
+    dll/src/linux/files.cpp
     dll/src/linux/hooks.cpp
     dll/src/linux/instance.cpp
-    dll/src/linux/pipe_events.cpp
+    dll/src/linux/network.cpp
     dll/src/linux/unsupported.cpp
     # Last, always: its constructor must run after every other file's static
     # initialisers, and .init_array runs in link order. See the top of main.cpp.
@@ -32,6 +34,7 @@ target_include_directories(LANCommander.Interposer
     PUBLIC  include)
 target_link_libraries(LANCommander.Interposer PRIVATE
     yaml-cpp::yaml-cpp Threads::Threads ${CMAKE_DL_LIBS})
+interposer_version_resource(LANCommander.Interposer)
 
 # The Linux counterpart of /MT. The C++ runtime is linked in statically and kept
 # out of the dynamic symbol table (--exclude-libs), because the process it lands

@@ -34,9 +34,14 @@ namespace platform
     // the path is not usable.
     bool GetFullPath(const std::wstring& path, std::wstring& out);
 
-    // The directory this module (the Interposer itself) was loaded from, with a
-    // trailing separator.
+    // The full path of this module (the Interposer itself).
+    std::wstring ModulePath();
+
+    // The directory this module was loaded from, with a trailing separator.
     std::wstring ModuleDirectory();
+
+    // The full path of the process's executable. Empty if it cannot be determined.
+    std::wstring ExecutablePath();
 
     // The directory of the process's executable, without a trailing separator.
     // Empty if it cannot be determined.
@@ -84,6 +89,14 @@ namespace platform
     // Replace the file's content with `content`.
     bool WriteWholeFile(const std::wstring& path, const std::string& content);
 
+    // True when a file or directory exists at `path`.
+    bool PathExists(const std::wstring& path);
+
+    // Rename `from` to `to`, replacing `to` if it exists.
+    bool ReplaceFile(const std::wstring& from, const std::wstring& to);
+
+    void RemoveFile(const std::wstring& path);
+
     // ── Environment ───────────────────────────────────────────────────────────
 
     // An environment variable. False when it is not set.
@@ -125,12 +138,26 @@ namespace platform
     // launcher did not provide it.
     std::string ReadLauncherValue(const wchar_t* name);
 
+    // Connect to the launcher's event channel: on Windows the named pipe
+    // \\.\pipe\InterposerEvents_<pid>, elsewhere the Unix socket the launcher
+    // named in INTERPOSER_EVENT_SOCKET. kInvalidFile when it offers none.
+    // CloseFile closes it.
+    FileHandle ConnectEventChannel();
+
+    // Send one message. False once the launcher has gone away; never raises
+    // SIGPIPE.
+    bool WriteEventChannel(FileHandle channel, const void* data, size_t bytes);
+
     // ── Modules ───────────────────────────────────────────────────────────────
 
     using Module = void*;
 
     // This module: what plugins receive, and what a secondary copy forwards to.
     Module SelfModule();
+
+    // This module's version as "major.minor.patch.build", or "1.0" when it
+    // carries none. Sent to FastDL servers in the User-Agent.
+    std::wstring ModuleVersion();
 
     // Load a library. On failure returns null and describes why in `error`, as
     // it is written into the log (e.g. L"error 126").

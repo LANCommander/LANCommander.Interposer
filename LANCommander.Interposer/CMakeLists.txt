@@ -7,6 +7,9 @@ find_package(yaml-cpp CONFIG REQUIRED)
 set(INTERPOSER_CORE_SOURCES
     dll/src/core/callbacks.cpp
     dll/src/core/config.cpp
+    dll/src/core/fastdl.cpp
+    dll/src/core/file_access.cpp
+    dll/src/core/pipe_events.cpp
     dll/src/core/plugins.cpp
 )
 
@@ -22,13 +25,13 @@ find_package(minhook CONFIG REQUIRED)
 add_library(LANCommander.Interposer SHARED
     ${INTERPOSER_CORE_SOURCES}
     dll/src/platform/win/hooking.cpp
+    dll/src/platform/win/http.cpp
     dll/src/platform/win/platform.cpp
     dll/src/win/audio.cpp
     dll/src/win/control.cpp
     dll/src/win/dinput.cpp
     dll/src/win/discord_ipc.cpp
     dll/src/win/dllmain.cpp
-    dll/src/win/fastdl.cpp
     dll/src/win/files.cpp
     dll/src/win/hooks.cpp
     dll/src/win/identity.cpp
@@ -36,7 +39,6 @@ add_library(LANCommander.Interposer SHARED
     dll/src/win/ipx.cpp
     dll/src/win/network.cpp
     dll/src/win/osversion.cpp
-    dll/src/win/pipe_events.cpp
     dll/src/win/proxy.cpp
     dll/src/win/registry.cpp
     dll/src/win/relay.cpp

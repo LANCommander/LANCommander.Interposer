@@ -28,6 +28,11 @@ namespace hooking
     void EnableAll();
     void DisableAll();
 
+    // Between EnableAll and DisableAll. A detour that can run while the hooks
+    // are off -- on Linux every one, from the moment the object is mapped --
+    // must check this first and pass straight through when it is false.
+    bool Enabled();
+
     // Hook `function` exported by `module`. `original` receives what the detour
     // calls to reach the real implementation.
     Status HookExport(const wchar_t* module, const char* function, void* detour, void** original);

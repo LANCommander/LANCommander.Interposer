@@ -23,6 +23,8 @@
 #include <vector>
 
 #include <dlfcn.h>
+#include <fcntl.h>
+#include <sys/stat.h>
 #include <sys/wait.h>
 #include <unistd.h>
 
@@ -587,6 +589,94 @@ static void RunPreloadTests(const fs::path& tmp)
     }
 }
 
+// ── File hooks ────────────────────────────────────────────────────────────────
+//
+// The child runs with the shared object preloaded, so its own fopen/open/stat
+// interpose; it performs the operations. The parent is not preloaded, so its
+// stat is unhooked and it can check the real filesystem outcome.
+
+static std::string ReadFd(const std::string& path)
+{
+    const int fd = open(path.c_str(), O_RDONLY);
+    if (fd < 0) return {};
+
+    std::string out;
+    char buf[4096];
+    ssize_t n;
+    while ((n = read(fd, buf, sizeof(buf))) > 0) out.append(buf, static_cast<size_t>(n));
+    close(fd);
+    return out;
+}
+
+static int RunFileHookChild(const fs::path& dir)
+{
+    printf("\n--- File Hook Tests (child process) ---\n");
+
+    const std::string probe = (dir / "redirect_probe.txt").string();
+
+    // A write to the probe path lands at the redirect target.
+    if (FILE* f = fopen(probe.c_str(), "w"))
+    {
+        fputs("hello", f);
+        ASSERT(fclose(f) == 0, "F-01: fopen of a redirected path for write succeeds");
+    }
+    else
+    {
+        ASSERT(false, "F-01: fopen of a redirected path for write succeeds");
+    }
+
+    // A read of the same path is redirected to the same target.
+    ASSERT(ReadFd(probe) == "hello", "F-02: open of a redirected path for read follows the redirect");
+
+    // A read of a missing game file is served from the FastDL overlay.
+    ASSERT(ReadFd((dir / "maps" / "test.bsp").string()) == "OVERLAY",
+        "F-03: a missing file is served from the FastDL download overlay");
+
+    // stat of the redirected path reaches the target, which exists.
+    struct stat st{};
+    ASSERT(stat(probe.c_str(), &st) == 0, "F-04: stat of a redirected path reaches the target");
+
+    return g_fail;
+}
+
+static void RunFileHookTests(const fs::path& tmp)
+{
+    printf("\n--- File Hook Tests ---\n");
+
+    const fs::path dir    = tmp / "FileHooks";
+    const fs::path soPath = StageCopy(dir);
+
+    WriteText(dir / ".interposer" / "Config.yml",
+        "Logging:\n"
+        "  Files: true\n"
+        "\n"
+        "FileRedirects:\n"
+        "  - Pattern: '.*/redirect_probe\\.txt$'\n"
+        "    Replacement: '" + (dir / "redirected.txt").string() + "'\n"
+        "\n"
+        "FastDL:\n"
+        "  Enabled: true\n"
+        "  ProbeConnections: false\n"
+        "  UseDownloadDirectory: true\n"
+        "  Paths:\n"
+        "    - Local: '" + (dir / "maps").string() + "'\n"
+        "      Remote: maps\n");
+
+    // The overlay copy the FastDL read is served from (no server, offline).
+    WriteText(dir / ".interposer" / "Downloads" / "maps" / "test.bsp", "OVERLAY");
+
+    const int code = RunChild({ "--file-hook-child", dir.string() },
+        { "LD_PRELOAD=" + soPath.string(),
+          "INTERPOSER_TARGET=" + ExecutablePath().filename().string(),
+          "INTERPOSER_BASE_DIRECTORY=" + dir.string() });
+
+    ASSERT(code == 0, "F-00: the file-hook child reported no failures");
+
+    // Checked here, in a process whose stat is not hooked.
+    ASSERT(ReadText(dir / "redirected.txt") == "hello" && !fs::exists(dir / "redirect_probe.txt"),
+        "F-05: the write reached the redirect target, not the original path");
+}
+
 // ── Main suite ────────────────────────────────────────────────────────────────
 
 static void WriteFixture(const fs::path& dir)
@@ -627,6 +717,9 @@ int main(int argc, char** argv)
 
     if (argc >= 3 && strcmp(argv[1], "--preload-child") == 0)
         return RunPreloadChild(argv[2]);
+
+    if (argc >= 3 && strcmp(argv[1], "--file-hook-child") == 0)
+        return RunFileHookChild(argv[2]);
 
     char tmpTemplate[] = "/tmp/InterposerTest.XXXXXX";
 
@@ -692,6 +785,7 @@ int main(int argc, char** argv)
     RunLauncherConfigTests(tmp);
     RunSecondInstanceTests(tmp);
     RunPreloadTests(tmp);
+    RunFileHookTests(tmp);
 
     printf("\n=== Results: %d passed, %d failed ===\n", g_pass, g_fail);
 

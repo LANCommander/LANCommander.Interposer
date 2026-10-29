@@ -33,12 +33,27 @@ void TrimTrailingSeparators(std::wstring& path)
 bool GetFullPath(const std::wstring& path, std::wstring& out)
 {
     wchar_t fullPath[MAX_PATH]{};
+    const DWORD length = GetFullPathNameW(path.c_str(), MAX_PATH, fullPath, nullptr);
 
-    if (GetFullPathNameW(path.c_str(), MAX_PATH, fullPath, nullptr) == 0)
+    // Too long for the buffer: the return is the size needed, and nothing was written.
+    if (length == 0 || length >= MAX_PATH)
         return false;
 
     out = fullPath;
     return true;
+}
+
+std::wstring ModulePath()
+{
+    wchar_t buffer[MAX_PATH]{};
+    GetModuleFileNameW(static_cast<HMODULE>(SelfModule()), buffer, MAX_PATH);
+    return buffer;
+}
+
+std::wstring ExecutablePath()
+{
+    wchar_t buffer[MAX_PATH]{};
+    return GetModuleFileNameW(nullptr, buffer, MAX_PATH) > 0 ? std::wstring(buffer) : std::wstring();
 }
 
 std::wstring ModuleDirectory()
@@ -222,6 +237,21 @@ bool WriteWholeFile(const std::wstring& path, const std::string& content)
     BOOL ok = WriteFile(file, content.c_str(), static_cast<DWORD>(content.size()), &written, nullptr);
     CloseHandle(file);
     return ok && written == content.size();
+}
+
+bool PathExists(const std::wstring& path)
+{
+    return GetFileAttributesW(path.c_str()) != INVALID_FILE_ATTRIBUTES;
+}
+
+bool ReplaceFile(const std::wstring& from, const std::wstring& to)
+{
+    return MoveFileExW(from.c_str(), to.c_str(), MOVEFILE_REPLACE_EXISTING) != FALSE;
+}
+
+void RemoveFile(const std::wstring& path)
+{
+    DeleteFileW(path.c_str());
 }
 
 // ── Environment ───────────────────────────────────────────────────────────────
@@ -437,6 +467,22 @@ std::string ReadLauncherValue(const wchar_t* name)
     return text;
 }
 
+FileHandle ConnectEventChannel()
+{
+    wchar_t pipeName[128]{};
+    swprintf_s(pipeName, L"\\\\.\\pipe\\InterposerEvents_%lu", GetCurrentProcessId());
+
+    HANDLE pipe = CreateFileW(pipeName, GENERIC_WRITE, 0, nullptr, OPEN_EXISTING, 0, nullptr);
+
+    return pipe == INVALID_HANDLE_VALUE ? kInvalidFile : reinterpret_cast<FileHandle>(pipe);
+}
+
+bool WriteEventChannel(FileHandle channel, const void* data, size_t bytes)
+{
+    DWORD written = 0;
+    return WriteFile(reinterpret_cast<HANDLE>(channel), data, static_cast<DWORD>(bytes), &written, nullptr) != FALSE;
+}
+
 // ── Modules ───────────────────────────────────────────────────────────────────
 
 Module SelfModule()
@@ -449,6 +495,47 @@ Module SelfModule()
         &self);
 
     return self;
+}
+
+// Read from the version resource. Cached after the first call.
+std::wstring ModuleVersion()
+{
+    static std::wstring s_version;
+    static bool         s_ready = false;
+
+    if (s_ready)
+        return s_version;
+
+    s_ready   = true;
+    s_version = L"1.0";
+
+    const std::wstring dllPath = ModulePath();
+
+    DWORD dummy = 0;
+    DWORD size  = GetFileVersionInfoSizeW(dllPath.c_str(), &dummy);
+    if (size == 0)
+        return s_version;
+
+    std::vector<BYTE> buf(size);
+    if (!GetFileVersionInfoW(dllPath.c_str(), 0, size, buf.data()))
+        return s_version;
+
+    VS_FIXEDFILEINFO* info    = nullptr;
+    UINT              infoLen = 0;
+    if (!VerQueryValueW(buf.data(), L"\\",
+            reinterpret_cast<LPVOID*>(&info), &infoLen) || !info)
+        return s_version;
+
+    if (info->dwFileVersionMS == 0 && info->dwFileVersionLS == 0)
+        return s_version;
+
+    wchar_t text[32]{};
+    swprintf_s(text, L"%d.%d.%d.%d",
+        HIWORD(info->dwFileVersionMS), LOWORD(info->dwFileVersionMS),
+        HIWORD(info->dwFileVersionLS), LOWORD(info->dwFileVersionLS));
+
+    s_version = text;
+    return s_version;
 }
 
 Module LoadModule(const std::wstring& path, std::wstring& error)

@@ -20,11 +20,31 @@ set(CMAKE_RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin/$<CONFIG>")
 set(CMAKE_LIBRARY_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin/$<CONFIG>")
 set(CMAKE_ARCHIVE_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/lib/$<CONFIG>")
 
+# version_info.h, regenerated on every build so a new tag needs no reconfigure.
+set(INTERPOSER_GENERATED_DIR "${CMAKE_BINARY_DIR}/generated")
+add_custom_target(interposer_version
+    COMMAND "${CMAKE_COMMAND}"
+        "-DOUTPUT=${INTERPOSER_GENERATED_DIR}/version_info.h"
+        "-DVERSION=${INTERPOSER_VERSION}"
+        "-DSOURCE_DIR=${CMAKE_SOURCE_DIR}"
+        -P "${CMAKE_SOURCE_DIR}/build/GenerateVersion.cmake"
+    BYPRODUCTS "${INTERPOSER_GENERATED_DIR}/version_info.h"
+    COMMENT "Generating version_info.h"
+    VERBATIM)
+
+# Every target with a resource.rc includes version_info.h, as does the Linux
+# shared object, which has no resource to carry it.
+function(interposer_version_resource target)
+    add_dependencies(${target} interposer_version)
+    target_include_directories(${target} PRIVATE "${INTERPOSER_GENERATED_DIR}")
+endfunction()
+
 if(NOT WIN32)
     # Linux: libLANCommander.Interposer.so, preloaded into the game. Its build
     # settings live with the target; there is no Windows-style resource or XP
     # compatibility layer to set up.
     add_compile_options(-Wall -Wextra)
+    add_compile_definitions(_GNU_SOURCE)
     add_subdirectory(LANCommander.Interposer)
     return()
 endif()
@@ -46,24 +66,6 @@ add_compile_options(/W3 /sdl /permissive- /Zc:inline "$<$<CONFIG:Release>:/Gy;/O
 add_link_options(/DEBUG "$<$<CONFIG:Release>:/LTCG:incremental;/OPT:REF;/OPT:ICF>")
 
 include(build/Compatibility.cmake)
-
-# version_info.h, regenerated on every build so a new tag needs no reconfigure.
-set(INTERPOSER_GENERATED_DIR "${CMAKE_BINARY_DIR}/generated")
-add_custom_target(interposer_version
-    COMMAND "${CMAKE_COMMAND}"
-        "-DOUTPUT=${INTERPOSER_GENERATED_DIR}/version_info.h"
-        "-DVERSION=${INTERPOSER_VERSION}"
-        "-DSOURCE_DIR=${CMAKE_SOURCE_DIR}"
-        -P "${CMAKE_SOURCE_DIR}/build/GenerateVersion.cmake"
-    BYPRODUCTS "${INTERPOSER_GENERATED_DIR}/version_info.h"
-    COMMENT "Generating version_info.h"
-    VERBATIM)
-
-# Every target with a resource.rc includes version_info.h.
-function(interposer_version_resource target)
-    add_dependencies(${target} interposer_version)
-    target_include_directories(${target} PRIVATE "${INTERPOSER_GENERATED_DIR}")
-endfunction()
 
 add_subdirectory(LANCommander.Interposer)
 add_subdirectory(LANCommander.Interposer.Plugin.CDKey)

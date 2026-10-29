@@ -40,6 +40,11 @@ void DisableAll()
     g_enabled.store(false, std::memory_order_release);
 }
 
+bool Enabled()
+{
+    return g_enabled.load(std::memory_order_acquire);
+}
+
 Status HookExport(const wchar_t* module, const char* function, void* /*detour*/, void** original)
 {
     // RTLD_NEXT searches the objects loaded after this one, whatever module
