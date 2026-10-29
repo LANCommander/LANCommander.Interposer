@@ -4,6 +4,9 @@
       "name": "minhook",
       "platform": "windows"
     },
-    "yaml-cpp"
+    "yaml-cpp",
+    "enet",
+    "opus",
+    "miniaudio"
   ]
 }

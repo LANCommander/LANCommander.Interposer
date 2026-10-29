@@ -807,6 +807,31 @@ static void RunNetTests(const fs::path& tmp)
         "ID-03: the computer-name override is recorded in the session log");
 }
 
+// ── Voice (Comms) ─────────────────────────────────────────────────────────────
+
+static void RunCommsTests(void* so)
+{
+    printf("\n--- Voice (Comms) Tests ---\n");
+
+    // The vendored Comms API, re-exported under the interposer_comms_ namespace.
+    auto apiVersion    = reinterpret_cast<uint32_t (*)()>(dlsym(so, "interposer_comms_get_api_version"));
+    auto versionString = reinterpret_cast<const char* (*)()>(dlsym(so, "interposer_comms_get_version_string"));
+
+    ASSERT(apiVersion && apiVersion() == 1,
+        "V-01: interposer_comms_get_api_version is re-exported and returns the API version");
+
+    ASSERT(versionString && versionString() && versionString()[0] != '\0',
+        "V-02: interposer_comms_get_version_string is re-exported");
+
+    // A representative server and client entry point from each half.
+    ASSERT(dlsym(so, "interposer_comms_server_create") && dlsym(so, "interposer_comms_client_create"),
+        "V-03: the server and client voice API are both present");
+
+    // The original comms_ namespace must be gone -- the rebrand is complete.
+    ASSERT(!dlsym(so, "comms_get_api_version") && !dlsym(so, "comms_server_create"),
+        "V-04: the un-prefixed comms_ names are not exported");
+}
+
 // ── Main suite ────────────────────────────────────────────────────────────────
 
 static void WriteFixture(const fs::path& dir)
@@ -889,6 +914,7 @@ int main(int argc, char** argv)
     RunSdkTests(so);
     RunPluginTests(mainDir);
     RunAdapterEnumTests(so);
+    RunCommsTests(so);
 
     dlclose(so);
 

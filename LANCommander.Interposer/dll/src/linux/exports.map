@@ -11,6 +11,7 @@
 {
   global:
     Interposer*;
+    interposer_comms_*;
 
     /* File hooks (linux/files.cpp). */
     open; open64; openat;

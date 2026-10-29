@@ -3,6 +3,8 @@
 
 find_package(Threads REQUIRED)
 
+include(Comms.cmake)
+
 # ── The shared object ─────────────────────────────────────────────────────────
 
 add_library(LANCommander.Interposer SHARED
@@ -34,7 +36,8 @@ target_include_directories(LANCommander.Interposer
     PRIVATE dll/src/core dll/src/platform dll/src/linux
     PUBLIC  include)
 target_link_libraries(LANCommander.Interposer PRIVATE
-    yaml-cpp::yaml-cpp Threads::Threads ${CMAKE_DL_LIBS})
+    yaml-cpp::yaml-cpp Threads::Threads ${CMAKE_DL_LIBS}
+    interposer_comms)
 interposer_version_resource(LANCommander.Interposer)
 
 # The Linux counterpart of /MT. The C++ runtime is linked in statically and kept

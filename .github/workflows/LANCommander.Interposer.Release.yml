@@ -263,11 +263,14 @@ jobs:
             Copy-Item -Recurse $sampleDir "$archDir\"
           }
 
-          # The SDK a game patch links against: one header, and the import
-          # library the DLL link produced for each architecture. It carries only
-          # the Interposer* API -- proxy.def marks the system-DLL exports PRIVATE.
-          New-Item -ItemType Directory -Force "$d\SDK\include" | Out-Null
+          # The SDK a game patch links against: the Interposer header, the
+          # vendored Comms voice headers (the re-exported interposer_comms_* API),
+          # and the import library the DLL link produced for each architecture.
+          # The .lib carries the Interposer* and interposer_comms_* exports --
+          # proxy.def marks the system-DLL exports PRIVATE.
+          New-Item -ItemType Directory -Force "$d\SDK\include\comms" | Out-Null
           Copy-Item 'LANCommander.Interposer\include\LANCommander.Interposer.h' "$d\SDK\include\"
+          Copy-Item 'LANCommander.Interposer\comms\include\comms\*.h' "$d\SDK\include\comms\"
 
           foreach ($arch in @('x64', 'x86')) {
             $source = "out\windows-$arch\lib\Release\LANCommander.Interposer.lib"
@@ -289,7 +292,8 @@ jobs:
           $names = @($zf.Entries | ForEach-Object { $_.FullName })
           $zf.Dispose()
 
-          $expected = @('README.md', 'SDK/include/LANCommander.Interposer.h')
+          $expected = @('README.md', 'SDK/include/LANCommander.Interposer.h',
+                        'SDK/include/comms/comms.h', 'SDK/include/comms/client.h', 'SDK/include/comms/server.h')
           foreach ($arch in @('x64', 'x86')) {
             $expected += "$arch/LANCommander.Interposer.dll"
             $expected += "$arch/LANCommander.Interposer.Injector.exe"

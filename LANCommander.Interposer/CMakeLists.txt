@@ -21,6 +21,8 @@ endif()
 
 find_package(minhook CONFIG REQUIRED)
 
+include(Comms.cmake)
+
 # ── The hook DLL ──────────────────────────────────────────────────────────────
 
 add_library(LANCommander.Interposer SHARED
@@ -60,7 +62,8 @@ target_include_directories(LANCommander.Interposer
     PRIVATE dll/src/core dll/src/platform dll/src/win
     PUBLIC  include)
 target_link_libraries(LANCommander.Interposer PRIVATE
-    minhook::minhook yaml-cpp::yaml-cpp winhttp ws2_32 version)
+    minhook::minhook yaml-cpp::yaml-cpp winhttp ws2_32 version
+    interposer_comms)
 
 interposer_ship_target(LANCommander.Interposer)
 interposer_version_resource(LANCommander.Interposer)
