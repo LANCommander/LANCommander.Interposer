@@ -24,6 +24,7 @@
 
 #include <dlfcn.h>
 #include <fcntl.h>
+#include <ifaddrs.h>
 #include <netdb.h>
 #include <sys/stat.h>
 #include <sys/utsname.h>
@@ -751,6 +752,20 @@ static int RunNetChild()
 
     ASSERT(loAllowed && othersHidden,
         "NA-01: the NetworkAdapters filter keeps the named adapter and hides the rest");
+
+    // The game's own getifaddrs is filtered: only the kept interface(s) remain.
+    ifaddrs* ifaces = nullptr;
+    bool sawLo = false, sawOther = false;
+    if (getifaddrs(&ifaces) == 0)
+    {
+        for (ifaddrs* ifa = ifaces; ifa; ifa = ifa->ifa_next)
+        {
+            if (ifa->ifa_name && std::strcmp(ifa->ifa_name, "lo") == 0) sawLo = true;
+            else                                                        sawOther = true;
+        }
+        freeifaddrs(ifaces);
+    }
+    ASSERT(sawLo && !sawOther, "NA-02: the game's own getifaddrs returns only the kept adapter");
 
     return g_fail;
 }

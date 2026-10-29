@@ -24,6 +24,7 @@
     /* Identity and DNS hooks (linux/identity.cpp, linux/network.cpp). */
     gethostname; uname;
     getaddrinfo; gethostbyname;
+    getifaddrs; freeifaddrs;
 
   local:
     *;

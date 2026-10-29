@@ -9,6 +9,7 @@
 
 #include <cstring>
 #include <map>
+#include <mutex>
 #include <string>
 #include <vector>
 
@@ -102,17 +103,42 @@ extern "C" INTERPOSER_API struct hostent* gethostbyname(const char* name)
 
 void InstallNetworkHooks()
 {
-    if (g_dnsRedirects.empty())
-        return;
+    if (!g_dnsRedirects.empty())
+    {
+        hooking::LogHookStatus(L"libc", "getaddrinfo", hooking::Status::Ok);
+        hooking::LogHookStatus(L"libc", "gethostbyname", hooking::Status::Ok);
+    }
 
-    hooking::LogHookStatus(L"libc", "getaddrinfo", hooking::Status::Ok);
-    hooking::LogHookStatus(L"libc", "gethostbyname", hooking::Status::Ok);
+    if (netfilter::Active())
+    {
+        hooking::LogHookStatus(L"libc", "getifaddrs", hooking::Status::Ok);
+        hooking::LogHookStatus(L"libc", "freeifaddrs", hooking::Status::Ok);
+    }
 }
 
 // ── Adapter enumeration ───────────────────────────────────────────────────────
 
 namespace
 {
+    // The real getifaddrs/freeifaddrs, for our own enumeration (which must see
+    // every adapter) and for the filter hook to build on.
+    int RealGetIfAddrs(ifaddrs** list)
+    {
+        static int (*real)(ifaddrs**) = nullptr;
+        if (!real)
+            real = reinterpret_cast<int (*)(ifaddrs**)>(dlsym(RTLD_NEXT, "getifaddrs"));
+        return real ? real(list) : -1;
+    }
+
+    void RealFreeIfAddrs(ifaddrs* list)
+    {
+        static void (*real)(ifaddrs*) = nullptr;
+        if (!real)
+            real = reinterpret_cast<void (*)(ifaddrs*)>(dlsym(RTLD_NEXT, "freeifaddrs"));
+        if (real)
+            real(list);
+    }
+
     void SetField(wchar_t* field, size_t capacity, const std::wstring& value)
     {
         const size_t count = value.size() < capacity - 1 ? value.size() : capacity - 1;
@@ -143,8 +169,10 @@ extern "C" INTERPOSER_API DWORD InterposerEnumNetworkAdapters(
     if (outCount)
         *outCount = 0;
 
+    // The real call, not our filter hook: this reports the whole device set
+    // with each adapter's allowed/hidden verdict, as the Windows export does.
     ifaddrs* list = nullptr;
-    if (getifaddrs(&list) != 0)
+    if (RealGetIfAddrs(&list) != 0)
         return 0;
 
     std::vector<Adapter>        adapters;
@@ -213,7 +241,7 @@ extern "C" INTERPOSER_API DWORD InterposerEnumNetworkAdapters(
         }
     }
 
-    freeifaddrs(list);
+    RealFreeIfAddrs(list);
 
     const bool active = netfilter::Active();
 
@@ -236,6 +264,132 @@ extern "C" INTERPOSER_API DWORD InterposerEnumNetworkAdapters(
         *outCount = (total < capacity) ? total : capacity;
 
     return total;
+}
+
+// ── Adapter hiding (the active filter) ────────────────────────────────────────
+//
+// getifaddrs returns one allocation that freeifaddrs frees through its head
+// pointer, so we cannot free individual nodes. Instead we unlink every node of
+// a hidden interface from the ifa_next chain -- hiding it from the caller's
+// walk -- and remember, keyed by the head we return, the original head to free.
+// Our freeifaddrs looks that up so the whole original block is still freed.
+
+namespace
+{
+    std::mutex                      g_ifListMutex;
+    std::map<ifaddrs*, ifaddrs*>    g_ifLists; // returned head -> original head
+
+    // The interfaces to keep: those matching the filter, by name.
+    std::map<std::string, bool> KeepByName(ifaddrs* list)
+    {
+        std::map<std::string, bool> keep;
+        std::map<std::string, std::vector<uint8_t>> macs;
+
+        for (ifaddrs* ifa = list; ifa; ifa = ifa->ifa_next)
+        {
+            if (!ifa->ifa_name)
+                continue;
+
+            const std::string name = ifa->ifa_name;
+            bool& k = keep.try_emplace(name, false).first->second;
+
+            if (netfilter::NameMatch(platform::Utf8ToWide(name)))
+                k = true;
+
+            if (!ifa->ifa_addr)
+                continue;
+
+            if (ifa->ifa_addr->sa_family == AF_INET)
+            {
+                const auto* in4 = reinterpret_cast<const sockaddr_in*>(ifa->ifa_addr);
+                if (netfilter::SubnetMatch(ntohl(in4->sin_addr.s_addr)))
+                    k = true;
+            }
+            else if (ifa->ifa_addr->sa_family == AF_PACKET)
+            {
+                const auto* ll = reinterpret_cast<const sockaddr_ll*>(ifa->ifa_addr);
+                if (ll->sll_halen == 6 && netfilter::MacMatch(ll->sll_addr, 6))
+                    k = true;
+            }
+        }
+
+        return keep;
+    }
+}
+
+extern "C" INTERPOSER_API int getifaddrs(ifaddrs** ifap)
+{
+    ifaddrs* list = nullptr;
+    const int result = RealGetIfAddrs(&list);
+
+    if (result != 0 || !ifap || !hooking::Enabled() || !netfilter::Active())
+    {
+        if (ifap)
+            *ifap = list;
+        else
+            RealFreeIfAddrs(list);
+        return result;
+    }
+
+    const std::map<std::string, bool> keep = KeepByName(list);
+
+    // Unlink every node whose interface is not kept; the survivors keep their
+    // relative order. The head may change, so track the original for freeing.
+    ifaddrs* head = nullptr;
+    ifaddrs* tail = nullptr;
+
+    for (ifaddrs* ifa = list; ifa; ifa = ifa->ifa_next)
+    {
+        const auto it = ifa->ifa_name ? keep.find(ifa->ifa_name) : keep.end();
+        const bool kept = it != keep.end() && it->second;
+
+        if (!kept)
+        {
+            LogNetworkAccess(L"ADAPTER HIDE", platform::Utf8ToWide(ifa->ifa_name ? ifa->ifa_name : "").c_str());
+            continue;
+        }
+
+        if (!head)
+            head = ifa;
+        else
+            tail->ifa_next = ifa;
+
+        tail = ifa;
+    }
+
+    if (tail)
+        tail->ifa_next = nullptr;
+
+    if (head)
+    {
+        std::lock_guard<std::mutex> lk(g_ifListMutex);
+        g_ifLists[head] = list;
+    }
+    else
+    {
+        // Everything hidden: nothing to return, but the block still must be freed.
+        RealFreeIfAddrs(list);
+    }
+
+    *ifap = head;
+    return 0;
+}
+
+extern "C" INTERPOSER_API void freeifaddrs(ifaddrs* ifa)
+{
+    if (ifa)
+    {
+        std::lock_guard<std::mutex> lk(g_ifListMutex);
+        if (auto it = g_ifLists.find(ifa); it != g_ifLists.end())
+        {
+            ifaddrs* original = it->second;
+            g_ifLists.erase(it);
+            RealFreeIfAddrs(original);
+            return;
+        }
+    }
+
+    RealFreeIfAddrs(ifa);
 }
 
 // The network hooks are what collect game-server addresses for FastDL to probe.
