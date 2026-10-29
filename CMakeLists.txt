@@ -62,7 +62,11 @@ add_compile_definitions(UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX)
 # is an MSBuild default the VS generator does not carry over. /LTCG:incremental
 # rather than /LTCG is MSBuild's Release default too, and not cosmetic: full
 # /LTCG inlines more aggressively across modules and grows the DLL by ~85 KB.
-add_compile_options(/W3 /sdl /permissive- /Zc:inline "$<$<CONFIG:Release>:/Gy;/Oi;/GL>")
+# A target that sets INTERPOSER_NO_LTCG compiles without /GL: the static library
+# a patch embeds, whose objects must link with any v14x toolset, not only the
+# exact compiler that produced them.
+add_compile_options(/W3 /sdl /permissive- /Zc:inline "$<$<CONFIG:Release>:/Gy;/Oi>"
+    "$<$<AND:$<CONFIG:Release>,$<NOT:$<BOOL:$<TARGET_PROPERTY:INTERPOSER_NO_LTCG>>>>:/GL>")
 add_link_options(/DEBUG "$<$<CONFIG:Release>:/LTCG:incremental;/OPT:REF;/OPT:ICF>")
 
 include(build/Compatibility.cmake)

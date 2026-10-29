@@ -14,8 +14,14 @@
 #define LANCOMMANDER_INTERPOSER_EXPORT_H
 
 #ifdef _WIN32
-#  ifdef INTERPOSER_BUILDING_DLL
+   /* INTERPOSER_STATIC: the consumer links LANCommander.Interposer.Static into
+    * its own image (see LANCommander.Interposer.Embedded.h), so there is no
+    * import to go through. The library itself is still built with
+    * INTERPOSER_BUILDING_DLL: the exports leave through the embedding image. */
+#  if defined(INTERPOSER_BUILDING_DLL)
 #    define INTERPOSER_API __declspec(dllexport)
+#  elif defined(INTERPOSER_STATIC)
+#    define INTERPOSER_API
 #  else
 #    define INTERPOSER_API __declspec(dllimport)
 #  endif

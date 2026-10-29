@@ -2,7 +2,6 @@
 #define NOMINMAX
 #include <windows.h>
 
-#include "config.h"
 #include "dinput.h"
 
 // ---------------------------------------------------------------------------
@@ -202,11 +201,12 @@ FORWARD(SysVersion, BOOL, VerQueryValueW,
 
 // Routed through the DirectInput subsystem rather than forwarded blindly, so
 // that DirectInput.DeviceFilter and the enumeration logging apply. It falls
-// back to the real export when neither is configured.
+// back to the real export when neither is configured. Through the public entry
+// point, which a second copy forwards to the copy that owns the process.
 extern "C" HRESULT WINAPI DirectInput8Create(HINSTANCE hinst, DWORD dwVersion,
     const void* riidltf, LPVOID* ppvOut, void* punkOuter)
 {
-    return DirectInput8CreateFiltered(hinst, dwVersion, riidltf, ppvOut, punkOuter);
+    return InterposerDirectInput8Create(hinst, dwVersion, riidltf, ppvOut, punkOuter);
 }
 
 // Returns the address of dinput8's c_dfDIJoystick data format. Games that link
@@ -218,18 +218,12 @@ FORWARD(SysDInput8, LPVOID, GetdfDIJoystick, (void), (), nullptr)
 // dinput.dll
 // ---------------------------------------------------------------------------
 
+// FixLegacyDeviceEnumeration applies to both, through the same public entry
+// points a patch that embeds the Interposer calls (see DirectInput8Create).
 extern "C" HRESULT WINAPI DirectInputCreateA(HINSTANCE hinst, DWORD dwVersion,
     LPVOID* ppDI, void* punkOuter)
 {
-    if (g_diFixLegacyEnum)
-        return DirectInputBridgeCreate(hinst, dwVersion, ppDI, punkOuter);
-
-    using Fn = HRESULT (WINAPI*)(HINSTANCE, DWORD, LPVOID*, void*);
-    static Fn cache = nullptr;
-
-    Fn fn = Resolved<Fn>(SysDInput, "DirectInputCreateA", cache);
-
-    return fn ? fn(hinst, dwVersion, ppDI, punkOuter) : E_FAIL;
+    return InterposerDirectInputCreateA(hinst, dwVersion, ppDI, punkOuter);
 }
 
 // The Unicode entry point is always forwarded: the bridge only handles ANSI
@@ -241,15 +235,7 @@ FORWARD(SysDInput, HRESULT, DirectInputCreateW,
 extern "C" HRESULT WINAPI DirectInputCreateEx(HINSTANCE hinst, DWORD dwVersion,
     const void* riid, LPVOID* ppvOut, void* punkOuter)
 {
-    if (g_diFixLegacyEnum && DirectInputBridgeWantsIid(riid))
-        return DirectInputBridgeCreate(hinst, dwVersion, ppvOut, punkOuter);
-
-    using Fn = HRESULT (WINAPI*)(HINSTANCE, DWORD, const void*, LPVOID*, void*);
-    static Fn cache = nullptr;
-
-    Fn fn = Resolved<Fn>(SysDInput, "DirectInputCreateEx", cache);
-
-    return fn ? fn(hinst, dwVersion, riid, ppvOut, punkOuter) : E_FAIL;
+    return InterposerDirectInputCreateEx(hinst, dwVersion, riid, ppvOut, punkOuter);
 }
 
 // ---------------------------------------------------------------------------

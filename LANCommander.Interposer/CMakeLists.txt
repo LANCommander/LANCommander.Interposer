@@ -58,16 +58,17 @@ find_package(minhook CONFIG REQUIRED)
 
 # ── The hook DLL ──────────────────────────────────────────────────────────────
 
-add_library(LANCommander.Interposer SHARED
-    ${INTERPOSER_CORE_SOURCES}
+# Everything but the entry point and the proxy exports, shared by the DLL and by
+# the static library a patch embeds.
+set(INTERPOSER_WIN_SOURCES
     dll/src/platform/win/hooking.cpp
     dll/src/platform/win/http.cpp
     dll/src/platform/win/platform.cpp
+    dll/src/win/attach.cpp
     dll/src/win/audio.cpp
     dll/src/win/control.cpp
     dll/src/win/dinput.cpp
     dll/src/win/discord_ipc.cpp
-    dll/src/win/dllmain.cpp
     dll/src/win/files.cpp
     dll/src/win/hooks.cpp
     dll/src/win/identity.cpp
@@ -75,10 +76,16 @@ add_library(LANCommander.Interposer SHARED
     dll/src/win/ipx.cpp
     dll/src/win/network.cpp
     dll/src/win/osversion.cpp
-    dll/src/win/proxy.cpp
     dll/src/win/registry.cpp
     dll/src/win/relay.cpp
     dll/src/win/richpresence.cpp
+)
+
+add_library(LANCommander.Interposer SHARED
+    ${INTERPOSER_CORE_SOURCES}
+    ${INTERPOSER_WIN_SOURCES}
+    dll/src/win/dllmain.cpp
+    dll/src/win/proxy.cpp
     # The union of version.dll, dinput8.dll and dinput.dll's exports; also what
     # keeps them out of the import library (see "One DLL, four names").
     dll/src/win/proxy.def
@@ -100,6 +107,41 @@ target_link_libraries(LANCommander.Interposer PRIVATE
 
 interposer_ship_target(LANCommander.Interposer)
 interposer_version_resource(LANCommander.Interposer)
+
+# ── The embeddable library ────────────────────────────────────────────────────
+#
+# The same Interposer, for a patch that ships as one file with it inside (see
+# include/LANCommander.Interposer.Embedded.h). No DllMain -- the patch calls
+# InterposerEmbeddedAttach/Detach from its own -- and no proxy exports, which
+# would collide with the patch's. Still built with INTERPOSER_BUILDING_DLL, so
+# the Interposer* exports leave through the patch's image; and without /GL, so
+# its objects are not tied to the exact compiler that built them.
+#
+# Link LANCommander::Interposer::Embedded, not this: it links the archive whole,
+# without which every object the patch does not call into would be dropped and
+# its exports with it.
+
+add_library(LANCommander.Interposer.Static STATIC
+    ${INTERPOSER_CORE_SOURCES}
+    ${INTERPOSER_WIN_SOURCES}
+)
+
+set_target_properties(LANCommander.Interposer.Static PROPERTIES INTERPOSER_NO_LTCG ON)
+target_compile_definitions(LANCommander.Interposer.Static PRIVATE INTERPOSER_BUILDING_DLL)
+target_include_directories(LANCommander.Interposer.Static
+    PRIVATE dll/src/core dll/src/platform dll/src/win
+    PUBLIC  include)
+target_link_libraries(LANCommander.Interposer.Static PRIVATE
+    minhook::minhook yaml-cpp::yaml-cpp winhttp ws2_32 version winmm
+    ${INTERPOSER_VOICE_LIBRARIES})
+
+interposer_version_resource(LANCommander.Interposer.Static)
+
+add_library(LANCommander.Interposer.Embedded INTERFACE)
+add_library(LANCommander::Interposer::Embedded ALIAS LANCommander.Interposer.Embedded)
+target_link_libraries(LANCommander.Interposer.Embedded INTERFACE
+    "$<LINK_LIBRARY:WHOLE_ARCHIVE,LANCommander.Interposer.Static>")
+target_compile_definitions(LANCommander.Interposer.Embedded INTERFACE INTERPOSER_STATIC)
 
 # ── The injector ──────────────────────────────────────────────────────────────
 
@@ -134,3 +176,16 @@ target_link_libraries(LANCommander.Interposer.Tests PRIVATE LANCommander.Interpo
 target_link_options(LANCommander.Interposer.Tests PRIVATE
     /DELAYLOAD:LANCommander.Interposer.dll
     /DELAY:UNLOAD)
+
+# A stand-in game patch with the Interposer embedded (the EM- tests). Built as a
+# shipping patch would be -- C, /MT, the XP settings -- because that is the
+# configuration the embeddable library has to link into.
+add_library(LANCommander.Interposer.Tests.Patch SHARED
+    tests/embedded/patch.c
+    tests/embedded/patch.def
+)
+
+target_link_libraries(LANCommander.Interposer.Tests.Patch PRIVATE LANCommander::Interposer::Embedded)
+interposer_ship_target(LANCommander.Interposer.Tests.Patch)
+
+add_dependencies(LANCommander.Interposer.Tests LANCommander.Interposer.Tests.Patch)

@@ -940,11 +940,103 @@ PfnDirectInput8Create RealDirectInput8Create()
     return LoadDirectInput8() ? g_di8Create : nullptr;
 }
 
+// ---------------------------------------------------------------------------
+// dinput.dll, for the DirectInput 3/7 calls that are passed through
+// ---------------------------------------------------------------------------
+
+// The System32 copy by explicit path, like LoadDirectInput8: the module that
+// answers to "dinput.dll" may be a patch, or this very image, deployed as it.
+FARPROC SystemDirectInputProc(const char* name)
+{
+    static HMODULE module = nullptr;
+
+    if (!module)
+    {
+        wchar_t path[MAX_PATH]{};
+
+        UINT length = GetSystemDirectoryW(path, MAX_PATH);
+
+        if (length == 0 || length > MAX_PATH - 16)
+            return nullptr;
+
+        wcscat_s(path, L"\\dinput.dll");
+
+        module = LoadLibraryW(path);
+
+        if (!module)
+        {
+            LogDirectInput(L"DINPUT", L"failed to load", path);
+            return nullptr;
+        }
+    }
+
+    return GetProcAddress(module, name);
+}
+
+// The trampoline when this copy detoured the export, as RealDirectInput8Create
+// prefers it, so a passthrough never lands back in HookDirectInputCreateA.
+PfnDirectInputCreateA RealDirectInputCreateA()
+{
+    if (g_origDirectInputCreateA)
+        return g_origDirectInputCreateA;
+
+    return reinterpret_cast<PfnDirectInputCreateA>(
+        reinterpret_cast<void*>(SystemDirectInputProc("DirectInputCreateA")));
+}
+
+PfnDirectInputCreateEx RealDirectInputCreateEx()
+{
+    if (g_origDirectInputCreateEx)
+        return g_origDirectInputCreateEx;
+
+    return reinterpret_cast<PfnDirectInputCreateEx>(
+        reinterpret_cast<void*>(SystemDirectInputProc("DirectInputCreateEx")));
+}
+
 } // namespace
 
 // ---------------------------------------------------------------------------
 // Public API
 // ---------------------------------------------------------------------------
+
+// The DirectInput entry points for a module that serves the exports itself:
+// proxy.cpp when this binary is deployed as dinput.dll / dinput8.dll, and a
+// patch that embeds the Interposer. Forwarded like every export, so a second
+// copy deployed under one of those names answers with the configuration of the
+// copy that owns the process -- whose hooks, in turn, leave the module alone
+// (ModuleServesDirectInput).
+LONG InterposerDirectInputCreateA(HINSTANCE hinst, DWORD version, void** ppvOut, void* punkOuter)
+{
+    FORWARD_TO_PRIMARY(InterposerDirectInputCreateA, hinst, version, ppvOut, punkOuter);
+
+    if (g_diFixLegacyEnum)
+        return DirectInputBridgeCreate(hinst, version, ppvOut, punkOuter);
+
+    PfnDirectInputCreateA create = RealDirectInputCreateA();
+
+    return create ? create(hinst, version, ppvOut, punkOuter) : E_FAIL;
+}
+
+LONG InterposerDirectInputCreateEx(HINSTANCE hinst, DWORD version, const void* riid,
+    void** ppvOut, void* punkOuter)
+{
+    FORWARD_TO_PRIMARY(InterposerDirectInputCreateEx, hinst, version, riid, ppvOut, punkOuter);
+
+    if (g_diFixLegacyEnum && DirectInputBridgeWantsIid(riid))
+        return DirectInputBridgeCreate(hinst, version, ppvOut, punkOuter);
+
+    PfnDirectInputCreateEx create = RealDirectInputCreateEx();
+
+    return create ? create(hinst, version, static_cast<const GUID*>(riid), ppvOut, punkOuter) : E_FAIL;
+}
+
+LONG InterposerDirectInput8Create(HINSTANCE hinst, DWORD version, const void* riid,
+    void** ppvOut, void* punkOuter)
+{
+    FORWARD_TO_PRIMARY(InterposerDirectInput8Create, hinst, version, riid, ppvOut, punkOuter);
+
+    return DirectInput8CreateFiltered(hinst, version, riid, ppvOut, punkOuter);
+}
 
 BOOL InterposerRegisterMouseTransform(InterposerMouseTransform callback, void* userData)
 {
@@ -1039,19 +1131,29 @@ HRESULT DirectInputBridgeCreate(HINSTANCE hinst, DWORD version, void** ppDI, voi
 
 namespace {
 
-// True when the named module resolves to this one. This is the guard that makes
-// a single binary safe to deploy under any name: when the file IS dinput.dll or
-// dinput8.dll, its exports are served directly by proxy.cpp and hooking them
-// would detour us straight back into ourselves.
-bool ModuleIsSelf(const wchar_t* moduleName)
+// True when the named module serves its DirectInput exports itself, so they
+// must not be detoured. Either it is this image -- deployed AS dinput.dll or
+// dinput8.dll, where proxy.cpp serves the exports and a hook would detour us
+// straight back into ourselves -- or it routes them through an Interposer of
+// its own: LANCommander.Interposer.dll under that name as a second copy, or a
+// patch that embeds the Interposer. Both export InterposerDirectInputCreateA.
+// A detour there would put this copy's handling in front of the module's own,
+// and DirectInputCreateA's would skip a patch's wrapper altogether, since the
+// bridge never calls the original.
+bool ModuleServesDirectInput(const wchar_t* moduleName)
 {
+    HMODULE module = GetModuleHandleW(moduleName);
+
+    if (!module)
+        return false;
+
     HMODULE self = nullptr;
 
     GetModuleHandleExW(
         GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
-        reinterpret_cast<LPCWSTR>(&ModuleIsSelf), &self);
+        reinterpret_cast<LPCWSTR>(&ModuleServesDirectInput), &self);
 
-    return self && self == GetModuleHandleW(moduleName);
+    return module == self || GetProcAddress(module, "InterposerDirectInputCreateA") != nullptr;
 }
 
 HRESULT WINAPI HookDirectInputCreateA(HINSTANCE hinst, DWORD version, void** ppDI, void* punkOuter)
@@ -1077,7 +1179,7 @@ HRESULT WINAPI HookDirectInputCreateEx(HINSTANCE hinst, DWORD version, const GUI
 
 void InstallLegacyCreateHooks()
 {
-    if (!g_diFixLegacyEnum || ModuleIsSelf(L"dinput.dll"))
+    if (!g_diFixLegacyEnum || ModuleServesDirectInput(L"dinput.dll"))
         return;
 
     LogHookInit(L"dinput.dll", "DirectInputCreateA",
@@ -1116,7 +1218,7 @@ bool DirectInput8HookWanted()
 
 void InstallDirectInput8Hook()
 {
-    if (!DirectInput8HookWanted() || ModuleIsSelf(L"dinput8.dll"))
+    if (!DirectInput8HookWanted() || ModuleServesDirectInput(L"dinput8.dll"))
         return;
 
     LogHookInit(L"dinput8.dll", "DirectInput8Create",

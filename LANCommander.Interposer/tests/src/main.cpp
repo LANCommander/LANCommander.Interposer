@@ -4410,6 +4410,241 @@ static void RunSecondInstanceTests(const std::wstring& exeDir, const std::wstrin
 }
 
 // ============================================================
+// Embedded tests  (separate processes)
+// ============================================================
+// A patch can carry the Interposer inside its own DLL (LANCommander.Interposer.
+// Static, see LANCommander.Interposer.Embedded.h). LANCommander.Interposer.Tests.
+// Patch.dll is such a patch, staged as dinput.dll the way a DirectInput patch
+// ships. Each order of "patch, then LANCommander.Interposer.dll" gets a child of
+// its own, because whichever loads first installs hooks this process cannot
+// take back. Each image has its own .interposer tree, and as in the MI- tests
+// their FileRedirects send one probe file to different places.
+
+using FnPatchIsPrimary    = BOOL (*)();
+using FnPatchCalls        = LONG (*)();
+using FnDirectInputCreate = HRESULT (WINAPI*)(HINSTANCE, DWORD, void**, void*);
+
+template <typename Fn>
+static Fn ExportOf(HMODULE module, const char* name)
+{
+    return reinterpret_cast<Fn>(reinterpret_cast<void*>(GetProcAddress(module, name)));
+}
+
+// Creates a DirectInput 7 object through the patch's own export and releases
+// it again. True if the export produced an object.
+static bool CreateDirectInputThrough(HMODULE patch)
+{
+    auto create = ExportOf<FnDirectInputCreate>(patch, "DirectInputCreateA");
+
+    void* di = nullptr;
+
+    if (!create || FAILED(create(GetModuleHandleW(nullptr), 0x0700, &di, nullptr)) || !di)
+        return false;
+
+    using FnRelease = ULONG (WINAPI*)(void*);
+    (*reinterpret_cast<FnRelease**>(di))[2](di);
+    return true;
+}
+
+// Runs in the child process. Returns the number of failed assertions.
+static int RunEmbeddedChild(const wchar_t* modeArg, const wchar_t* patchDirArg, const wchar_t* dllDirArg)
+{
+    // Passed without trailing separators; see RunIsolatedChild.
+    const std::wstring patchDir = WithSeparator(patchDirArg);
+    const std::wstring dllDir   = WithSeparator(dllDirArg);
+    const bool patchFirst = wcscmp(modeArg, L"patch-first") == 0;
+
+    wprintf(L"\n--- Embedded Tests: %ls (child process) ---\n", modeArg);
+
+    const std::wstring patchPath = patchDir + L"dinput.dll";
+    const std::wstring dllPath   = dllDir + L"LANCommander.Interposer.dll";
+
+    const std::wstring probe     = patchDir + L"embedded_probe.txt";
+    const std::wstring fromPatch = patchDir + L"from_patch.txt";
+    const std::wstring fromDll   = patchDir + L"from_dll.txt";
+
+    if (patchFirst)
+    {
+        HMODULE patch = LoadLibraryW(patchPath.c_str());
+
+        if (!patch)
+        {
+            wprintf(L"  FAIL  EM-00: child could not load the patch (GLE=%lu)\n", GetLastError());
+            return 1;
+        }
+
+        auto isPrimary = ExportOf<FnPatchIsPrimary>(patch, "PatchProbeIsPrimary");
+        auto direct    = ExportOf<FnTestGetConfig>(patch, "PatchProbeGetConfig");
+        auto exported  = ExportOf<FnTestGetConfig>(patch, "InterposerGetConfigString");
+
+        ASSERT(isPrimary && isPrimary(),
+            L"EM-01: an embedded Interposer loaded first owns the process");
+
+        ASSERT(exported && GetConfig(exported, L"Plugins.Probe.Owner") == L"patch",
+            L"EM-02: the patch's image exports the Interposer API, answering from the Config.yml beside the patch");
+
+        ASSERT(direct && GetConfig(direct, L"Plugins.Probe.Owner") == L"patch",
+            L"EM-03: the patch's own calls into the embedded Interposer read the same configuration");
+
+        ASSERT(!FindFirstLogFile(patchDir + L".interposer\\Logs\\").empty(),
+            L"EM-04: the embedded Interposer opens its session log beside the patch");
+
+        TouchFile(probe);
+
+        ASSERT(PathExists(fromPatch) && !PathExists(fromDll),
+            L"EM-05: the embedded Interposer's file hooks run");
+
+        ASSERT(CreateDirectInputThrough(patch),
+            L"EM-06: the patch's DirectInputCreateA creates an object through InterposerDirectInputCreateA");
+
+        HMODULE dll = LoadLibraryW(dllPath.c_str());
+
+        if (!dll)
+        {
+            wprintf(L"  FAIL  EM-00: child could not load LANCommander.Interposer.dll (GLE=%lu)\n", GetLastError());
+            return g_fail + 1;
+        }
+
+        auto dllGet = ExportOf<FnTestGetConfig>(dll, "InterposerGetConfigString");
+
+        DeleteFileW(fromPatch.c_str());
+        TouchFile(probe);
+
+        ASSERT(dllGet && GetConfig(dllGet, L"Plugins.Probe.Owner") == L"patch" &&
+               PathExists(fromPatch) && !PathExists(fromDll) &&
+               !PathExists(dllDir + L".interposer\\Logs"),
+            L"EM-07: LANCommander.Interposer.dll loaded after the patch defers to the embedded copy");
+
+        return g_fail;
+    }
+
+    HMODULE dll   = LoadLibraryW(dllPath.c_str());
+    HMODULE patch = dll ? LoadLibraryW(patchPath.c_str()) : nullptr;
+
+    if (!dll || !patch)
+    {
+        wprintf(L"  FAIL  EM-00: child could not load both images (GLE=%lu)\n", GetLastError());
+        return 1;
+    }
+
+    auto isPrimary = ExportOf<FnPatchIsPrimary>(patch, "PatchProbeIsPrimary");
+    auto direct    = ExportOf<FnTestGetConfig>(patch, "PatchProbeGetConfig");
+    auto calls     = ExportOf<FnPatchCalls>(patch, "PatchProbeDirectInputCalls");
+
+    ASSERT(isPrimary && !isPrimary(),
+        L"EM-08: an embedded Interposer loaded second defers to the one already there");
+
+    ASSERT(direct && GetConfig(direct, L"Plugins.Probe.Owner") == L"dll",
+        L"EM-09: the patch's own calls forward to the Interposer that owns the process");
+
+    TouchFile(probe);
+
+    ASSERT(PathExists(fromDll) && !PathExists(fromPatch) && !PathExists(patchDir + L".interposer\\Logs"),
+        L"EM-10: only the first Interposer's hooks run, and the embedded copy opens no log");
+
+    // The DLL has FixLegacyDeviceEnumeration on, which detours dinput.dll's
+    // DirectInputCreateA when it loads -- and the patch is what loaded under
+    // that name. Detoured, the call would reach the bridge without the patch.
+    ASSERT(CreateDirectInputThrough(patch) && calls && calls() == 1,
+        L"EM-11: another Interposer leaves the patch's own DirectInputCreateA undetoured");
+
+    return g_fail;
+}
+
+static void RunEmbeddedTests(const std::wstring& exeDir, const std::wstring& testTmpDir)
+{
+    wprintf(L"\n--- Embedded Tests ---\n");
+
+    wchar_t exePathBuf[MAX_PATH]{};
+    GetModuleFileNameW(nullptr, exePathBuf, MAX_PATH);
+    const std::wstring exePath = exePathBuf;
+
+    for (const wchar_t* mode : { L"patch-first", L"dll-first" })
+    {
+        const std::wstring root     = testTmpDir + L"Embedded\\" + mode + L"\\";
+        const std::wstring patchDir = root + L"Patch\\";
+        const std::wstring dllDir   = root + L"Dll\\";
+
+        const std::string fromPatch = WideToUtf8(patchDir) + "from_patch.txt";
+        const std::string fromDll   = WideToUtf8(patchDir) + "from_dll.txt";
+
+        CreateDirs(patchDir + L".interposer\\");
+        CreateDirs(dllDir + L".interposer\\");
+
+        if (!CopyFileW((exeDir + L"LANCommander.Interposer.Tests.Patch.dll").c_str(),
+                (patchDir + L"dinput.dll").c_str(), FALSE) ||
+            !CopyFileW((exeDir + L"LANCommander.Interposer.dll").c_str(),
+                (dllDir + L"LANCommander.Interposer.dll").c_str(), FALSE))
+        {
+            ASSERT(false, L"EM-00: staging the patch and the DLL");
+            return;
+        }
+
+        const bool patchFirst = wcscmp(mode, L"patch-first") == 0;
+
+        // As in the MI- tests, the image loaded second also redirects the first
+        // one's output, which covers a detour chained inside the first's. Only
+        // the second: the first's hooks run, and such a rule there would
+        // redirect the test's own existence checks.
+        auto config = [](const std::string& target, const std::string& firstOutput, const char* owner)
+        {
+            std::string text =
+                "FileRedirects:\n"
+                "  - Pattern: '.*\\\\embedded_probe\\.txt$'\n"
+                "    Replacement: '" + target + "'\n";
+
+            if (!firstOutput.empty())
+                text += "  - Pattern: '.*\\\\" + firstOutput + "\\.txt$'\n"
+                        "    Replacement: '" + target + "'\n";
+
+            return text +
+                "\n"
+                "DirectInput:\n"
+                "  FixLegacyDeviceEnumeration: true\n"
+                "\n"
+                "Plugins:\n"
+                "  Probe:\n"
+                "    Owner: " + owner + "\n";
+        };
+
+        WriteTextFile(patchDir + L".interposer\\Config.yml",
+            config(fromPatch, patchFirst ? "" : "from_dll", "patch"));
+        WriteTextFile(dllDir + L".interposer\\Config.yml",
+            config(fromDll, patchFirst ? "from_patch" : "", "dll"));
+
+        // Trailing separators come off for the command line; see RunIsolatedTests.
+        std::wstring command = L"\"" + exePath + L"\" --embedded " + mode + L" \"" +
+            patchDir.substr(0, patchDir.size() - 1) + L"\" \"" +
+            dllDir.substr(0, dllDir.size() - 1) + L"\"";
+
+        STARTUPINFOW si{};
+        si.cb = sizeof(si);
+        PROCESS_INFORMATION pi{};
+
+        if (!CreateProcessW(exePath.c_str(), command.data(), nullptr, nullptr, TRUE, 0, nullptr, nullptr, &si, &pi))
+        {
+            ASSERT(false, L"EM-00: launching the embedded child process");
+            return;
+        }
+
+        WaitForSingleObject(pi.hProcess, 120 * 1000);
+
+        DWORD exitCode = 1;
+        GetExitCodeProcess(pi.hProcess, &exitCode);
+        CloseHandle(pi.hThread);
+        CloseHandle(pi.hProcess);
+
+        if (patchFirst)
+            ASSERT(exitCode == 0, L"EM-00a: the patch-first child reported no failures");
+        else
+            ASSERT(exitCode == 0, L"EM-00b: the dll-first child reported no failures");
+
+        std::error_code ignored;
+        std::filesystem::remove_all(root, ignored);
+    }
+}
+
+// ============================================================
 // Network relay tests  (two peer processes + a relay server)
 // ============================================================
 // The relay needs a server and two members to be worth testing, so the parent
@@ -5295,6 +5530,11 @@ int wmain(int argc, wchar_t** argv)
     if (argc >= 4 && wcscmp(argv[1], L"--second-instance") == 0)
         return RunSecondInstanceChild(argv[2], argv[3]);
 
+    // Re-entry from RunEmbeddedTests: a patch with the Interposer inside it,
+    // loaded before or after LANCommander.Interposer.dll.
+    if (argc >= 5 && wcscmp(argv[1], L"--embedded") == 0)
+        return RunEmbeddedChild(argv[2], argv[3], argv[4]);
+
     std::wstring exeDir        = GetExeDir();
     std::wstring testTmpDir    = GetTestTempDir();
     std::wstring interposerDir = exeDir + L".interposer\\";
@@ -5421,6 +5661,9 @@ int wmain(int argc, wchar_t** argv)
 
     // Likewise: two copies of the DLL, which this process cannot host twice.
     RunSecondInstanceTests(exeDir, testTmpDir);
+
+    // Likewise: a patch that embeds the Interposer, beside the DLL.
+    RunEmbeddedTests(exeDir, testTmpDir);
 
     // Likewise separate processes: two relay peers, each with its own DLL.
     RunRelayTests(exeDir, testTmpDir);

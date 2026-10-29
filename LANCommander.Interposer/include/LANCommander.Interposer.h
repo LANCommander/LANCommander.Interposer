@@ -14,6 +14,10 @@
  *     GetProcAddress on the HMODULE handed to InterposerPluginInit. The types
  *     here describe those exports; a plugin does not need the import library.
  *
+ *   - A patch that EMBEDS it: the patch's own DLL (a dinput.dll proxy, an
+ *     .asi) with LANCommander.Interposer.Static linked in, so one file carries
+ *     both. See LANCommander.Interposer.Embedded.h.
+ *
  * Plain C, so it can be included from C or C++. Every function uses __cdecl --
  * written out below, so a project compiled with /Gz or /Gr still calls them
  * correctly. Outside Windows the Win32 type names used here (BOOL, DWORD,
@@ -88,6 +92,20 @@ INTERPOSER_API BOOL INTERPOSER_CALL InterposerRegisterPluginConfig(const wchar_t
  * Returns FALSE outside Plugins.<Name>, on a shape collision, or if the file
  * could not be written (the in-memory value is updated regardless). */
 INTERPOSER_API BOOL INTERPOSER_CALL InterposerSetConfigString(const wchar_t* dotPath, const wchar_t* value);
+
+/* ===========================================================================
+ * FastDL
+ * ======================================================================== */
+
+/* Point FastDL at a server found at run time -- the one the game server a
+ * player joins advertises, say. baseUrl is http:// or https://; a trailing
+ * slash is added if missing. NULL or L"" forgets it. While set, it wins over
+ * a FastDL.BaseUrl in Config.yml (or the launcher's --fastdl-url), which is
+ * used again once it is forgotten, and over the servers
+ * FastDL.ProbeConnections finds. Config.yml decides the rest (FastDL.Enabled,
+ * FastDL.Paths). Returns FALSE when FastDL is off
+ * or the URL is not http(s); the URL is not kept then. */
+INTERPOSER_API BOOL INTERPOSER_CALL InterposerSetFastDLBaseUrl(const wchar_t* baseUrl);
 
 /* ===========================================================================
  * Virtual registry
@@ -223,6 +241,30 @@ typedef void (INTERPOSER_STDCALL* InterposerMouseTransform)(InterposerMouseBatch
 /* One at a time; registering again replaces. NULL unregisters. */
 INTERPOSER_API BOOL INTERPOSER_CALL InterposerRegisterMouseTransform(
     InterposerMouseTransform callback, void* userData);
+
+#ifdef _WIN32
+/* ===========================================================================
+ * DirectInput entry points, for a patch deployed as dinput.dll or dinput8.dll
+ *
+ * Such a patch serves the game's DirectInputCreateA/Ex or DirectInput8Create
+ * itself, so no Interposer detours them. Calling these from that export is
+ * what keeps DirectInput.FixLegacyDeviceEnumeration and
+ * DirectInput.DeviceFilter in effect: each does what the Interposer's own
+ * proxy export of that name does, and falls through to the real System32
+ * DLL when neither is configured. The object comes back in *ppvOut, ready for
+ * the patch to wrap. Exporting these is also how another Interposer in the
+ * process recognises the module and leaves its exports alone.
+ *
+ * hinst is an HINSTANCE, riid a REFIID; the return value is an HRESULT.
+ * ======================================================================== */
+
+INTERPOSER_API LONG INTERPOSER_CALL InterposerDirectInputCreateA(
+    HINSTANCE hinst, DWORD version, void** ppvOut, void* punkOuter);
+INTERPOSER_API LONG INTERPOSER_CALL InterposerDirectInputCreateEx(
+    HINSTANCE hinst, DWORD version, const void* riid, void** ppvOut, void* punkOuter);
+INTERPOSER_API LONG INTERPOSER_CALL InterposerDirectInput8Create(
+    HINSTANCE hinst, DWORD version, const void* riid, void** ppvOut, void* punkOuter);
+#endif
 
 /* ===========================================================================
  * Network relay
