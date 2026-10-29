@@ -2,7 +2,7 @@
 #include "instance.h"
 #include "config.h"
 
-#include <MinHook.h>
+#include "minhook_support.h"
 
 #include <string>
 
@@ -11,7 +11,7 @@
 //
 // Declared here rather than including the Windows SDK <dinput.h>: only a few
 // structures and a handful of GUIDs are needed, taking the SDK header would add
-// a dxguid.lib link dependency for the GUIDs, and dll\src is on the include
+// a dxguid.lib link dependency for the GUIDs, and dll\src\win is on the include
 // path — so <dinput.h> would resolve to this subsystem's own header instead.
 //
 // Natural alignment throughout, matching DirectInput itself. The DX3 record is

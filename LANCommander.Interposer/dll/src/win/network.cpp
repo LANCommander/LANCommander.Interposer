@@ -7,7 +7,7 @@
 #include <mstcpip.h>
 #include <iphlpapi.h>
 #include <icmpapi.h>
-#include <MinHook.h>
+#include "minhook_support.h"
 #include <atomic>
 #include <mutex>
 #include <unordered_map>

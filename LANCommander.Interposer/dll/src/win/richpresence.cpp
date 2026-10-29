@@ -147,7 +147,7 @@ void InterposerSetPresenceState(const char* state)
 }
 
 extern "C" __declspec(dllexport)
-void InterposerSetPresenceTimestamps(int64_t start, int64_t end)
+void InterposerSetPresenceTimestamps(long long start, long long end)
 {
     FORWARD_TO_PRIMARY(InterposerSetPresenceTimestamps, start, end);
 

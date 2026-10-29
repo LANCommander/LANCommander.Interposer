@@ -1,8 +1,5 @@
 #pragma once
-#define WIN32_LEAN_AND_MEAN
-#define NOMINMAX
-#include <windows.h>
-#include <MinHook.h>
+#include "platform.h"
 #include <string>
 #include <vector>
 #include <regex>
@@ -247,16 +244,16 @@ void LoadConfig();
 // The directory the Interposer treats as its own: the DLL's directory, or the
 // launcher's base directory override. .interposer\ is looked up under it, relative
 // Registry.Files and FastDL.DownloadDirectory entries resolve against it, and
-// %INTERPOSERDIR% expands to it. Ends with a backslash. Valid after LoadConfig.
+// %INTERPOSERDIR% expands to it. Ends with a separator. Valid after LoadConfig.
 const std::wstring& GetInterposerBaseDirectory();
 
-// GetInterposerBaseDirectory() + L".interposer\\".
+// GetInterposerBaseDirectory() + L".interposer" and a separator.
 std::wstring GetInterposerDataDirectory();
 
 // Flush and close the log file. Call from RemoveHooks().
 void CloseLog();
 
-// Expand %VARNAME% tokens using Windows environment variables.
+// Expand %VARNAME% tokens using environment variables.
 std::wstring ExpandEnvVars(const std::wstring& input);
 
 // Expand %TOKEN% references: environment variables first, then the known-folder
@@ -328,10 +325,6 @@ void LogRegistryDiag(const wchar_t* verb, const wchar_t* keyPath, const wchar_t*
 
 // Log a DNS redirect. Gated by the Logging.DnsRedirects flag (default true).
 void LogDnsRedirect(const wchar_t* fromHost, const wchar_t* toHost);
-
-// Log a MinHook hook installation result. Always written regardless of other logging flags.
-// Pass the MH_STATUS value returned by MH_CreateHookApi.
-void LogHookInit(const wchar_t* module, const char* fn, MH_STATUS status);
 
 // The plugin API (InterposerGetUsername, InterposerLog, InterposerGetConfigString,
 // InterposerRegisterPluginConfig, InterposerSetConfigString) is declared in the

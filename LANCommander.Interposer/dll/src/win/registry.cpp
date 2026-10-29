@@ -3,7 +3,7 @@
 #include "config.h"
 
 #include <windows.h>
-#include <MinHook.h>
+#include "minhook_support.h"
 #include <algorithm>
 #include <map>
 #include <mutex>

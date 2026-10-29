@@ -5,7 +5,7 @@
 #include "hooks.h"
 
 #include <windows.h>
-#include <MinHook.h>
+#include "minhook_support.h"
 #include <string>
 
 // Reentrancy guard: FastDL downloads call CreateFileW internally (to write

@@ -18,42 +18,42 @@ static std::atomic<InterposerRelayCallback>    g_relayCallback{nullptr};
 // ---------------------------------------------------------------------------
 // Registration exports
 // ---------------------------------------------------------------------------
-extern "C" __declspec(dllexport) void InterposerRegisterFileCallback(InterposerFileCallback cb)
+extern "C" INTERPOSER_API void InterposerRegisterFileCallback(InterposerFileCallback cb)
 {
     FORWARD_TO_PRIMARY(InterposerRegisterFileCallback, cb);
 
     g_fileCallback.store(cb, std::memory_order_release);
 }
 
-extern "C" __declspec(dllexport) void InterposerRegisterRegistryCallback(InterposerRegistryCallback cb)
+extern "C" INTERPOSER_API void InterposerRegisterRegistryCallback(InterposerRegistryCallback cb)
 {
     FORWARD_TO_PRIMARY(InterposerRegisterRegistryCallback, cb);
 
     g_registryCallback.store(cb, std::memory_order_release);
 }
 
-extern "C" __declspec(dllexport) void InterposerRegisterDnsCallback(InterposerDnsCallback cb)
+extern "C" INTERPOSER_API void InterposerRegisterDnsCallback(InterposerDnsCallback cb)
 {
     FORWARD_TO_PRIMARY(InterposerRegisterDnsCallback, cb);
 
     g_dnsCallback.store(cb, std::memory_order_release);
 }
 
-extern "C" __declspec(dllexport) void InterposerRegisterNetworkCallback(InterposerNetworkCallback cb)
+extern "C" INTERPOSER_API void InterposerRegisterNetworkCallback(InterposerNetworkCallback cb)
 {
     FORWARD_TO_PRIMARY(InterposerRegisterNetworkCallback, cb);
 
     g_networkCallback.store(cb, std::memory_order_release);
 }
 
-extern "C" __declspec(dllexport) void InterposerRegisterIdentityCallback(InterposerIdentityCallback cb)
+extern "C" INTERPOSER_API void InterposerRegisterIdentityCallback(InterposerIdentityCallback cb)
 {
     FORWARD_TO_PRIMARY(InterposerRegisterIdentityCallback, cb);
 
     g_identityCallback.store(cb, std::memory_order_release);
 }
 
-extern "C" __declspec(dllexport) void InterposerRegisterRelayCallback(InterposerRelayCallback cb)
+extern "C" INTERPOSER_API void InterposerRegisterRelayCallback(InterposerRelayCallback cb)
 {
     FORWARD_TO_PRIMARY(InterposerRegisterRelayCallback, cb);
 

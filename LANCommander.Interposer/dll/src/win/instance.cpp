@@ -16,8 +16,10 @@ namespace
     }
 }
 
-bool ClaimPrimaryInstance(HMODULE self)
+bool ClaimPrimaryInstance(platform::Module selfModule)
 {
+    const HMODULE self = static_cast<HMODULE>(selfModule);
+
     wchar_t name[64];
     InstanceName(name, ARRAYSIZE(name));
 
@@ -75,7 +77,7 @@ void ReleasePrimaryInstance()
     }
 }
 
-HMODULE PrimaryInstance()
+platform::Module PrimaryInstance()
 {
     return g_primary;
 }

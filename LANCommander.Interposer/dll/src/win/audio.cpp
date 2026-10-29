@@ -2,7 +2,7 @@
 #define NOMINMAX
 #include <windows.h>
 #include <mmsystem.h>
-#include <MinHook.h>
+#include "minhook_support.h"
 #include <algorithm>
 #include <cwctype>
 #include <mutex>

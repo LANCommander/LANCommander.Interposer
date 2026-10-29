@@ -13,6 +13,8 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <cwchar>
+#include <iterator>
 #include <yaml-cpp/yaml.h>
 
 // ---------------------------------------------------------------------------
@@ -101,7 +103,7 @@ std::string g_rpDefaultButton2Text;
 std::string g_rpDefaultButton2Url;
 
 static std::vector<FileRedirect> g_redirects;
-static HANDLE                    g_logHandle = INVALID_HANDLE_VALUE;
+static platform::FileHandle      g_logHandle = platform::kInvalidFile;
 static std::mutex                g_logMutex;
 static std::wstring              g_configFilePath; // set by LoadConfig(), used by InterposerRegisterPluginConfig
 
@@ -120,20 +122,7 @@ static YAML::Node        g_fileRoot;
 // ---------------------------------------------------------------------------
 std::wstring ExpandEnvVars(const std::wstring& input)
 {
-    DWORD needed = ExpandEnvironmentStringsW(input.c_str(), nullptr, 0);
-
-    if (needed == 0)
-        return input;
-
-    std::wstring result(needed, L'\0');
-
-    ExpandEnvironmentStringsW(input.c_str(), result.data(), needed);
-
-    // ExpandEnvironmentStringsW includes the null terminator in 'needed'
-    if (!result.empty() && result.back() == L'\0')
-        result.pop_back();
-
-    return result;
+    return platform::ExpandEnvironment(input);
 }
 
 // ---------------------------------------------------------------------------
@@ -148,65 +137,12 @@ static std::wstring g_interposerDirectory;
 // trailing backslash, which is how every caller wants to append to it.
 static std::wstring g_baseDirectory;
 
-// Known folders that have no environment variable equivalent, resolved from
-// HKCU\...\Explorer\User Shell Folders rather than SHGetKnownFolderPath:
-// LoadConfig() runs from DllMain under the loader lock, and pulling shell32 and
-// ole32 in at that point invites a deadlock. advapi32 is already loaded, and
-// our own registry hooks are not installed until after LoadConfig returns, so
-// these reads cannot re-enter them.
-//
-// Names that already exist as environment variables — APPDATA, LOCALAPPDATA,
-// USERPROFILE, PROGRAMDATA, PROGRAMFILES — are deliberately absent. The
-// environment is consulted first, so listing them here would only shadow
-// behaviour that existing configs already depend on.
-struct PathTokenEntry {
-    const wchar_t* name;      // token spelling, uppercase
-    const wchar_t* regValue;  // value name under User Shell Folders
-    const wchar_t* suffix;    // appended to the resolved folder
-    const wchar_t* fallback;  // relative to %USERPROFILE% when the value is absent
-};
+// The known-folder tokens (%SAVEDGAMES%, %DOCUMENTS%, ...) are the platform's
+// to resolve: platform::ResolveKnownFolders looks them up once, from LoadConfig,
+// and platform::KnownFolder answers from that cache.
 
-constexpr PathTokenEntry kPathTokens[] = {
-    { L"SAVEDGAMES",  L"{4C5C32FF-BB9D-43b0-B5B4-2D72E54EAAA4}", L"",           L"Saved Games"         },
-    { L"DOCUMENTS",   L"Personal",                               L"",           L"Documents"           },
-    { L"MYDOCUMENTS", L"Personal",                               L"",           L"Documents"           },
-    { L"MYGAMES",     L"Personal",                               L"\\My Games", L"Documents\\My Games" },
-    { L"DESKTOP",     L"Desktop",                                L"",           L"Desktop"             },
-    { L"PICTURES",    L"My Pictures",                            L"",           L"Pictures"            },
-    { L"MUSIC",       L"My Music",                               L"",           L"Music"               },
-    { L"VIDEOS",      L"My Video",                               L"",           L"Videos"              },
-};
-
-// Resolved once by ResolveKnownFolders(), which LoadConfig calls before any hook
-// is enabled. Caching is not just an optimization: the replacement side of a rule
-// expands tokens on every redirected file open, and a registry read from inside
-// the CreateFileW hook would re-enter our own advapi32 hooks.
-static std::wstring g_pathTokenValues[8];
-
-// Drop trailing separators so a token always concatenates cleanly with the
-// backslash the config author wrote after it. "C:\" keeps its slash.
-static void TrimTrailingSlash(std::wstring& path)
-{
-    while (path.size() > 1 && (path.back() == L'\\' || path.back() == L'/'))
-    {
-        if (path.size() == 3 && path[1] == L':')
-            break;
-
-        path.pop_back();
-    }
-}
-
-// True for a path that already names its own root: a drive-qualified path
-// ("C:\Games\..."), a UNC share, or a rooted path. Everything else is taken
-// as relative to the DLL's own directory, which is what makes the historical
-// '.interposer\Registry.reg' spelling keep working.
-static bool IsAbsolutePath(const std::wstring& path)
-{
-    if (path.size() >= 2 && path[1] == L':')
-        return true;
-
-    return !path.empty() && (path[0] == L'\\' || path[0] == L'/');
-}
+using platform::Utf8ToWide;
+using platform::WideToUtf8;
 
 static std::wstring UpperCase(const std::wstring& s)
 {
@@ -219,51 +155,6 @@ static std::wstring UpperCase(const std::wstring& s)
     return out;
 }
 
-// Read one REG_SZ / REG_EXPAND_SZ from User Shell Folders. Values there are
-// normally REG_EXPAND_SZ holding things like %USERPROFILE%\Saved Games, hence
-// the ExpandEnvVars pass on the way out.
-static bool ReadUserShellFolder(const wchar_t* valueName, std::wstring& out)
-{
-    HKEY key = nullptr;
-
-    if (RegOpenKeyExW(HKEY_CURRENT_USER,
-            L"Software\\Microsoft\\Windows\\CurrentVersion\\Explorer\\User Shell Folders",
-            0, KEY_QUERY_VALUE, &key) != ERROR_SUCCESS)
-        return false;
-
-    DWORD type  = 0;
-    DWORD bytes = 0;
-    LONG  status = RegQueryValueExW(key, valueName, nullptr, &type, nullptr, &bytes);
-
-    if (status != ERROR_SUCCESS || bytes < sizeof(wchar_t) ||
-        (type != REG_SZ && type != REG_EXPAND_SZ))
-    {
-        RegCloseKey(key);
-        return false;
-    }
-
-    std::wstring raw(bytes / sizeof(wchar_t), L'\0');
-
-    status = RegQueryValueExW(key, valueName, nullptr, &type,
-        reinterpret_cast<LPBYTE>(raw.data()), &bytes);
-
-    RegCloseKey(key);
-
-    if (status != ERROR_SUCCESS)
-        return false;
-
-    // The stored byte count includes the terminator; std::wstring supplies its own.
-    while (!raw.empty() && raw.back() == L'\0')
-        raw.pop_back();
-
-    if (raw.empty())
-        return false;
-
-    out = ExpandEnvVars(raw);
-    TrimTrailingSlash(out);
-    return !out.empty();
-}
-
 // Resolve one %NAME%. Environment first, so the feature can never change the
 // meaning of a token that already worked. Returns false if nothing matches, in
 // which case the caller leaves the token text alone.
@@ -272,20 +163,11 @@ static bool ResolvePathToken(const std::wstring& name, std::wstring& out)
     if (name.empty())
         return false;
 
-    DWORD needed = GetEnvironmentVariableW(name.c_str(), nullptr, 0);
-
-    if (needed > 0)
+    if (std::wstring value; platform::GetEnvironmentValue(name, value))
     {
-        std::wstring value(needed, L'\0');
-        DWORD written = GetEnvironmentVariableW(name.c_str(), value.data(), needed);
-
-        if (written > 0)
-        {
-            value.resize(written);
-            TrimTrailingSlash(value);
-            out = value;
-            return true;
-        }
+        platform::TrimTrailingSeparators(value);
+        out = value;
+        return true;
     }
 
     const std::wstring wanted = UpperCase(name);
@@ -302,39 +184,7 @@ static bool ResolvePathToken(const std::wstring& name, std::wstring& out)
         return true;
     }
 
-    for (size_t i = 0; i < std::size(kPathTokens); ++i)
-    {
-        if (wanted != kPathTokens[i].name || g_pathTokenValues[i].empty())
-            continue;
-
-        out = g_pathTokenValues[i];
-        return true;
-    }
-
-    return false;
-}
-
-// Populate g_pathTokenValues. Called from LoadConfig, which runs before
-// InstallRegistryHooks, so these reads cannot reach our own hooks.
-static void ResolveKnownFolders()
-{
-    static_assert(std::size(kPathTokens) == std::size(g_pathTokenValues),
-        "g_pathTokenValues must have one slot per kPathTokens entry");
-
-    std::wstring profile;
-    ResolvePathToken(L"USERPROFILE", profile);
-
-    for (size_t i = 0; i < std::size(kPathTokens); ++i)
-    {
-        const PathTokenEntry& entry = kPathTokens[i];
-
-        std::wstring folder;
-
-        if (ReadUserShellFolder(entry.regValue, folder))
-            g_pathTokenValues[i] = folder + entry.suffix;
-        else if (!profile.empty())
-            g_pathTokenValues[i] = profile + L"\\" + entry.fallback;
-    }
+    return platform::KnownFolder(wanted, out);
 }
 
 // Escape every ECMAScript metacharacter so a substituted path is matched
@@ -413,19 +263,6 @@ std::wstring ExpandPathTokens(const std::wstring& input,
 }
 
 // ---------------------------------------------------------------------------
-// Utf8ToWide
-// ---------------------------------------------------------------------------
-static std::wstring Utf8ToWide(const std::string& s)
-{
-    if (s.empty()) return {};
-    int len = MultiByteToWideChar(CP_UTF8, 0, s.c_str(), -1, nullptr, 0);
-    if (len <= 1) return {};
-    std::wstring out(len - 1, L'\0');
-    MultiByteToWideChar(CP_UTF8, 0, s.c_str(), -1, out.data(), len);
-    return out;
-}
-
-// ---------------------------------------------------------------------------
 // ParseCidr — parse "A.B.C.D/N" (or bare "A.B.C.D", implying /32) into a
 // host-order network+mask. Parsing the dotted quad by hand yields host order
 // directly, so no winsock dependency or ntohl is needed here. Returns false on
@@ -447,7 +284,7 @@ static bool ParseCidr(const std::string& cidr, SubnetFilter& out)
         return false;
 
     unsigned a = 0, b = 0, c = 0, d = 0;
-    if (sscanf_s(ipPart.c_str(), "%u.%u.%u.%u", &a, &b, &c, &d) != 4)
+    if (sscanf(ipPart.c_str(), "%u.%u.%u.%u", &a, &b, &c, &d) != 4)
         return false;
     if (a > 255 || b > 255 || c > 255 || d > 255)
         return false;
@@ -486,19 +323,6 @@ static bool ParseMac(const std::string& s, std::array<BYTE, 6>& out)
         out[n++] = static_cast<BYTE>(value);
     }
     return n == 6;
-}
-
-// ---------------------------------------------------------------------------
-// WideToUtf8
-// ---------------------------------------------------------------------------
-static std::string WideToUtf8(const std::wstring& s)
-{
-    if (s.empty()) return {};
-    int len = WideCharToMultiByte(CP_UTF8, 0, s.c_str(), -1, nullptr, 0, nullptr, nullptr);
-    if (len <= 1) return {};
-    std::string out(len - 1, '\0');
-    WideCharToMultiByte(CP_UTF8, 0, s.c_str(), -1, out.data(), len, nullptr, nullptr);
-    return out;
 }
 
 // ---------------------------------------------------------------------------
@@ -634,16 +458,14 @@ static void WriteLogLine(const wchar_t* verb, const wchar_t* a, const wchar_t* b
 {
     std::lock_guard<std::mutex> lk(g_logMutex);
 
-    if (g_logHandle == INVALID_HANDLE_VALUE)
+    if (g_logHandle == platform::kInvalidFile)
         return;
 
-    SYSTEMTIME systemTime{};
-
-    GetLocalTime(&systemTime);
+    const platform::LocalTime now = platform::Now();
 
     wchar_t timestamp[24];
-    wsprintfW(timestamp, L"%04d-%02d-%02d %02d:%02d:%02d",
-        systemTime.wYear, systemTime.wMonth, systemTime.wDay, systemTime.wHour, systemTime.wMinute, systemTime.wSecond);
+    swprintf(timestamp, std::size(timestamp), L"%04d-%02d-%02d %02d:%02d:%02d",
+        now.year, now.month, now.day, now.hour, now.minute, now.second);
 
     // Build wide line
     std::wstring line;
@@ -664,23 +486,12 @@ static void WriteLogLine(const wchar_t* verb, const wchar_t* a, const wchar_t* b
 
     line += L"\r\n";
 
-    // Convert to UTF-8
-    int utf8len = WideCharToMultiByte(CP_UTF8, 0,
-        line.c_str(), static_cast<int>(line.size()),
-        nullptr, 0, nullptr, nullptr);
+    const std::string utf8 = WideToUtf8(line);
 
-    if (utf8len <= 0)
+    if (utf8.empty())
         return;
 
-    std::string utf8(utf8len, '\0');
-
-    WideCharToMultiByte(CP_UTF8, 0,
-        line.c_str(), static_cast<int>(line.size()),
-        utf8.data(), utf8len, nullptr, nullptr);
-
-    DWORD written = 0;
-
-    WriteFile(g_logHandle, utf8.c_str(), static_cast<DWORD>(utf8.size()), &written, nullptr);
+    platform::WriteToFile(g_logHandle, utf8.data(), utf8.size());
 }
 
 void LogFileAccess(const wchar_t* verb, const wchar_t* sourcePath, const wchar_t* redirectionPath)
@@ -802,12 +613,24 @@ constexpr DiClassEntry kDiClasses[] = {
     { "Supplemental",  DiDeviceClass::Supplemental,  0,    0x1C },
 };
 
+// ASCII case-insensitive equality.
+bool EqualsNoCase(const char* a, const char* b)
+{
+    for (; *a && *b; ++a, ++b)
+    {
+        if (std::tolower(static_cast<unsigned char>(*a)) != std::tolower(static_cast<unsigned char>(*b)))
+            return false;
+    }
+
+    return *a == *b;
+}
+
 // Case-insensitive, so 'mouse' and 'Mouse' both work in Config.yml.
 bool DiClassFromName(const std::string& name, DiDeviceClass& out)
 {
     for (const DiClassEntry& entry : kDiClasses)
     {
-        if (_stricmp(entry.name, name.c_str()) == 0)
+        if (EqualsNoCase(entry.name, name.c_str()))
         {
             out = entry.value;
             return true;
@@ -979,7 +802,7 @@ WORD ServicePackMajorFromName(const std::wstring& servicePack)
     if (start == end)
         return 0;
 
-    return static_cast<WORD>(_wtoi(servicePack.substr(start, end - start).c_str()));
+    return static_cast<WORD>(std::wcstol(servicePack.substr(start, end - start).c_str(), nullptr, 10));
 }
 
 } // namespace
@@ -1050,32 +873,14 @@ void LogDnsRedirect(const wchar_t* fromHost, const wchar_t* toHost)
     WriteLogLine(L"DNS REDIRECT", fromHost, toHost);
 }
 
-void LogHookInit(const wchar_t* module, const char* fn, MH_STATUS status)
-{
-    if (status == MH_ERROR_ALREADY_CREATED)
-        return; // Hook was already installed (e.g. late-install called twice); not an error.
-
-    wchar_t msg[128]{};
-    if (status == MH_OK)
-        wsprintfW(msg, L"%s!%S", module, fn);
-    else if (status == MH_ERROR_MODULE_NOT_FOUND || status == MH_ERROR_FUNCTION_NOT_FOUND)
-        // Expected on older Windows rather than a fault: XP has no RegGetValue,
-        // RegDeleteTree, CreateFile2, Core Audio, ... and nothing written for it
-        // calls them. Worded so a log from such a system does not read as broken.
-        wsprintfW(msg, L"%s!%S  not present on this version of Windows", module, fn);
-    else
-        wsprintfW(msg, L"%s!%S  %S", module, fn, MH_StatusToString(status));
-    WriteLogLine(L"HOOK INIT", msg, nullptr);
-}
-
 void CloseLog()
 {
     std::lock_guard<std::mutex> lk(g_logMutex);
 
-    if (g_logHandle != INVALID_HANDLE_VALUE)
+    if (g_logHandle != platform::kInvalidFile)
     {
-        CloseHandle(g_logHandle);
-        g_logHandle = INVALID_HANDLE_VALUE;
+        platform::CloseFile(g_logHandle);
+        g_logHandle = platform::kInvalidFile;
     }
 }
 
@@ -1084,26 +889,26 @@ void CloseLog()
 // ---------------------------------------------------------------------------
 
 // Return the effective username: the configured/injected override if set, otherwise
-// the real Windows account name from GetUserNameW.
+// the real account name.
 // bufferSize is in wchar_t units and must include room for the null terminator.
-// Returns TRUE on success, FALSE if the buffer is too small or GetUserNameW fails.
-extern "C" __declspec(dllexport)
+// Returns TRUE on success, FALSE if the buffer is too small or the name cannot be read.
+extern "C" INTERPOSER_API
 BOOL InterposerGetUsername(wchar_t* buffer, DWORD bufferSize)
 {
     FORWARD_TO_PRIMARY(InterposerGetUsername, buffer, bufferSize);
 
     if (!buffer || bufferSize == 0) return FALSE;
 
-    if (!g_username.empty())
-    {
-        DWORD needed = static_cast<DWORD>(g_username.size() + 1);
-        if (bufferSize < needed) return FALSE;
-        wmemcpy(buffer, g_username.c_str(), needed);
-        return TRUE;
-    }
+    std::wstring name = g_username;
 
-    // No override configured — delegate to the real API (hooks not yet involved here).
-    return GetUserNameW(buffer, &bufferSize);
+    // No override configured — ask the OS (hooks not yet involved here).
+    if (name.empty() && !platform::CurrentUserName(name))
+        return FALSE;
+
+    DWORD needed = static_cast<DWORD>(name.size() + 1);
+    if (bufferSize < needed) return FALSE;
+    wmemcpy(buffer, name.c_str(), needed);
+    return TRUE;
 }
 
 // Write a line to the session log. Always writes regardless of logging flags.
@@ -1111,7 +916,7 @@ BOOL InterposerGetUsername(wchar_t* buffer, DWORD bufferSize)
 //           stripped of existing brackets/whitespace, truncated to 16 chars, and
 //           re-wrapped as [verb] right-padded to 18 characters.
 // message — path or free-form text
-extern "C" __declspec(dllexport)
+extern "C" INTERPOSER_API
 void InterposerLog(const wchar_t* verb, const wchar_t* message)
 {
     FORWARD_TO_PRIMARY(InterposerLog, verb, message);
@@ -1176,7 +981,7 @@ static bool WalkConfigPath(YAML::Node& node, const std::vector<std::string>& seg
 // bufferSize — capacity of buffer in wchar_t units
 // Returns TRUE on success, FALSE if the key does not exist, is not a scalar,
 // or the buffer is too small.
-extern "C" __declspec(dllexport)
+extern "C" INTERPOSER_API
 BOOL InterposerGetConfigString(const wchar_t* dotPath, wchar_t* buffer, DWORD bufferSize)
 {
     FORWARD_TO_PRIMARY(InterposerGetConfigString, dotPath, buffer, bufferSize);
@@ -1197,11 +1002,12 @@ BOOL InterposerGetConfigString(const wchar_t* dotPath, wchar_t* buffer, DWORD bu
     try { value = node.as<std::string>(); }
     catch (...) { return FALSE; }
 
-    int wlen = MultiByteToWideChar(CP_UTF8, 0,
-        value.c_str(), static_cast<int>(value.size()) + 1,
-        buffer, static_cast<int>(bufferSize));
+    const std::wstring wide = Utf8ToWide(value);
 
-    return wlen > 0 ? TRUE : FALSE;
+    if (wide.size() + 1 > bufferSize) return FALSE;
+
+    wmemcpy(buffer, wide.c_str(), wide.size() + 1);
+    return TRUE;
 }
 
 // ---------------------------------------------------------------------------
@@ -1212,38 +1018,14 @@ BOOL InterposerGetConfigString(const wchar_t* dotPath, wchar_t* buffer, DWORD bu
 // Returns empty string on failure.
 static std::string ReadConfigFileUtf8()
 {
-    HANDLE fh = CreateFileW(g_configFilePath.c_str(), GENERIC_READ, FILE_SHARE_READ,
-        nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+    std::vector<unsigned char> raw;
 
-    if (fh == INVALID_HANDLE_VALUE)
+    if (!platform::ReadWholeFile(g_configFilePath, 4 * 1024 * 1024, raw))
         return {};
-
-    LARGE_INTEGER sz{};
-    GetFileSizeEx(fh, &sz);
-    if (sz.QuadPart == 0 || sz.QuadPart > 4 * 1024 * 1024)
-    {
-        CloseHandle(fh);
-        return {};
-    }
-
-    std::vector<BYTE> raw(static_cast<size_t>(sz.QuadPart));
-    DWORD bytesRead = 0;
-    ReadFile(fh, raw.data(), static_cast<DWORD>(raw.size()), &bytesRead, nullptr);
-    CloseHandle(fh);
 
     // Decode to UTF-8 (handle BOM variants)
     if (raw.size() >= 2 && raw[0] == 0xFF && raw[1] == 0xFE)
-    {
-        size_t charCount = (raw.size() - 2) / 2;
-        const wchar_t* wptr = reinterpret_cast<const wchar_t*>(raw.data() + 2);
-        int utf8len = WideCharToMultiByte(CP_UTF8, 0, wptr, static_cast<int>(charCount),
-            nullptr, 0, nullptr, nullptr);
-        if (utf8len <= 0) return {};
-        std::string s(utf8len, '\0');
-        WideCharToMultiByte(CP_UTF8, 0, wptr, static_cast<int>(charCount),
-            s.data(), utf8len, nullptr, nullptr);
-        return s;
-    }
+        return platform::Utf16LeToUtf8(raw.data() + 2, raw.size() - 2);
 
     int offset = (raw.size() >= 3 && raw[0] == 0xEF && raw[1] == 0xBB && raw[2] == 0xBF) ? 3 : 0;
     return std::string(reinterpret_cast<const char*>(raw.data()) + offset, raw.size() - offset);
@@ -1252,16 +1034,7 @@ static std::string ReadConfigFileUtf8()
 // Write a UTF-8 string to g_configFilePath (overwrites existing content).
 static bool WriteConfigFileUtf8(const std::string& content)
 {
-    HANDLE fh = CreateFileW(g_configFilePath.c_str(), GENERIC_WRITE, 0,
-        nullptr, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
-
-    if (fh == INVALID_HANDLE_VALUE)
-        return false;
-
-    DWORD written = 0;
-    BOOL ok = WriteFile(fh, content.c_str(), static_cast<DWORD>(content.size()), &written, nullptr);
-    CloseHandle(fh);
-    return ok && written == content.size();
+    return platform::WriteWholeFile(g_configFilePath, content);
 }
 
 // Emit a YAML::Node map as block-style lines, each indented by `indent` spaces.
@@ -1305,7 +1078,7 @@ static std::string EmitPluginYaml(const YAML::Node& node, int indent)
     return result;
 }
 
-extern "C" __declspec(dllexport)
+extern "C" INTERPOSER_API
 BOOL InterposerRegisterPluginConfig(const wchar_t* pluginName, const wchar_t* yamlDefaults)
 {
     FORWARD_TO_PRIMARY(InterposerRegisterPluginConfig, pluginName, yamlDefaults);
@@ -1895,7 +1668,7 @@ static bool SetConfigScalarInTree(YAML::Node& root, const std::vector<std::strin
     return true;
 }
 
-extern "C" __declspec(dllexport)
+extern "C" INTERPOSER_API
 BOOL InterposerSetConfigString(const wchar_t* dotPath, const wchar_t* value)
 {
     FORWARD_TO_PRIMARY(InterposerSetConfigString, dotPath, value);
@@ -2072,59 +1845,7 @@ const std::wstring& GetInterposerBaseDirectory()
 
 std::wstring GetInterposerDataDirectory()
 {
-    return g_baseDirectory + L".interposer\\";
-}
-
-// Create every missing directory along `path`. CreateDirectoryW makes one level
-// only, and a launcher's base directory is typically several levels below
-// anything that exists yet.
-static void CreateDirectoryTree(const std::wstring& path)
-{
-    if (path.empty() || CreateDirectoryW(path.c_str(), nullptr) ||
-        GetLastError() == ERROR_ALREADY_EXISTS)
-        return;
-
-    std::wstring parent = path;
-    TrimTrailingSlash(parent);
-
-    const size_t slash = parent.find_last_of(L"\\/");
-
-    // Stop at the root: a drive ("C:") or nothing left to strip
-    if (slash == std::wstring::npos || slash < 3)
-        return;
-
-    parent.resize(slash);
-
-    CreateDirectoryTree(parent);
-    CreateDirectoryW(path.c_str(), nullptr);
-}
-
-// Read Local\<prefix>_<pid>, a UTF-8 string the launcher wrote before injecting.
-// Empty when it did not write one. The whole view is mapped and read up to its
-// first NUL, so the launcher sizes the mapping to its content rather than to a
-// limit agreed in advance.
-static std::string ReadLauncherMapping(const wchar_t* prefix)
-{
-    wchar_t name[96]{};
-    swprintf_s(name, L"Local\\%ls_%lu", prefix, GetCurrentProcessId());
-
-    HANDLE mapping = OpenFileMappingW(FILE_MAP_READ, FALSE, name);
-    if (!mapping)
-        return {};
-
-    std::string text;
-
-    if (const char* view = static_cast<const char*>(MapViewOfFile(mapping, FILE_MAP_READ, 0, 0, 0)))
-    {
-        MEMORY_BASIC_INFORMATION info{};
-        const SIZE_T size = VirtualQuery(view, &info, sizeof(info)) ? info.RegionSize : 0;
-
-        text.assign(view, strnlen(view, size));
-        UnmapViewOfFile(view);
-    }
-
-    CloseHandle(mapping);
-    return text;
+    return g_baseDirectory + L".interposer" + platform::kPathSeparator;
 }
 
 // Merge `overlay` over `base` and return the result; neither input is changed.
@@ -2167,21 +1888,7 @@ static YAML::Node MergeConfigNodes(const YAML::Node& base, const YAML::Node& ove
 void LoadConfig()
 {
     // Locate the DLL's own directory
-    HMODULE hSelf = nullptr;
-
-    GetModuleHandleExW(
-        GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
-        reinterpret_cast<LPCWSTR>(&LoadConfig),
-        &hSelf);
-
-    wchar_t dllPathBuffer[MAX_PATH] = {};
-
-    GetModuleFileNameW(hSelf, dllPathBuffer, MAX_PATH);
-    std::wstring dllDirectory(dllPathBuffer);
-    auto slash = dllDirectory.find_last_of(L"\\/");
-
-    if (slash != std::wstring::npos)
-        dllDirectory.resize(slash + 1);
+    const std::wstring dllDirectory = platform::ModuleDirectory();
 
     // Warnings are deferred, like OsVersion's below: the session log does not
     // exist until the end of this function.
@@ -2193,17 +1900,17 @@ void LoadConfig()
     // relative to this instead.
     std::wstring baseDirectory = dllDirectory;
 
-    if (std::string requested = ReadLauncherMapping(L"InterposerBaseDirectory"); !requested.empty())
+    if (std::string requested = platform::ReadLauncherValue(L"InterposerBaseDirectory"); !requested.empty())
     {
         std::wstring wide = Utf8ToWide(requested);
-        wchar_t fullPath[MAX_PATH]{};
+        std::wstring fullPath;
 
-        if (GetFullPathNameW(wide.c_str(), MAX_PATH, fullPath, nullptr) > 0)
+        if (platform::GetFullPath(wide, fullPath))
         {
             baseDirectory = fullPath;
 
             if (baseDirectory.back() != L'\\' && baseDirectory.back() != L'/')
-                baseDirectory += L'\\';
+                baseDirectory += platform::kPathSeparator;
 
             configWarnings.push_back(L"base directory from the launcher: " + baseDirectory);
         }
@@ -2213,7 +1920,7 @@ void LoadConfig()
         }
     }
 
-    std::wstring interposerDir = baseDirectory + L".interposer\\";
+    std::wstring interposerDir = baseDirectory + L".interposer" + platform::kPathSeparator;
     std::wstring yamlPath      = interposerDir + L"Config.yml";
 
     g_configFilePath = yamlPath;
@@ -2223,23 +1930,12 @@ void LoadConfig()
     // any rule is parsed, and stored without a trailing separator so the config
     // author's own backslash is the only one in the result.
     g_interposerDirectory = baseDirectory;
-    TrimTrailingSlash(g_interposerDirectory);
+    platform::TrimTrailingSeparators(g_interposerDirectory);
 
-    wchar_t exePathBuffer[MAX_PATH] = {};
+    if (std::wstring exeDirectory = platform::ExecutableDirectory(); !exeDirectory.empty())
+        g_gameDirectory = exeDirectory;
 
-    if (GetModuleFileNameW(nullptr, exePathBuffer, MAX_PATH) > 0)
-    {
-        std::wstring exeDirectory(exePathBuffer);
-        auto exeSlash = exeDirectory.find_last_of(L"\\/");
-
-        if (exeSlash != std::wstring::npos)
-        {
-            exeDirectory.resize(exeSlash);
-            g_gameDirectory = exeDirectory;
-        }
-    }
-
-    ResolveKnownFolders();
+    platform::ResolveKnownFolders();
 
     // Config.yml, then the launcher's overlay over it. Either may be missing; a
     // launcher-injected copy of the DLL usually has no Config.yml at all.
@@ -2262,7 +1958,7 @@ void LoadConfig()
     YAML::Node overlay;
     bool       haveOverlay = false;
 
-    if (std::string overlayText = ReadLauncherMapping(L"InterposerConfig"); !overlayText.empty())
+    if (std::string overlayText = platform::ReadLauncherValue(L"InterposerConfig"); !overlayText.empty())
     {
         try
         {
@@ -2434,7 +2130,7 @@ void LoadConfig()
                         L"unresolved %" + name + L"% in Registry.Files entry: " + entry);
                 }
 
-                if (!IsAbsolutePath(resolved))
+                if (!platform::IsAbsolutePath(resolved))
                     resolved = baseDirectory + resolved;
 
                 g_registryFiles.push_back(std::move(resolved));
@@ -2797,12 +2493,12 @@ void LoadConfig()
                     path.localPrefix   = std::move(local);
                     path.remoteSubPath = std::move(remote);
 
-                    // Ensure localPrefix ends with backslash
+                    // Ensure localPrefix ends with a separator
                     if (!path.localPrefix.empty())
                     {
                         wchar_t last = path.localPrefix.back();
                         if (last != L'\\' && last != L'/')
-                            path.localPrefix += L'\\';
+                            path.localPrefix += platform::kPathSeparator;
                     }
 
                     // Strip trailing slash from remoteSubPath
@@ -2868,47 +2564,32 @@ void LoadConfig()
     }
 
     // ── Open log at .interposer\Logs\<timestamp>.log ──────────────────────────
-    CreateDirectoryTree(interposerDir);
+    platform::CreateDirectoryTree(interposerDir);
 
-    std::wstring logsDir = interposerDir + L"Logs\\";
-    CreateDirectoryW(logsDir.c_str(), nullptr);
+    std::wstring logsDir = interposerDir + L"Logs" + platform::kPathSeparator;
+    platform::CreateDirectoryTree(logsDir);
 
-    SYSTEMTIME systemTime{};
-    GetLocalTime(&systemTime);
+    const platform::LocalTime now = platform::Now();
 
     wchar_t timestampBuffer[32];
-    wsprintfW(timestampBuffer, L"%04d-%02d-%02d_%02d-%02d-%02d",
-        systemTime.wYear, systemTime.wMonth, systemTime.wDay,
-        systemTime.wHour, systemTime.wMinute, systemTime.wSecond);
+    swprintf(timestampBuffer, std::size(timestampBuffer), L"%04d-%02d-%02d_%02d-%02d-%02d",
+        now.year, now.month, now.day, now.hour, now.minute, now.second);
 
     std::wstring logPath = logsDir + timestampBuffer + L".log";
 
-    g_logHandle = CreateFileW(logPath.c_str(),
-        FILE_APPEND_DATA, FILE_SHARE_READ,
-        nullptr, OPEN_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
+    g_logHandle = platform::OpenForAppend(logPath);
 
-    if (g_logHandle != INVALID_HANDLE_VALUE)
+    if (g_logHandle != platform::kInvalidFile)
     {
         wchar_t sep[128];
-        wsprintfW(sep,
+        swprintf(sep, std::size(sep),
             L"# === Session started %04d-%02d-%02d %02d:%02d:%02d ===\r\n",
-            systemTime.wYear, systemTime.wMonth, systemTime.wDay,
-            systemTime.wHour, systemTime.wMinute, systemTime.wSecond);
+            now.year, now.month, now.day, now.hour, now.minute, now.second);
 
-        int length = WideCharToMultiByte(CP_UTF8, 0, sep, -1,
-            nullptr, 0, nullptr, nullptr);
+        const std::string utf8 = WideToUtf8(sep);
 
-        if (length > 1)
-        {
-            std::string utf8(length - 1, '\0');
-            WideCharToMultiByte(CP_UTF8, 0, sep, -1,
-                utf8.data(), length - 1, nullptr, nullptr);
-
-            DWORD w = 0;
-
-            WriteFile(g_logHandle, utf8.c_str(),
-                static_cast<DWORD>(utf8.size()), &w, nullptr);
-        }
+        if (!utf8.empty())
+            platform::WriteToFile(g_logHandle, utf8.data(), utf8.size());
     }
 
     // Deferred from the OsVersion parse above, which ran before the log existed.

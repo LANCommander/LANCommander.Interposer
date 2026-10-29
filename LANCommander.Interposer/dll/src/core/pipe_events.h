@@ -1,5 +1,4 @@
 #pragma once
-#include <windows.h>
 
 // Event type IDs sent over the named pipe.
 enum PipeEventType : int

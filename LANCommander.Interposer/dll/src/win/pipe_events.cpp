@@ -1,4 +1,5 @@
 #include "pipe_events.h"
+#include <windows.h>
 #include <vector>
 
 // ---------------------------------------------------------------------------

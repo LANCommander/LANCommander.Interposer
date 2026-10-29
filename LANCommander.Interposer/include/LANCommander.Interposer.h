@@ -16,7 +16,9 @@
  *
  * Plain C, so it can be included from C or C++. Every function uses __cdecl --
  * written out below, so a project compiled with /Gz or /Gr still calls them
- * correctly. Every buffer is owned by the caller; the DLL allocates nothing
+ * correctly. Outside Windows the Win32 type names used here (BOOL, DWORD,
+ * LONG) are defined with their Win32 sizes, and wchar_t is whatever the
+ * platform's is: UTF-32 on Linux. Every buffer is owned by the caller; the DLL allocates nothing
  * that crosses this boundary, which is what makes it safe to call from a
  * module built with a different compiler or C runtime.
  *
@@ -28,15 +30,39 @@
 #ifndef LANCOMMANDER_INTERPOSER_H
 #define LANCOMMANDER_INTERPOSER_H
 
-#include <windows.h>
-
-#ifdef INTERPOSER_BUILDING_DLL
-#  define INTERPOSER_API __declspec(dllexport)
+#ifdef _WIN32
+#  include <windows.h>
 #else
-#  define INTERPOSER_API __declspec(dllimport)
+/* The Win32 names the API is written in, with their Win32 sizes: BOOL and
+ * LONG are 32-bit, and DWORD is a 32-bit unsigned int rather than unsigned
+ * long, which is 64-bit on LP64. */
+#  include <stdint.h>
+#  include <wchar.h>
+typedef int      BOOL;
+typedef uint32_t DWORD;
+typedef int32_t  LONG;
+#  ifndef TRUE
+#    define TRUE  1
+#  endif
+#  ifndef FALSE
+#    define FALSE 0
+#  endif
 #endif
 
-#define INTERPOSER_CALL __cdecl
+#ifdef _WIN32
+#  ifdef INTERPOSER_BUILDING_DLL
+#    define INTERPOSER_API __declspec(dllexport)
+#  else
+#    define INTERPOSER_API __declspec(dllimport)
+#  endif
+#  define INTERPOSER_CALL    __cdecl
+   /* Callbacks the Interposer calls that predate INTERPOSER_CALL: WINAPI. */
+#  define INTERPOSER_STDCALL __stdcall
+#else
+#  define INTERPOSER_API __attribute__((visibility("default")))
+#  define INTERPOSER_CALL
+#  define INTERPOSER_STDCALL
+#endif
 
 #ifdef __cplusplus
 extern "C" {
@@ -199,8 +225,9 @@ typedef struct InterposerMouseBatch {
 } InterposerMouseBatch;
 
 /* Rewrite batch->events in place and set batch->count, up to capacity. Runs on
- * the game's input thread inside GetDeviceData: must not block. Note WINAPI. */
-typedef void (WINAPI* InterposerMouseTransform)(InterposerMouseBatch* batch, void* userData);
+ * the game's input thread inside GetDeviceData: must not block. Note WINAPI
+ * (__stdcall) on Windows, not INTERPOSER_CALL. */
+typedef void (INTERPOSER_STDCALL* InterposerMouseTransform)(InterposerMouseBatch* batch, void* userData);
 
 /* One at a time; registering again replaces. NULL unregisters. */
 INTERPOSER_API BOOL INTERPOSER_CALL InterposerRegisterMouseTransform(
@@ -211,21 +238,21 @@ INTERPOSER_API BOOL INTERPOSER_CALL InterposerRegisterMouseTransform(
  * ======================================================================== */
 
 typedef struct InterposerRelayStatus {
-    DWORD            size;               /* caller sets to sizeof(InterposerRelayStatus) */
-    int              state;              /* RelayState */
-    DWORD            clientId;
-    wchar_t          virtualAddress[16];
-    wchar_t          netmask[16];
-    wchar_t          network[128];
-    wchar_t          server[256];
-    int              udpActive;          /* 1 = datagrams over UDP, 0 = TCP fallback */
-    DWORD            peerCount;
-    unsigned __int64 bytesSent;
-    unsigned __int64 bytesReceived;
-    unsigned __int64 datagramsSent;
-    unsigned __int64 datagramsReceived;
-    DWORD            streamsOpen;
-    wchar_t          lastError[256];
+    DWORD              size;               /* caller sets to sizeof(InterposerRelayStatus) */
+    int                state;              /* RelayState */
+    DWORD              clientId;
+    wchar_t            virtualAddress[16];
+    wchar_t            netmask[16];
+    wchar_t            network[128];
+    wchar_t            server[256];
+    int                udpActive;          /* 1 = datagrams over UDP, 0 = TCP fallback */
+    DWORD              peerCount;
+    unsigned long long bytesSent;
+    unsigned long long bytesReceived;
+    unsigned long long datagramsSent;
+    unsigned long long datagramsReceived;
+    DWORD              streamsOpen;
+    wchar_t            lastError[256];
 } InterposerRelayStatus;
 
 typedef struct InterposerRelayPeer {
@@ -253,7 +280,7 @@ INTERPOSER_API void INTERPOSER_CALL InterposerRelayDisconnect(void);
 
 INTERPOSER_API void INTERPOSER_CALL InterposerSetPresenceDetails(const char* details);
 INTERPOSER_API void INTERPOSER_CALL InterposerSetPresenceState(const char* state);
-INTERPOSER_API void INTERPOSER_CALL InterposerSetPresenceTimestamps(__int64 start, __int64 end);
+INTERPOSER_API void INTERPOSER_CALL InterposerSetPresenceTimestamps(long long start, long long end);
 INTERPOSER_API void INTERPOSER_CALL InterposerSetPresenceLargeImage(const char* key, const char* text);
 INTERPOSER_API void INTERPOSER_CALL InterposerSetPresenceSmallImage(const char* key, const char* text);
 INTERPOSER_API void INTERPOSER_CALL InterposerSetPresenceParty(const char* id, int size, int max);

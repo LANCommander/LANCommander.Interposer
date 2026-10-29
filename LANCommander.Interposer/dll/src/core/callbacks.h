@@ -1,5 +1,4 @@
 #pragma once
-#include <windows.h>
 
 // The callback typedefs and the InterposerRegister*Callback exports are part of
 // the public API, declared in LANCommander.Interposer.h.

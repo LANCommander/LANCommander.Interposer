@@ -14,7 +14,7 @@
 #include "relay.h"
 #include "richpresence.h"
 
-#include <MinHook.h>
+#include "hooking.h"
 
 // ---------------------------------------------------------------------------
 // Public API
@@ -29,7 +29,7 @@ void InstallHooks()
     __debugbreak();
 #endif
 
-    MH_Initialize();
+    hooking::Initialize();
 
     LoadConfig();
     InstallRegistryHooks();
@@ -42,7 +42,7 @@ void InstallHooks()
     InstallDirectInputHooks();
     InstallAudioHooks();
 
-    MH_EnableHook(MH_ALL_HOOKS);
+    hooking::EnableAll();
 
     ConnectEventPipe();
     StartControlPipe();
@@ -79,7 +79,7 @@ void RemoveHooks(bool processTerminating)
     RemoveDirectInputHooks();
     RemoveAudioHooks();
     ShutdownFastDL();
-    MH_DisableHook(MH_ALL_HOOKS);
-    MH_Uninitialize();
+    hooking::DisableAll();
+    hooking::Uninitialize();
     CloseLog();
 }
