@@ -30,9 +30,6 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Setup MSBuild
-        uses: microsoft/setup-msbuild@v2
-
       - name: Setup .NET
         uses: actions/setup-dotnet@v4
         with:
@@ -50,43 +47,41 @@ jobs:
           fi
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"
 
-      # --overlay-triplets is required, not optional: triplets/ pins
-      # VCPKG_PLATFORM_TOOLSET to v143 to match the PlatformToolset the
-      # vcxproj uses. Without it vcpkg silently resolves the built-in triplet
-      # of the same name, builds the dependencies with whatever MSVC the
-      # runner happens to ship, and the link fails on STL symbols that the
-      # v143 import library does not have (e.g. __std_find_last_not_ch_pos_1).
-      - name: Install native dependencies (x64)
-        run: vcpkg install --triplet x64-windows-static --overlay-triplets=triplets --x-install-root=vcpkg_installed
-
-      - name: Install native dependencies (x86)
-        run: vcpkg install --triplet x86-windows-static --overlay-triplets=triplets --x-install-root=vcpkg_installed_x86
+      # The presets take vcpkg from VCPKG_ROOT; the runner image ships a clone
+      # under VCPKG_INSTALLATION_ROOT. The presets also supply --overlay-triplets,
+      # which is required, not optional: triplets/ pins VCPKG_PLATFORM_TOOLSET to
+      # v143 to match the toolset CMake is told to use. Without it vcpkg silently
+      # resolves the built-in triplet of the same name, builds the dependencies
+      # with whatever MSVC the runner happens to ship, and the link fails on STL
+      # symbols that the v143 import library does not have (e.g.
+      # __std_find_last_not_ch_pos_1).
+      - name: Locate vcpkg
+        shell: pwsh
+        run: '"VCPKG_ROOT=$env:VCPKG_INSTALLATION_ROOT" | Out-File -FilePath $env:GITHUB_ENV -Append'
 
       # YY-Thunks is a build-time dependency of every shipping binary: it is what
-      # lets the v143 CRT load on Windows XP (see build/Compatibility.props).
+      # lets the v143 CRT load on Windows XP (see build/Compatibility.cmake).
       # Pinned to a version and SHA-256 inside the script.
       - name: Fetch YY-Thunks
         shell: pwsh
         run: powershell -NoProfile -ExecutionPolicy Bypass -File build/Get-YYThunks.ps1
 
-      - name: Generate version header
-        shell: pwsh
-        run: powershell -NoProfile -ExecutionPolicy Bypass -File generate_version.ps1 -Output version_info.h -Version '${{ github.ref_name }}'
-
       # The injector ships too: InterposerService runs the one matching a game whose
       # architecture differs from the host's, since a remote LoadLibraryW only works
       # between processes of one architecture.
       - name: Build native DLL and injector (x64)
-        run: >
-          msbuild LANCommander.Interposer.slnx
-          /t:LANCommander_Interposer,LANCommander_Interposer_Injector
-          /p:Configuration=Release /p:Platform=x64
+        shell: pwsh
+        run: |
+          $PSNativeCommandUseErrorActionPreference = $true
+          cmake --preset windows-x64 '-DINTERPOSER_VERSION=${{ github.ref_name }}'
+          cmake --build --preset windows-x64-release --target LANCommander.Interposer LANCommander.Interposer.Injector
 
       - name: Build native DLL and injector (x86)
-        run: >
-          msbuild LANCommander.Interposer.slnx
-          /t:LANCommander_Interposer,LANCommander_Interposer_Injector
-          /p:Configuration=Release /p:Platform=x86
+        shell: pwsh
+        run: |
+          $PSNativeCommandUseErrorActionPreference = $true
+          cmake --preset windows-x86 '-DINTERPOSER_VERSION=${{ github.ref_name }}'
+          cmake --build --preset windows-x86-release --target LANCommander.Interposer LANCommander.Interposer.Injector
 
       - name: Stage native binaries for NuGet package
         shell: pwsh
@@ -98,8 +93,8 @@ jobs:
 
             New-Item -ItemType Directory -Force $target | Out-Null
 
-            Copy-Item "Release\Injector\$arch\LANCommander.Interposer.dll" "$target\"
-            Copy-Item "Release\Injector\$arch\LANCommander.Interposer.Injector.exe" "$target\"
+            Copy-Item "out\windows-$arch\bin\Release\LANCommander.Interposer.dll" "$target\"
+            Copy-Item "out\windows-$arch\bin\Release\LANCommander.Interposer.Injector.exe" "$target\"
           }
 
       - name: Build .NET bindings

@@ -12,7 +12,9 @@
     lists that build\Test-XPImports.ps1 checks against, and the licence. The
     archive is verified against a pinned SHA-256 before anything is extracted.
 
-    The version here must match YYThunksVersion in build\Compatibility.props.
+    This is the single place the version is pinned: build\Compatibility.cmake
+    and build\Test-XPImports.ps1 both read the $Version line below, so keep
+    its form.
 #>
 [CmdletBinding()]
 param(

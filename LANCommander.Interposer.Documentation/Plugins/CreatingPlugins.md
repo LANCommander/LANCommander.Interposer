@@ -13,7 +13,7 @@ Create a new DLL project targeting the same architecture as the game (x86 for 32
 
 Link the C runtime statically (`/MT`, **C/C++ → Code Generation → Runtime Library → Multi-threaded**) so the plugin does not depend on the Visual C++ Redistributable being installed. This is safe because the plugin API is plain C with caller-owned buffers — nothing allocated on one side is freed on the other.
 
-To support Windows XP as the Interposer does, the plugin also needs a minimum subsystem version of 5.01 (x86) / 5.02 (x64) and [YY-Thunks](https://github.com/Chuyu-Team/YY-Thunks) for the Vista+ functions the modern CRT imports. The plugins in the repository get all three from `build\Compatibility.props`; `build\Test-XPImports.ps1` checks a built DLL against XP's export tables.
+To support Windows XP as the Interposer does, the plugin also needs a minimum subsystem version of 5.01 (x86) / 5.02 (x64) and [YY-Thunks](https://github.com/Chuyu-Team/YY-Thunks) for the Vista+ functions the modern CRT imports. The plugins in the repository get all three from `interposer_ship_target` in `build\Compatibility.cmake`; `build\Test-XPImports.ps1` checks a built DLL against XP's export tables.
 
 ## Plugin Entry Point
 

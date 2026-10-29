@@ -42,9 +42,11 @@ param(
 
 $ErrorActionPreference = 'Stop'
 
-# The same YY-Thunks release the build links, as pinned in Compatibility.props.
-$props = [xml](Get-Content -Raw (Join-Path $PSScriptRoot 'Compatibility.props'))
-$version = @($props.Project.PropertyGroup | ForEach-Object { $_.YYThunksVersion } | Where-Object { $_ })[0]
+# The same YY-Thunks release the build links, as pinned in Get-YYThunks.ps1
+# (build\Compatibility.cmake reads it from there too).
+$fetchScript = Get-Content -Raw (Join-Path $PSScriptRoot 'Get-YYThunks.ps1')
+if ($fetchScript -notmatch "\`$Version = '([0-9.]+)'") { throw "Could not read the YY-Thunks version from Get-YYThunks.ps1" }
+$version = $Matches[1]
 $configRoot = Get-Item (Join-Path $PSScriptRoot "YY-Thunks\$version") -ErrorAction SilentlyContinue
 if (-not $configRoot) {
     throw "YY-Thunks $version not found under $PSScriptRoot\YY-Thunks. Run build\Get-YYThunks.ps1 first."

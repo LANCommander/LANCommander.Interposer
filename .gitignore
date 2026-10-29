@@ -1,4 +1,8 @@
 # ── Build output ──────────────────────────────────────────────────────────────
+# CMake build trees, one per preset
+out/
+
+# Left behind by the old MSBuild projects
 # Top-level MSBuild platform/configuration directories
 x64/
 x86/

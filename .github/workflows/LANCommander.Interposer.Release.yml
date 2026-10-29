@@ -36,63 +36,59 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Setup MSBuild
-        uses: microsoft/setup-msbuild@v2
-
-      # --overlay-triplets is required, not optional: triplets/ pins
-      # VCPKG_PLATFORM_TOOLSET to v143 to match the PlatformToolset the
-      # vcxproj uses. Without it vcpkg silently resolves the built-in triplet
-      # of the same name, builds the dependencies with whatever MSVC the
-      # runner happens to ship, and the link fails on STL symbols that the
-      # v143 import library does not have (e.g. __std_find_last_not_ch_pos_1).
-      - name: Install dependencies (x64)
-        run: vcpkg install --triplet x64-windows-static --overlay-triplets=triplets --x-install-root=vcpkg_installed
-
-      - name: Install dependencies (x86)
-        run: vcpkg install --triplet x86-windows-static --overlay-triplets=triplets --x-install-root=vcpkg_installed_x86
+      # The presets take vcpkg from VCPKG_ROOT; the runner image ships a clone
+      # under VCPKG_INSTALLATION_ROOT. Dependencies install at configure time,
+      # into each preset's own build tree, with --overlay-triplets supplied by
+      # the presets: triplets/ pins VCPKG_PLATFORM_TOOLSET to v143 to match the
+      # toolset CMake is told to use. Without the overlay vcpkg silently
+      # resolves the built-in triplet of the same name, builds the dependencies
+      # with whatever MSVC the runner happens to ship, and the link fails on STL
+      # symbols that the v143 import library does not have (e.g.
+      # __std_find_last_not_ch_pos_1).
+      - name: Locate vcpkg
+        shell: pwsh
+        run: '"VCPKG_ROOT=$env:VCPKG_INSTALLATION_ROOT" | Out-File -FilePath $env:GITHUB_ENV -Append'
 
       # YY-Thunks is a build-time dependency of every shipping binary: it is what
-      # lets the v143 CRT load on Windows XP (see build/Compatibility.props).
+      # lets the v143 CRT load on Windows XP (see build/Compatibility.cmake).
       # Pinned to a version and SHA-256 inside the script.
       - name: Fetch YY-Thunks
         shell: pwsh
         run: powershell -NoProfile -ExecutionPolicy Bypass -File build/Get-YYThunks.ps1
 
-      - name: Generate version header
-        shell: pwsh
-        run: powershell -NoProfile -ExecutionPolicy Bypass -File generate_version.ps1 -Output version_info.h -Version '${{ github.ref_name }}'
-
+      # Only what ships: the test EXE and Plugin.Example are left out.
       - name: Build Release x64
-        run: >
-          msbuild LANCommander.Interposer.slnx
-          /t:LANCommander_Interposer,LANCommander_Interposer_Injector
-          /p:Configuration=Release /p:Platform=x64
+        shell: pwsh
+        run: |
+          $PSNativeCommandUseErrorActionPreference = $true
+          cmake --preset windows-x64 '-DINTERPOSER_VERSION=${{ github.ref_name }}'
+          cmake --build --preset windows-x64-release --target LANCommander.Interposer LANCommander.Interposer.Injector LANCommander.Interposer.Plugin.CDKey LANCommander.Interposer.Plugin.Mouse
 
       - name: Build Release x86
-        run: >
-          msbuild LANCommander.Interposer.slnx
-          /t:LANCommander_Interposer,LANCommander_Interposer_Injector
-          /p:Configuration=Release /p:Platform=x86
+        shell: pwsh
+        run: |
+          $PSNativeCommandUseErrorActionPreference = $true
+          cmake --preset windows-x86 '-DINTERPOSER_VERSION=${{ github.ref_name }}'
+          cmake --build --preset windows-x86-release --target LANCommander.Interposer LANCommander.Interposer.Injector LANCommander.Interposer.Plugin.CDKey LANCommander.Interposer.Plugin.Mouse
 
-      - name: Build Plugin CDKey x64
+      # Every shipping binary must load on Windows XP with nothing installed:
+      # no CRT DLLs, subsystem 5.01/5.02, and no import XP does not export.
+      # Checked against XP's real export tables, so a dependency that pulls in
+      # a Vista+ API fails the release here instead of on a player's machine.
+      - name: Verify Windows XP compatibility
+        shell: pwsh
         run: >
-          msbuild LANCommander.Interposer.slnx
-          /t:LANCommander_Interposer_Plugin_CDKey
-          /p:Configuration=Release /p:Platform=x64
-
-      - name: Build Plugin CDKey x86
-        run: >
-          msbuild LANCommander.Interposer.slnx
-          /t:LANCommander_Interposer_Plugin_CDKey
-          /p:Configuration=Release /p:Platform=x86
+          powershell -NoProfile -ExecutionPolicy Bypass -File build/Test-XPImports.ps1
+          'out\windows-*\bin\Release\*.dll' 'out\windows-*\bin\Release\LANCommander.Interposer.Injector.exe'
+          'out\windows-*\bin\Release\Plugins\*.dll'
 
       # ── Authenticode signing (Azure Artifact Signing) ────────────────────────
       #
-      # Signs every PE output under Release\ in place, before any packaging step
-      # runs. The redistributable payload ZIP and the LCX are both assembled by
-      # copying out of Release\ further down, so signing here also covers the
-      # copies embedded in those packages. The ZIP and LCX containers themselves
-      # are not PE files and cannot be Authenticode signed.
+      # Signs every PE output under out\windows-*\bin\Release\ in place, before
+      # any packaging step runs. The redistributable payload ZIP and the LCX are
+      # both assembled by copying out of there further down, so signing here also
+      # covers the copies embedded in those packages. The ZIP and LCX containers
+      # themselves are not PE files and cannot be Authenticode signed.
       #
       # Required repository secrets (OIDC federated credential):
       #   AZURE_CLIENT_ID, AZURE_TENANT_ID, AZURE_SUBSCRIPTION_ID
@@ -109,29 +105,6 @@ jobs:
       # These resolve from the `release` environment as well as the repository,
       # because the job declares that environment (see the top of the job).
       # Environment-scoped values win over repository-scoped ones.
-      - name: Build Plugin Mouse x64
-        run: >
-          msbuild LANCommander.Interposer.slnx
-          /t:LANCommander_Interposer_Plugin_Mouse
-          /p:Configuration=Release /p:Platform=x64
-
-      - name: Build Plugin Mouse x86
-        run: >
-          msbuild LANCommander.Interposer.slnx
-          /t:LANCommander_Interposer_Plugin_Mouse
-          /p:Configuration=Release /p:Platform=x86
-
-      # Every shipping binary must load on Windows XP with nothing installed:
-      # no CRT DLLs, subsystem 5.01/5.02, and no import XP does not export.
-      # Checked against XP's real export tables, so a dependency that pulls in
-      # a Vista+ API fails the release here instead of on a player's machine.
-      - name: Verify Windows XP compatibility
-        shell: pwsh
-        run: >
-          powershell -NoProfile -ExecutionPolicy Bypass -File build/Test-XPImports.ps1
-          'Release\Injector\*\*.dll' 'Release\Injector\*\*.exe'
-          'Release\CDKey\*\*.dll' 'Release\Mouse\*\*.dll'
-
       - name: Report signing configuration
         shell: pwsh
         run: |
@@ -161,15 +134,15 @@ jobs:
             'LANCommander.Interposer.Plugin.*.dll'
           )
 
-          # The signing action expects absolute paths. Each project writes to its
-          # own subdirectory under Release\, so the search has to recurse. The
-          # plugin pattern is a wildcard so a new plugin is signed by existing.
-          $files = Get-ChildItem -Path 'Release' -Recurse -File -Include $patterns |
+          # The signing action expects absolute paths. Plugins build into a
+          # Plugins\ subdirectory, so the search has to recurse. The plugin
+          # pattern is a wildcard so a new plugin is signed by existing.
+          $files = Get-ChildItem -Path 'out\windows-x64\bin\Release', 'out\windows-x86\bin\Release' -Recurse -File -Include $patterns |
             Select-Object -ExpandProperty FullName |
             Sort-Object -Unique
 
           if (-not $files) {
-            throw "No files under Release\ matched the signing patterns. Refusing to sign nothing."
+            throw "No files under out\windows-*\bin\Release\ matched the signing patterns. Refusing to sign nothing."
           }
 
           Write-Host "Signing $($files.Count) file(s):"
@@ -263,10 +236,11 @@ jobs:
             $archDir = "$d\$arch"
             New-Item -ItemType Directory -Force $archDir | Out-Null
 
-            $dll = "Release\Injector\$arch\LANCommander.Interposer.dll"
+            $bin = "out\windows-$arch\bin\Release"
+            $dll = "$bin\LANCommander.Interposer.dll"
 
             Copy-Item $dll "$archDir\"
-            Copy-Item "Release\Injector\$arch\LANCommander.Interposer.Injector.exe" "$archDir\"
+            Copy-Item "$bin\LANCommander.Interposer.Injector.exe" "$archDir\"
 
             foreach ($name in $loaderNames) {
               Copy-Item $dll (Join-Path $archDir $name)
@@ -279,7 +253,7 @@ jobs:
             New-Item -ItemType Directory -Force "$archDir\Plugins" | Out-Null
 
             foreach ($plugin in @('CDKey', 'Mouse')) {
-              $source = "Release\$plugin\$arch\LANCommander.Interposer.Plugin.$plugin.dll"
+              $source = "$bin\Plugins\LANCommander.Interposer.Plugin.$plugin.dll"
 
               if (-not (Test-Path -LiteralPath $source)) { throw "Missing plugin build: $source" }
 
@@ -296,7 +270,7 @@ jobs:
           Copy-Item 'LANCommander.Interposer\include\LANCommander.Interposer.h' "$d\SDK\include\"
 
           foreach ($arch in @('x64', 'x86')) {
-            $source = "Release\Injector\$arch\LANCommander.Interposer.lib"
+            $source = "out\windows-$arch\lib\Release\LANCommander.Interposer.lib"
 
             if (-not (Test-Path -LiteralPath $source)) { throw "Missing import library: $source" }
 
@@ -346,8 +320,8 @@ jobs:
 
           foreach ($arch in @('x64', 'x86')) {
             New-Item -ItemType Directory -Force "$d\$arch" | Out-Null
-            Copy-Item "Release\Injector\$arch\LANCommander.Interposer.dll"          "$d\$arch\"
-            Copy-Item "Release\Injector\$arch\LANCommander.Interposer.Injector.exe" "$d\$arch\"
+            Copy-Item "out\windows-$arch\bin\Release\LANCommander.Interposer.dll"          "$d\$arch\"
+            Copy-Item "out\windows-$arch\bin\Release\LANCommander.Interposer.Injector.exe" "$d\$arch\"
           }
 
           Compress-Archive -Path "$d\*" -DestinationPath "LANCommander.Interposer.Redistributable.$version.zip"

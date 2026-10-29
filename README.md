@@ -146,20 +146,24 @@ All configuration lives in `.interposer\Config.yml` next to the DLL. See the [sa
 
 ### Prerequisites
 
-- Visual Studio 2022 with C++ desktop workload
-- [vcpkg](https://vcpkg.io/) (for MinHook and yaml-cpp)
+- Visual Studio 2022 or later with the C++ desktop workload and the **v143** toolset
+- CMake 3.25+
+- [vcpkg](https://vcpkg.io/) (for MinHook and yaml-cpp), with `VCPKG_ROOT` pointing at it
 - .NET SDK 8.0+ (for the .NET bindings)
 
-### Native DLL + Injector
+### Native DLL, Injector and Plugins
 
 ```bash
-# Install dependencies
-vcpkg install --triplet x64-windows-static-md --overlay-triplets=triplets --x-install-root=vcpkg_installed
-vcpkg install --triplet x86-windows-static-md --overlay-triplets=triplets --x-install-root=vcpkg_installed_x86
+# Once: YY-Thunks, which lets the binaries load on Windows XP
+powershell -NoProfile -ExecutionPolicy Bypass -File build/Get-YYThunks.ps1
 
-# Build (from Git Bash - use double-slash for MSBuild flags)
-MSBuild LANCommander.Interposer.slnx //p:Configuration=Release //p:Platform=x64
+# Configure (installs the vcpkg dependencies) and build
+cmake --preset windows-x64
+cmake --build --preset windows-x64-release
 ```
+
+Use the `windows-x86` presets for 32-bit. Everything lands in `out/windows-<arch>/bin/<Config>/`,
+with the plugins under `Plugins/` and the SDK import library in `out/windows-<arch>/lib/<Config>/`.
 
 ### .NET Bindings
 
@@ -169,9 +173,11 @@ dotnet build LANCommander.Interposer.NET/LANCommander.Interposer.NET.csproj -c R
 
 ### Tests
 
+Run the suite against a **Release** build; a Debug DLL waits for a debugger to attach.
+
 ```bash
-MSBuild LANCommander.Interposer.slnx //p:Configuration=Debug //p:Platform=x64
-x64/Debug/LANCommander.Interposer.Tests.exe
+cmake --build --preset windows-x64-release
+out/windows-x64/bin/Release/LANCommander.Interposer.Tests.exe
 ```
 
 ## Runtime File Structure
