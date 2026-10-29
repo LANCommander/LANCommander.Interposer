@@ -27,6 +27,7 @@
 #include <vector>
 
 #include "relay.h"
+#include "instance.h"
 #include "relay_protocol.h"
 #include "callbacks.h"
 #include "config.h"
@@ -2246,6 +2247,8 @@ std::wstring RelayStatusJson()
 
 extern "C" __declspec(dllexport) BOOL InterposerRelayGetStatus(InterposerRelayStatus* status)
 {
+    FORWARD_TO_PRIMARY(InterposerRelayGetStatus, status);
+
     if (!status || status->size < sizeof(InterposerRelayStatus))
         return FALSE;
 
@@ -2278,6 +2281,8 @@ extern "C" __declspec(dllexport) BOOL InterposerRelayGetStatus(InterposerRelaySt
 extern "C" __declspec(dllexport) DWORD InterposerRelayEnumPeers(
     InterposerRelayPeer* buffer, DWORD capacity, DWORD* outCount)
 {
+    FORWARD_TO_PRIMARY(InterposerRelayEnumPeers, buffer, capacity, outCount);
+
     std::lock_guard<std::mutex> lk(g_statusMutex);
 
     const DWORD total   = static_cast<DWORD>(g_peers.size());
@@ -2300,10 +2305,14 @@ extern "C" __declspec(dllexport) DWORD InterposerRelayEnumPeers(
 
 extern "C" __declspec(dllexport) BOOL InterposerRelayConnect(const wchar_t* yamlOverrides)
 {
+    FORWARD_TO_PRIMARY(InterposerRelayConnect, yamlOverrides);
+
     return RelayConnect(yamlOverrides ? std::wstring(yamlOverrides) : std::wstring()) ? TRUE : FALSE;
 }
 
 extern "C" __declspec(dllexport) void InterposerRelayDisconnect()
 {
+    FORWARD_TO_PRIMARY(InterposerRelayDisconnect);
+
     RelayDisconnect();
 }

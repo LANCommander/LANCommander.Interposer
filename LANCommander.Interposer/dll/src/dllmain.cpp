@@ -2,6 +2,7 @@
 #define NOMINMAX
 #include <windows.h>
 #include "hooks.h"
+#include "instance.h"
 
 static void WriteLog(const wchar_t* message)
 {
@@ -30,6 +31,15 @@ BOOL APIENTRY DllMain(HMODULE hInstance, DWORD fdwReason, LPVOID lpvReserved)
     {
     case DLL_PROCESS_ATTACH:
         DisableThreadLibraryCalls(hInstance);
+
+        // Another copy already owns this process. Install nothing; the exports
+        // forward to it (see instance.h).
+        if (!ClaimPrimaryInstance(hInstance))
+        {
+            WriteLog(L"DLL_PROCESS_ATTACH: another Interposer is already loaded; deferring to it");
+            break;
+        }
+
         WriteLog(L"DLL_PROCESS_ATTACH: calling InstallHooks");
         __try
         {
@@ -45,7 +55,11 @@ BOOL APIENTRY DllMain(HMODULE hInstance, DWORD fdwReason, LPVOID lpvReserved)
         break;
 
     case DLL_PROCESS_DETACH:
+        if (PrimaryInstance())
+            break;
+
         RemoveHooks(lpvReserved != nullptr);
+        ReleasePrimaryInstance();
         break;
 
     default:

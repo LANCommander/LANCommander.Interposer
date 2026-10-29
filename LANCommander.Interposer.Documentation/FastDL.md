@@ -71,6 +71,21 @@ FastDL:
 
 This would fetch `C:\Games\MyGame\assets\textures\wall.tga` from `http://fastdl.lan/textures/wall.tga`.
 
+### Paths that do not depend on the install location
+
+`Local` accepts the same [path tokens](FileRedirection#path-tokens) as file redirects. `%GAMEDIR%` is the folder holding the game executable, so this works wherever each player installed the game:
+
+```yaml
+FastDL:
+  Paths:
+    - Local: '%GAMEDIR%\baseq3'
+      Remote: baseq3
+```
+
+That matters most for a config you ship to other people, such as one bundled with a [game patch](GamePatches). A token that does not resolve is left as written, so the mapping never matches, and the session log reports it as a `[FASTDL]` line.
+
+Many older games open their files by relative path (`baseq3\maps\q3dm1.bsp`) rather than by full path. If a relative path does not match any `Local` as written, the Interposer resolves it against the game's working directory and tries again. That lets an absolute `Local` cover those games too.
+
 ## Overlay Directory
 
 By default, downloaded files are written to a `.interposer\Downloads\` folder inside the DLL's directory, not directly into the game directory. This keeps the game's own files unmodified.

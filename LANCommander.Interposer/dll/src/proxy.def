@@ -2,34 +2,41 @@
 ; No LIBRARY statement: the internal name follows whatever the file is renamed
 ; to at deploy time. A game resolves only the names it imports, so the exports
 ; belonging to the other targets are inert.
+;
+; Every one of them is PRIVATE: exported, but left out of the import library.
+; LANCommander.Interposer.lib is the SDK a game patch links against, and it
+; must carry only the Interposer* API -- a patch that also links version.lib
+; or dinput8.lib would otherwise have GetFileVersionInfoW or DirectInput8Create
+; bound to whichever library the linker happened to search first. The API
+; itself is exported with __declspec(dllexport) and needs no line here.
 EXPORTS
 ; ---- version.dll ----
-    GetFileVersionInfoA        = Proxy_GetFileVersionInfoA
-    GetFileVersionInfoByHandle = Proxy_GetFileVersionInfoByHandle
-    GetFileVersionInfoExA      = Proxy_GetFileVersionInfoExA
-    GetFileVersionInfoExW      = Proxy_GetFileVersionInfoExW
-    GetFileVersionInfoSizeA    = Proxy_GetFileVersionInfoSizeA
-    GetFileVersionInfoSizeExA  = Proxy_GetFileVersionInfoSizeExA
-    GetFileVersionInfoSizeExW  = Proxy_GetFileVersionInfoSizeExW
-    GetFileVersionInfoSizeW    = Proxy_GetFileVersionInfoSizeW
-    GetFileVersionInfoW        = Proxy_GetFileVersionInfoW
-    VerFindFileA               = Proxy_VerFindFileA
-    VerFindFileW               = Proxy_VerFindFileW
-    VerInstallFileA            = Proxy_VerInstallFileA
-    VerInstallFileW            = Proxy_VerInstallFileW
-    VerLanguageNameA           = Proxy_VerLanguageNameA
-    VerLanguageNameW           = Proxy_VerLanguageNameW
-    VerQueryValueA             = Proxy_VerQueryValueA
-    VerQueryValueW             = Proxy_VerQueryValueW
+    GetFileVersionInfoA        = Proxy_GetFileVersionInfoA         PRIVATE
+    GetFileVersionInfoByHandle = Proxy_GetFileVersionInfoByHandle  PRIVATE
+    GetFileVersionInfoExA      = Proxy_GetFileVersionInfoExA       PRIVATE
+    GetFileVersionInfoExW      = Proxy_GetFileVersionInfoExW       PRIVATE
+    GetFileVersionInfoSizeA    = Proxy_GetFileVersionInfoSizeA     PRIVATE
+    GetFileVersionInfoSizeExA  = Proxy_GetFileVersionInfoSizeExA   PRIVATE
+    GetFileVersionInfoSizeExW  = Proxy_GetFileVersionInfoSizeExW   PRIVATE
+    GetFileVersionInfoSizeW    = Proxy_GetFileVersionInfoSizeW     PRIVATE
+    GetFileVersionInfoW        = Proxy_GetFileVersionInfoW         PRIVATE
+    VerFindFileA               = Proxy_VerFindFileA                PRIVATE
+    VerFindFileW               = Proxy_VerFindFileW                PRIVATE
+    VerInstallFileA            = Proxy_VerInstallFileA             PRIVATE
+    VerInstallFileW            = Proxy_VerInstallFileW             PRIVATE
+    VerLanguageNameA           = Proxy_VerLanguageNameA            PRIVATE
+    VerLanguageNameW           = Proxy_VerLanguageNameW            PRIVATE
+    VerQueryValueA             = Proxy_VerQueryValueA              PRIVATE
+    VerQueryValueW             = Proxy_VerQueryValueW              PRIVATE
 ; ---- dinput8.dll ----
-    DirectInput8Create
-    GetdfDIJoystick            = Proxy_GetdfDIJoystick
+    DirectInput8Create                                             PRIVATE
+    GetdfDIJoystick            = Proxy_GetdfDIJoystick             PRIVATE
 ; ---- dinput.dll ----
-    DirectInputCreateA
-    DirectInputCreateEx
-    DirectInputCreateW         = Proxy_DirectInputCreateW
+    DirectInputCreateA                                             PRIVATE
+    DirectInputCreateEx                                            PRIVATE
+    DirectInputCreateW         = Proxy_DirectInputCreateW          PRIVATE
 ; ---- exported by both dinput.dll and dinput8.dll ----
-    DllCanUnloadNow        PRIVATE
-    DllGetClassObject      PRIVATE
-    DllRegisterServer      PRIVATE
-    DllUnregisterServer    PRIVATE
+    DllCanUnloadNow                                                PRIVATE
+    DllGetClassObject                                              PRIVATE
+    DllRegisterServer                                              PRIVATE
+    DllUnregisterServer                                            PRIVATE

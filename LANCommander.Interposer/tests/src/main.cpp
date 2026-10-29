@@ -28,6 +28,7 @@
 #include <cstdio>
 #include <filesystem>
 #include <mutex>
+#include <delayimp.h>       // __FUnloadDelayLoadedDLL2 (SDK-)
 
 #pragma comment(lib, "ws2_32.lib")
 #pragma comment(lib, "iphlpapi.lib")
@@ -298,6 +299,18 @@ static void WriteInterposerYaml(const std::wstring& yamlPath,
         "  Files:\n"
         "    - '.interposer\\RegistryBase.reg'\n"
         "    - '.interposer\\Registry.reg'\n"
+        "\n"
+        // FastDL with no BaseUrl and no probing never reaches the network, so the
+        // overlay half is testable offline. Local is built from %GAMEDIR%, the way
+        // a config shipped with a game patch has to name the game's folders. FD-
+        // tests open files under it by absolute and by relative path.
+        "FastDL:\n"
+        "  Enabled: true\n"
+        "  ProbeConnections: false\n"
+        "  UseDownloadDirectory: true\n"
+        "  Paths:\n"
+        "    - Local: '%GAMEDIR%\\FastDLProbe'\n"
+        "      Remote: maps\n"
         "\n"
         "Player:\n"
         "  Username: TestPlayer\n"
@@ -3933,6 +3946,326 @@ static void RunLauncherConfigTests(const std::wstring& exeDir, const std::wstrin
 }
 
 // ============================================================
+// FastDL tests  (overlay only -- no server)
+// ============================================================
+// The fixture maps %GAMEDIR%\FastDLProbe to the remote folder "maps" with no
+// BaseUrl, so nothing is ever downloaded; what is tested is that a file already
+// in the download overlay is served in place of the missing original.
+
+static void RunFastDLTests(const std::wstring& exeDir)
+{
+    wprintf(L"\n--- FastDL Tests (overlay) ---\n");
+
+    const std::wstring overlayDir  = exeDir + L".interposer\\Downloads\\maps\\";
+    const std::wstring overlayFile = overlayDir + L"map.txt";
+
+    CreateDirs(overlayDir);
+    WriteTextFile(overlayFile, "from overlay");
+
+    ASSERT(ReadFileAsUtf8(exeDir + L"FastDLProbe\\map.txt") == "from overlay",
+        L"FD-01: a Local prefix built from the GAMEDIR token serves the overlay copy of a missing file");
+
+    // A game that opens files relative to its working directory never passes the
+    // absolute path the prefix names; the full-path fallback has to catch it.
+    {
+        wchar_t previous[MAX_PATH]{};
+        GetCurrentDirectoryW(MAX_PATH, previous);
+        SetCurrentDirectoryW(exeDir.c_str());
+
+        ASSERT(ReadFileAsUtf8(L"FastDLProbe\\map.txt") == "from overlay",
+            L"FD-02: a relative open under the prefix is served from the overlay too");
+
+        SetCurrentDirectoryW(previous);
+    }
+
+    ASSERT(ReadFileAsUtf8(exeDir + L"NotFastDL\\map.txt").empty(),
+        L"FD-03: a path outside every Local prefix is not served from the overlay");
+
+    DeleteFileW(overlayFile.c_str());
+    RemoveDirectoryW(overlayDir.c_str());
+    RemoveDirectoryW((exeDir + L".interposer\\Downloads").c_str());
+}
+
+// ============================================================
+// SDK tests  (the import library, in this process)
+// ============================================================
+// sdk.c calls the API the way a game patch does: the public header and the
+// import library, compiled as C with stdcall as the default convention. The
+// import is delay-loaded, so it binds on the first call here -- after wmain has
+// written the fixtures and loaded the DLL -- and must bind to that same copy.
+
+extern "C" BOOL  __cdecl SdkGetConfigString(const wchar_t* dotPath, wchar_t* buffer, DWORD bufferSize);
+extern "C" BOOL  __cdecl SdkGetUsername(wchar_t* buffer, DWORD bufferSize);
+extern "C" void  __cdecl SdkLog(const wchar_t* verb, const wchar_t* message);
+extern "C" DWORD __cdecl SdkSetRegistryValueBySuffix(const wchar_t* keySuffix, const wchar_t* valueName, const wchar_t* value);
+extern "C" DWORD __cdecl SdkEnumNetworkAdapterCount(void);
+extern "C" void* __cdecl SdkAddressOfGetConfigString(void);
+
+static const wchar_t* kSdkLogVerb    = L"SDK PROBE";
+static const wchar_t* kSdkLogMessage = L"written through the import library";
+
+static void RunSdkTests(HMODULE hDll)
+{
+    wprintf(L"\n--- SDK Tests (import library) ---\n");
+
+    wchar_t buf[256]{};
+
+    ASSERT(SdkGetConfigString(L"Player.Username", buf, ARRAYSIZE(buf)) && wcscmp(buf, L"TestPlayer") == 0,
+        L"SDK-01: InterposerGetConfigString through the import library reads the fixture");
+
+    // The delay-load helper resolves by module name. It must have found the copy
+    // already in the process rather than loading another.
+    ASSERT(SdkAddressOfGetConfigString() ==
+               reinterpret_cast<void*>(GetProcAddress(hDll, "InterposerGetConfigString")),
+        L"SDK-02: the import binds to the Interposer already loaded");
+
+    buf[0] = L'\0';
+
+    ASSERT(SdkGetUsername(buf, ARRAYSIZE(buf)) && wcscmp(buf, L"TestPlayer") == 0,
+        L"SDK-03: InterposerGetUsername through the import library");
+
+    // Three arguments and a return value: the call a convention mismatch would
+    // corrupt first on x86.
+    {
+        const DWORD updated = SdkSetRegistryValueBySuffix(L"TestGame\\1.0\\SubKey", L"SdkProbe", L"FromSdk");
+
+        wchar_t value[64]{};
+        DWORD   cb = sizeof(value);
+        HKEY    key = nullptr;
+
+        const bool read =
+            RegOpenKeyExW(HKEY_LOCAL_MACHINE, L"SOFTWARE\\TestGame\\1.0\\SubKey", 0, KEY_READ, &key) == ERROR_SUCCESS &&
+            RegQueryValueExW(key, L"SdkProbe", nullptr, nullptr, reinterpret_cast<BYTE*>(value), &cb) == ERROR_SUCCESS;
+
+        if (key)
+            RegCloseKey(key);
+
+        ASSERT(updated == 1 && read && wcscmp(value, L"FromSdk") == 0,
+            L"SDK-04: InterposerSetRegistryValueBySuffix through the import library reaches the virtual store");
+    }
+
+    {
+        using FnEnum = DWORD (*)(void*, DWORD, DWORD*);
+        auto direct = reinterpret_cast<FnEnum>(
+            reinterpret_cast<void*>(GetProcAddress(hDll, "InterposerEnumNetworkAdapters")));
+
+        DWORD written = 0;
+
+        ASSERT(direct && SdkEnumNetworkAdapterCount() == direct(nullptr, 0, &written),
+            L"SDK-05: InterposerEnumNetworkAdapters through the import library");
+    }
+
+    // Checked in the session log once the DLL has unloaded; see RunSdkLogTests.
+    SdkLog(kSdkLogVerb, kSdkLogMessage);
+
+    // The delay-load helper took a reference of its own when it bound. Drop it,
+    // or wmain's FreeLibrary would leave the DLL loaded and its log open.
+    __FUnloadDelayLoadedDLL2("LANCommander.Interposer.dll");
+}
+
+static void RunSdkLogTests(const std::wstring& logPath)
+{
+    const std::string log = ReadFileAsUtf8(logPath);
+
+    ASSERT(CountLinesContaining(log, "[SDK PROBE]", WideToUtf8(kSdkLogMessage).c_str()) == 1,
+        L"SDK-06: InterposerLog through the import library writes one session log line");
+}
+
+// ============================================================
+// Second instance tests  (separate process)
+// ============================================================
+// A game patch that links the Interposer can land in a game LANCommander has
+// also deployed it to, so two copies end up in one process. The first to load
+// must own every hook; the second must install none and forward its exports to
+// the first. Two copies of the DLL would detour the same KernelBase exports,
+// which this process has already done once, so it gets a child of its own.
+//
+// Each copy has its own .interposer tree. Their FileRedirects send one probe
+// file to different places, so where the probe lands says whose hooks ran: the
+// second copy's rules cover both orders MinHook could chain the two detours in.
+
+static bool PathExists(const std::wstring& path)
+{
+    return GetFileAttributesW(path.c_str()) != INVALID_FILE_ATTRIBUTES;
+}
+
+static bool TouchFile(const std::wstring& path)
+{
+    HANDLE h = CreateFileW(path.c_str(), GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
+
+    if (h == INVALID_HANDLE_VALUE)
+        return false;
+
+    CloseHandle(h);
+    return true;
+}
+
+// The session log is still open for append while the primary is loaded, so it
+// has to be read sharing write access -- which ReadFileAsUtf8 does not.
+static std::string ReadOpenLog(const std::wstring& path)
+{
+    HANDLE h = CreateFileW(path.c_str(), GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE,
+        nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+
+    if (h == INVALID_HANDLE_VALUE)
+        return {};
+
+    std::string out;
+    char  chunk[4096];
+    DWORD read = 0;
+
+    while (::ReadFile(h, chunk, sizeof(chunk), &read, nullptr) && read)
+        out.append(chunk, read);
+
+    CloseHandle(h);
+    return out;
+}
+
+// Runs in the child process. Returns the number of failed assertions.
+static int RunSecondInstanceChild(const wchar_t* primaryDirArg, const wchar_t* secondaryDirArg)
+{
+    // Passed without trailing separators; see RunIsolatedChild.
+    const std::wstring primaryDir   = WithSeparator(primaryDirArg);
+    const std::wstring secondaryDir = WithSeparator(secondaryDirArg);
+
+    wprintf(L"\n--- Second Instance Tests (child process) ---\n");
+
+    HMODULE primary   = LoadLibraryW((primaryDir + L"LANCommander.Interposer.dll").c_str());
+    HMODULE secondary = primary ? LoadLibraryW((secondaryDir + L"LANCommander.Interposer.dll").c_str()) : nullptr;
+
+    if (!primary || !secondary || primary == secondary)
+    {
+        wprintf(L"  FAIL  MI-00: child could not load both copies of the DLL (GLE=%lu)\n", GetLastError());
+        return 1;
+    }
+
+    using FnLog = void (*)(const wchar_t*, const wchar_t*);
+
+    auto get = reinterpret_cast<FnTestGetConfig>(
+        reinterpret_cast<void*>(GetProcAddress(secondary, "InterposerGetConfigString")));
+    auto log = reinterpret_cast<FnLog>(
+        reinterpret_cast<void*>(GetProcAddress(secondary, "InterposerLog")));
+
+    ASSERT(get && GetConfig(get, L"Plugins.Probe.Owner") == L"primary",
+        L"MI-01: the second copy's exports answer from the first copy's configuration");
+
+    ASSERT(!PathExists(secondaryDir + L".interposer\\Logs"),
+        L"MI-02: the second copy loads no configuration and opens no session log");
+
+    const std::wstring probe        = primaryDir + L"instance_probe.txt";
+    const std::wstring fromPrimary  = primaryDir + L"from_primary.txt";
+    const std::wstring fromSecondary = primaryDir + L"from_secondary.txt";
+
+    TouchFile(probe);
+
+    ASSERT(PathExists(fromPrimary) && !PathExists(fromSecondary),
+        L"MI-03: only the first copy's file hooks run");
+
+    if (log)
+        log(L"INSTANCE", L"forwarded by the second copy");
+
+    {
+        const std::string text = ReadOpenLog(FindFirstLogFile(primaryDir + L".interposer\\Logs\\"));
+
+        ASSERT(CountLinesContaining(text, "[INSTANCE]", "forwarded by the second copy") == 1,
+            L"MI-04: InterposerLog through the second copy writes to the first copy's log");
+    }
+
+    // Unloading the second copy must not take any hooks with it.
+    FreeLibrary(secondary);
+    DeleteFileW(fromPrimary.c_str());
+    TouchFile(probe);
+
+    ASSERT(PathExists(fromPrimary) && !PathExists(fromSecondary),
+        L"MI-05: the first copy's hooks survive the second copy unloading");
+
+    // The second copy pinned the first, so nothing it forwarded to can be
+    // unmapped. The pin outlives the second copy.
+    FreeLibrary(primary);
+
+    ASSERT(GetModuleHandleW((primaryDir + L"LANCommander.Interposer.dll").c_str()) == primary,
+        L"MI-06: the first copy stays loaded once a second copy has pinned it");
+
+    return g_fail;
+}
+
+static void RunSecondInstanceTests(const std::wstring& exeDir, const std::wstring& testTmpDir)
+{
+    wprintf(L"\n--- Second Instance Tests ---\n");
+
+    const std::wstring root         = testTmpDir + L"SecondInstance\\";
+    const std::wstring primaryDir   = root + L"Primary\\";
+    const std::wstring secondaryDir = root + L"Secondary\\";
+    const std::wstring sourceDll    = exeDir + L"LANCommander.Interposer.dll";
+
+    const std::string fromPrimary   = WideToUtf8(primaryDir) + "from_primary.txt";
+    const std::string fromSecondary = WideToUtf8(primaryDir) + "from_secondary.txt";
+
+    CreateDirs(primaryDir + L".interposer\\");
+    CreateDirs(secondaryDir + L".interposer\\");
+
+    if (!CopyFileW(sourceDll.c_str(), (primaryDir + L"LANCommander.Interposer.dll").c_str(), FALSE) ||
+        !CopyFileW(sourceDll.c_str(), (secondaryDir + L"LANCommander.Interposer.dll").c_str(), FALSE))
+    {
+        ASSERT(false, L"MI-00: staging two copies of the DLL");
+        return;
+    }
+
+    WriteTextFile(primaryDir + L".interposer\\Config.yml",
+        "FileRedirects:\n"
+        "  - Pattern: '.*\\\\instance_probe\\.txt$'\n"
+        "    Replacement: '" + fromPrimary + "'\n"
+        "\n"
+        "Plugins:\n"
+        "  Probe:\n"
+        "    Owner: primary\n");
+
+    // Matches the probe itself, for a detour chained outside the first copy's,
+    // and the first copy's output, for one chained inside it.
+    WriteTextFile(secondaryDir + L".interposer\\Config.yml",
+        "FileRedirects:\n"
+        "  - Pattern: '.*\\\\instance_probe\\.txt$'\n"
+        "    Replacement: '" + fromSecondary + "'\n"
+        "  - Pattern: '.*\\\\from_primary\\.txt$'\n"
+        "    Replacement: '" + fromSecondary + "'\n"
+        "\n"
+        "Plugins:\n"
+        "  Probe:\n"
+        "    Owner: secondary\n");
+
+    wchar_t exePathBuf[MAX_PATH]{};
+    GetModuleFileNameW(nullptr, exePathBuf, MAX_PATH);
+    const std::wstring exePath = exePathBuf;
+
+    // Trailing separators come off for the command line; see RunIsolatedTests.
+    std::wstring command = L"\"" + exePath + L"\" --second-instance \"" +
+        primaryDir.substr(0, primaryDir.size() - 1) + L"\" \"" +
+        secondaryDir.substr(0, secondaryDir.size() - 1) + L"\"";
+
+    STARTUPINFOW si{};
+    si.cb = sizeof(si);
+    PROCESS_INFORMATION pi{};
+
+    if (!CreateProcessW(exePath.c_str(), command.data(), nullptr, nullptr, TRUE, 0, nullptr, nullptr, &si, &pi))
+    {
+        ASSERT(false, L"MI-00: launching the second-instance child process");
+        return;
+    }
+
+    WaitForSingleObject(pi.hProcess, 120 * 1000);
+
+    DWORD exitCode = 1;
+    GetExitCodeProcess(pi.hProcess, &exitCode);
+    CloseHandle(pi.hThread);
+    CloseHandle(pi.hProcess);
+
+    ASSERT(exitCode == 0, L"MI-00: the second-instance child reported no failures");
+
+    std::error_code ignored;
+    std::filesystem::remove_all(root, ignored);
+}
+
+// ============================================================
 // Network relay tests  (two peer processes + a relay server)
 // ============================================================
 // The relay needs a server and two members to be worth testing, so the parent
@@ -4814,6 +5147,10 @@ int wmain(int argc, wchar_t** argv)
     if (argc >= 5 && wcscmp(argv[1], L"--relay-peer") == 0)
         return RunRelayChild(argv[2], argv[3], argv[4]);
 
+    // Re-entry from RunSecondInstanceTests: two copies of the DLL in one process.
+    if (argc >= 4 && wcscmp(argv[1], L"--second-instance") == 0)
+        return RunSecondInstanceChild(argv[2], argv[3]);
+
     std::wstring exeDir        = GetExeDir();
     std::wstring testTmpDir    = GetTestTempDir();
     std::wstring interposerDir = exeDir + L".interposer\\";
@@ -4886,6 +5223,7 @@ int wmain(int argc, wchar_t** argv)
 
     // ── Tests (hooks active) ─────────────────────────────────────────────────
     RunFileTests(exeDir, testTmpDir);
+    RunFastDLTests(exeDir);
     RunRegistryTests();
     RunOverlayTests();
     RunIdentityTests();
@@ -4895,6 +5233,7 @@ int wmain(int argc, wchar_t** argv)
     RunMouseTransformTests(hDll, hDInput);
     RunAudioTests(hDll, hWinmm, hDSound, hOle32);
     RunPluginConfigTests(hDll);
+    RunSdkTests(hDll);
 
     // ── Unload DLL ───────────────────────────────────────────────────────────
     // DLL_PROCESS_DETACH fires: RemoveRegistryHooks (SaveRegFile if dirty),
@@ -4922,6 +5261,7 @@ int wmain(int argc, wchar_t** argv)
     // Discover the timestamped log created by LoadConfig during DLL_PROCESS_ATTACH.
     std::wstring logPath = FindFirstLogFile(logsDir);
     RunLogTests(logPath);
+    RunSdkLogTests(logPath);
     RunPersistenceTests(regPath);
     RunOverlayPersistenceTests(baseRegPath, regPath);
     RunPluginConfigPersistenceTests(yamlPath);
@@ -4932,6 +5272,9 @@ int wmain(int argc, wchar_t** argv)
 
     // Likewise: a base directory and config overlay are read once, at load.
     RunLauncherConfigTests(exeDir, testTmpDir);
+
+    // Likewise: two copies of the DLL, which this process cannot host twice.
+    RunSecondInstanceTests(exeDir, testTmpDir);
 
     // Likewise separate processes: two relay peers, each with its own DLL.
     RunRelayTests(exeDir, testTmpDir);

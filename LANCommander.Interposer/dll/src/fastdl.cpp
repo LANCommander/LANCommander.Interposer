@@ -216,6 +216,46 @@ static std::wstring GetEffectiveBaseUrl()
     return g_probedBaseUrlVerified.empty() ? g_probedBaseUrl : g_probedBaseUrlVerified;
 }
 
+// The FastDLPath whose Local prefix covers localPath, with the part of the path
+// after the prefix in `relative` (leading separators stripped). Tried first
+// against the path as the game passed it, which is what a relative Local
+// matches, then against its full path -- so an absolute Local, including one
+// built from %GAMEDIR%, also covers a game that opens files relative to its
+// working directory.
+static const FastDLPath* MatchFastDLPath(const std::wstring& localPath, std::wstring& relative)
+{
+    auto match = [&](const std::wstring& candidate) -> const FastDLPath*
+    {
+        const std::wstring lower = ToLowerFastDL(candidate);
+
+        for (const auto& mapping : g_fastdlPaths)
+        {
+            if (!lower.starts_with(ToLowerFastDL(mapping.localPrefix)))
+                continue;
+
+            relative = candidate.substr(mapping.localPrefix.size());
+
+            while (!relative.empty() && (relative[0] == L'\\' || relative[0] == L'/'))
+                relative.erase(relative.begin());
+
+            return &mapping;
+        }
+
+        return nullptr;
+    };
+
+    if (const FastDLPath* mapping = match(localPath))
+        return mapping;
+
+    wchar_t full[MAX_PATH]{};
+    const DWORD length = GetFullPathNameW(localPath.c_str(), MAX_PATH, full, nullptr);
+
+    if (length == 0 || length >= MAX_PATH || _wcsicmp(full, localPath.c_str()) == 0)
+        return nullptr;
+
+    return match(full);
+}
+
 // Finds the first FastDLPath whose localPrefix matches the beginning of localPath
 // (case-insensitive) and returns the full HTTP URL, or an empty string if no
 // mapping applies.
@@ -225,41 +265,25 @@ static std::wstring BuildFastDLUrl(const std::wstring& localPath)
     if (baseUrl.empty())
         return {};
 
-    std::wstring lowerLocalPath = ToLowerFastDL(localPath);
+    std::wstring relative;
+    const FastDLPath* mapping = MatchFastDLPath(localPath, relative);
 
-    for (const auto& mapping : g_fastdlPaths)
-    {
-        std::wstring prefix = ToLowerFastDL(mapping.localPrefix);
+    if (!mapping)
+        return {};
 
-        if (lowerLocalPath.size() < prefix.size())
-            continue;
+    // Convert all backslashes to forward slashes
+    for (auto& character : relative)
+        if (character == L'\\') character = L'/';
 
-        if (lowerLocalPath.substr(0, prefix.size()) != prefix)
-            continue;
+    // Compose: baseUrl + remoteSubPath + "/" + relative
+    std::wstring url = baseUrl;
 
-        // Extract the relative portion after the prefix
-        std::wstring relative = localPath.substr(mapping.localPrefix.size());
+    if (!mapping->remoteSubPath.empty())
+        url += mapping->remoteSubPath + L"/";
 
-        // Strip any leading separator
-        while (!relative.empty() && (relative[0] == L'\\' || relative[0] == L'/'))
-            relative.erase(relative.begin());
+    url += relative;
 
-        // Convert all backslashes to forward slashes
-        for (auto& character : relative)
-            if (character == L'\\') character = L'/';
-
-        // Compose: baseUrl + remoteSubPath + "/" + relative
-        std::wstring url = baseUrl;
-
-        if (!mapping.remoteSubPath.empty())
-            url += mapping.remoteSubPath + L"/";
-
-        url += relative;
-
-        return url;
-    }
-
-    return {};
+    return url;
 }
 
 // Computes the overlay (download cache) path for localPath.
@@ -270,54 +294,40 @@ static std::wstring ComputeOverlayPath(const std::wstring& localPath)
     if (!g_fastdlUseDownloadDir || g_fastdlDownloadBase.empty())
         return {};
 
-    std::wstring lowerLocal = ToLowerFastDL(localPath);
+    std::wstring relative;
+    const FastDLPath* mapping = MatchFastDLPath(localPath, relative);
 
-    for (const auto& [localPrefix, remoteSubPath] : g_fastdlPaths)
-    {
-        std::wstring prefix = ToLowerFastDL(localPrefix);
+    if (!mapping)
+        return {};
 
-        if (lowerLocal.size() < prefix.size())
-            continue;
+    const std::wstring& remoteSubPath = mapping->remoteSubPath;
 
-        if (!lowerLocal.starts_with(prefix))
-            continue;
+    // Build: <downloadBase>\<remoteSubPath>\<relative>
+    std::wstring overlay = g_fastdlDownloadBase;
 
-        // Relative portion after the prefix
-        std::wstring relative = localPath.substr(localPrefix.size());
+    if (!remoteSubPath.empty())
+        overlay += remoteSubPath + L"\\";
 
-        // Strip any leading separator
-        while (!relative.empty() && (relative[0] == L'\\' || relative[0] == L'/'))
-            relative.erase(relative.begin());
+    overlay += relative;
 
-        // Build: <downloadBase>\<remoteSubPath>\<relative>
-        std::wstring overlay = g_fastdlDownloadBase;
+    // Normalize all forward slashes to backslashes
+    for (auto& c : overlay)
+        if (c == L'/')
+            c = L'\\';
 
-        if (!remoteSubPath.empty())
-            overlay += remoteSubPath + L"\\";
+    // Path traversal check: resolved path must stay within the download base
+    wchar_t resolved[MAX_PATH]{};
 
-        overlay += relative;
+    if (GetFullPathNameW(overlay.c_str(), MAX_PATH, resolved, nullptr) == 0)
+        return {};
 
-        // Normalize all forward slashes to backslashes
-        for (auto& c : overlay)
-            if (c == L'/')
-                c = L'\\';
+    std::wstring resolvedLower = ToLowerFastDL(resolved);
+    std::wstring baseLower     = ToLowerFastDL(g_fastdlDownloadBase);
 
-        // Path traversal check: resolved path must stay within the download base
-        wchar_t resolved[MAX_PATH]{};
+    if (!resolvedLower.starts_with(baseLower))
+        return {}; // path traversal attempt — reject
 
-        if (GetFullPathNameW(overlay.c_str(), MAX_PATH, resolved, nullptr) == 0)
-            return {};
-
-        std::wstring resolvedLower = ToLowerFastDL(resolved);
-        std::wstring baseLower     = ToLowerFastDL(g_fastdlDownloadBase);
-
-        if (!resolvedLower.starts_with(baseLower))
-            return {}; // path traversal attempt — reject
-
-        return std::wstring(resolved);
-    }
-
-    return {};
+    return std::wstring(resolved);
 }
 
 // Returns true if downloadTarget is on the blocked-paths list.

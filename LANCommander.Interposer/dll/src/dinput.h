@@ -83,36 +83,6 @@ void RemoveDirectInputHooks();
 // natively, are passed through untouched.
 // ---------------------------------------------------------------------------
 
-// One buffered event. Deliberately the DirectInput 8 record minus its
-// pointer-sized uAppData field, so the layout is identical on x86 and x64.
-typedef struct InterposerInputEvent {
-    DWORD dwOfs;      // offset of the object within the game's data format
-    LONG  data;       // axis delta, or button state
-    DWORD timeStamp;  // milliseconds, as DirectInput reported it
-    DWORD sequence;   // DirectInput sequence number
-} InterposerInputEvent;
-
-// An axis the game's data format did not declare.
-#define INTERPOSER_MOUSE_AXIS_NONE 0xFFFFFFFFu
-
-typedef struct InterposerMouseBatch {
-    DWORD                 structSize;   // sizeof(InterposerMouseBatch) — version guard
-    DWORD                 axisOffsetX;  // dwOfs of each axis in the game's own data
-    DWORD                 axisOffsetY;  // format, or INTERPOSER_MOUSE_AXIS_NONE
-    DWORD                 axisOffsetZ;  // (wheel)
-    InterposerInputEvent* events;       // events to deliver, in order
-    DWORD                 count;        // in: retrieved. out: to deliver.
-    DWORD                 capacity;     // events[] capacity; count must not exceed it
-} InterposerMouseBatch;
-
-// Called with each batch before it reaches the game. Rewrite events in place
-// and set batch->count to how many should be delivered; it may be fewer than
-// came in (coalescing) or more (splitting), up to batch->capacity. Runs on the
-// game's input thread inside GetDeviceData, so it must not block.
-typedef void (WINAPI* InterposerMouseTransform)(InterposerMouseBatch* batch, void* userData);
-
-// Register the transform. One at a time — registering again replaces the
-// previous one. Pass nullptr to unregister. Returns FALSE if the structSize
-// contract cannot be honoured.
-extern "C" __declspec(dllexport) BOOL InterposerRegisterMouseTransform(
-    InterposerMouseTransform callback, void* userData);
+// InterposerInputEvent, InterposerMouseBatch, InterposerMouseTransform and
+// InterposerRegisterMouseTransform are declared in the public header.
+#include "LANCommander.Interposer.h"

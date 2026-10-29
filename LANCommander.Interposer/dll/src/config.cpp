@@ -1,4 +1,5 @@
 #include "config.h"
+#include "instance.h"
 #include "callbacks.h"
 
 #include <mutex>
@@ -1089,6 +1090,8 @@ void CloseLog()
 extern "C" __declspec(dllexport)
 BOOL InterposerGetUsername(wchar_t* buffer, DWORD bufferSize)
 {
+    FORWARD_TO_PRIMARY(InterposerGetUsername, buffer, bufferSize);
+
     if (!buffer || bufferSize == 0) return FALSE;
 
     if (!g_username.empty())
@@ -1111,6 +1114,8 @@ BOOL InterposerGetUsername(wchar_t* buffer, DWORD bufferSize)
 extern "C" __declspec(dllexport)
 void InterposerLog(const wchar_t* verb, const wchar_t* message)
 {
+    FORWARD_TO_PRIMARY(InterposerLog, verb, message);
+
     if (!verb || !message) return;
     WriteLogLine(verb, message, nullptr);
 }
@@ -1174,6 +1179,8 @@ static bool WalkConfigPath(YAML::Node& node, const std::vector<std::string>& seg
 extern "C" __declspec(dllexport)
 BOOL InterposerGetConfigString(const wchar_t* dotPath, wchar_t* buffer, DWORD bufferSize)
 {
+    FORWARD_TO_PRIMARY(InterposerGetConfigString, dotPath, buffer, bufferSize);
+
     if (!dotPath || !buffer || bufferSize == 0) return FALSE;
 
     std::vector<std::string> segs = SplitDotPath(dotPath);
@@ -1301,6 +1308,8 @@ static std::string EmitPluginYaml(const YAML::Node& node, int indent)
 extern "C" __declspec(dllexport)
 BOOL InterposerRegisterPluginConfig(const wchar_t* pluginName, const wchar_t* yamlDefaults)
 {
+    FORWARD_TO_PRIMARY(InterposerRegisterPluginConfig, pluginName, yamlDefaults);
+
     if (!pluginName || !yamlDefaults || pluginName[0] == L'\0')
         return FALSE;
 
@@ -1889,6 +1898,8 @@ static bool SetConfigScalarInTree(YAML::Node& root, const std::vector<std::strin
 extern "C" __declspec(dllexport)
 BOOL InterposerSetConfigString(const wchar_t* dotPath, const wchar_t* value)
 {
+    FORWARD_TO_PRIMARY(InterposerSetConfigString, dotPath, value);
+
     if (!dotPath || !value) return FALSE;
 
     std::vector<std::string> segs = SplitDotPath(dotPath);
@@ -2692,6 +2703,9 @@ void LoadConfig()
     }
 
     // ── fastDL ────────────────────────────────────────────────────────────────
+    // Deferred like the others: the session log does not exist yet.
+    std::vector<std::wstring> fastdlWarnings;
+
     if (YAML::Node fastDl = root["FastDL"])
     {
         if (fastDl["Enabled"])
@@ -2763,6 +2777,20 @@ void LoadConfig()
 
                     if (local.empty())
                         continue;
+
+                    // %GAMEDIR% and the rest, so a config shipped with a game patch
+                    // can name the game's folders without knowing where each
+                    // player installed it. A Local with no token is unchanged.
+                    std::vector<std::wstring> unresolved;
+                    const std::wstring written = local;
+
+                    local = ExpandPathTokens(local, /*escapeForRegex=*/false, &unresolved);
+
+                    for (const std::wstring& name : unresolved)
+                    {
+                        fastdlWarnings.push_back(
+                            L"unresolved %" + name + L"% in FastDL.Paths Local: " + written);
+                    }
 
                     FastDLPath path;
 
@@ -2900,4 +2928,7 @@ void LoadConfig()
 
     for (const std::wstring& warning : relayWarnings)
         InterposerLog(L"RELAY", warning.c_str());
+
+    for (const std::wstring& warning : fastdlWarnings)
+        InterposerLog(L"FASTDL", warning.c_str());
 }

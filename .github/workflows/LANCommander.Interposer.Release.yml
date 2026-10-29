@@ -289,6 +289,21 @@ jobs:
             Copy-Item -Recurse $sampleDir "$archDir\"
           }
 
+          # The SDK a game patch links against: one header, and the import
+          # library the DLL link produced for each architecture. It carries only
+          # the Interposer* API -- proxy.def marks the system-DLL exports PRIVATE.
+          New-Item -ItemType Directory -Force "$d\SDK\include" | Out-Null
+          Copy-Item 'LANCommander.Interposer\include\LANCommander.Interposer.h' "$d\SDK\include\"
+
+          foreach ($arch in @('x64', 'x86')) {
+            $source = "Release\Injector\$arch\LANCommander.Interposer.lib"
+
+            if (-not (Test-Path -LiteralPath $source)) { throw "Missing import library: $source" }
+
+            New-Item -ItemType Directory -Force "$d\SDK\lib\$arch" | Out-Null
+            Copy-Item $source "$d\SDK\lib\$arch\"
+          }
+
           (Get-Content 'packaging\README.md' -Raw) -replace '\{VersionTag\}', $version |
             Set-Content "$d\README.md" -Encoding UTF8NoBOM
 
@@ -300,13 +315,14 @@ jobs:
           $names = @($zf.Entries | ForEach-Object { $_.FullName })
           $zf.Dispose()
 
-          $expected = @('README.md')
+          $expected = @('README.md', 'SDK/include/LANCommander.Interposer.h')
           foreach ($arch in @('x64', 'x86')) {
             $expected += "$arch/LANCommander.Interposer.dll"
             $expected += "$arch/LANCommander.Interposer.Injector.exe"
             $expected += "$arch/Plugins/LANCommander.Interposer.Plugin.CDKey.dll"
             $expected += "$arch/Plugins/LANCommander.Interposer.Plugin.Mouse.dll"
             $expected += "$arch/.interposer/Config.yml"
+            $expected += "SDK/lib/$arch/LANCommander.Interposer.lib"
             foreach ($name in $loaderNames) { $expected += "$arch/$name" }
           }
 

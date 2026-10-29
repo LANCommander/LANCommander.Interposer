@@ -1,4 +1,5 @@
 #include "dinput.h"
+#include "instance.h"
 #include "config.h"
 
 #include <MinHook.h>
@@ -947,6 +948,8 @@ PfnDirectInput8Create RealDirectInput8Create()
 
 BOOL InterposerRegisterMouseTransform(InterposerMouseTransform callback, void* userData)
 {
+    FORWARD_TO_PRIMARY(InterposerRegisterMouseTransform, callback, userData);
+
     g_mouseTransform     = callback;
     g_mouseTransformUser = userData;
     g_pendingCount       = 0;

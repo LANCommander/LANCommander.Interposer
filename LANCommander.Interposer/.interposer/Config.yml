@@ -625,8 +625,12 @@ NetworkRelay:
 # Maps local directory prefixes to URL sub-paths under BaseUrl. Only files
 # beneath a configured prefix are eligible for FastDL.
 #
-#   Local  : Absolute path to a local directory. Files inside it will be
-#            checked against the server. A trailing backslash is optional.
+#   Local  : Path to a local directory. Files inside it will be checked
+#            against the server. A trailing backslash is optional. %TOKEN%s
+#            expand as in FileRedirects -- '%GAMEDIR%\maps' covers the
+#            game's maps folder wherever the game is installed, which is what a
+#            config shipped with a game patch needs. A game that opens files by
+#            relative path is still matched against an absolute Local.
 #
 #   Remote : Sub-path appended to BaseUrl before the relative file path.
 #            Leave empty to map directly under BaseUrl.

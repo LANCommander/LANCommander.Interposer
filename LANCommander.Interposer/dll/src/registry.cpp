@@ -1,4 +1,5 @@
 #include "registry.h"
+#include "instance.h"
 #include "config.h"
 
 #include <windows.h>
@@ -3233,6 +3234,8 @@ void RemoveRegistryHooks()
 extern "C" __declspec(dllexport)
 void InterposerSetRegistryValue(const wchar_t* keyPath, const wchar_t* valueName, const wchar_t* value)
 {
+    FORWARD_TO_PRIMARY(InterposerSetRegistryValue, keyPath, valueName, value);
+
     if (!keyPath || !value) return;
 
     std::wstring upperPath = ToUpper(keyPath);
@@ -3258,6 +3261,8 @@ void InterposerSetRegistryValue(const wchar_t* keyPath, const wchar_t* valueName
 extern "C" __declspec(dllexport)
 DWORD InterposerSetRegistryValueBySuffix(const wchar_t* keySuffix, const wchar_t* valueName, const wchar_t* value)
 {
+    FORWARD_TO_PRIMARY(InterposerSetRegistryValueBySuffix, keySuffix, valueName, value);
+
     if (!keySuffix || !value) return 0;
 
     std::wstring upperSuffix = ToUpper(keySuffix);

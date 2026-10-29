@@ -63,19 +63,6 @@ void InitRichPresence();
 // Disconnect all backends and release resources.
 void ShutdownRichPresence();
 
-// ---------------------------------------------------------------------------
-// Plugin API — exported by name, resolved by plugins via GetProcAddress.
-// All strings are UTF-8.
-// ---------------------------------------------------------------------------
-
-extern "C" __declspec(dllexport) void InterposerSetPresenceDetails(const char* details);
-extern "C" __declspec(dllexport) void InterposerSetPresenceState(const char* state);
-extern "C" __declspec(dllexport) void InterposerSetPresenceTimestamps(int64_t start, int64_t end);
-extern "C" __declspec(dllexport) void InterposerSetPresenceLargeImage(const char* key, const char* text);
-extern "C" __declspec(dllexport) void InterposerSetPresenceSmallImage(const char* key, const char* text);
-extern "C" __declspec(dllexport) void InterposerSetPresenceParty(const char* id, int size, int max);
-extern "C" __declspec(dllexport) void InterposerSetPresenceButton(int index, const char* text, const char* url);
-extern "C" __declspec(dllexport) void InterposerSetPresenceType(int type);
-extern "C" __declspec(dllexport) void InterposerSetPresenceName(const char* name);
-extern "C" __declspec(dllexport) void InterposerUpdatePresence();
-extern "C" __declspec(dllexport) void InterposerClearPresence();
+// The InterposerSetPresence* / InterposerUpdatePresence / InterposerClearPresence
+// exports are declared in the public header.
+#include "LANCommander.Interposer.h"

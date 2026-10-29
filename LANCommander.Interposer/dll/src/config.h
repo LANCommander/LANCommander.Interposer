@@ -333,48 +333,7 @@ void LogDnsRedirect(const wchar_t* fromHost, const wchar_t* toHost);
 // Pass the MH_STATUS value returned by MH_CreateHookApi.
 void LogHookInit(const wchar_t* module, const char* fn, MH_STATUS status);
 
-// ---------------------------------------------------------------------------
-// Plugin API — exported by name, resolved by plugins via GetProcAddress.
-// ---------------------------------------------------------------------------
-
-// Return the effective username (configured override or real Windows account name).
-// bufferSize is in wchar_t units including the null terminator.
-extern "C" __declspec(dllexport) BOOL InterposerGetUsername(wchar_t* buffer, DWORD bufferSize);
-
-// Write a line to the session log regardless of logging flags.
-// verb should be padded to ~15 chars for alignment, e.g. "[MYPLUGIN]     "
-extern "C" __declspec(dllexport) void InterposerLog(const wchar_t* verb, const wchar_t* message);
-
-// Read a scalar value from Config.yml by dot-separated YAML path.
-// Returns TRUE on success; FALSE if the key is missing, not scalar, or buffer too small.
-// Example: InterposerGetConfigString(L"Plugins.MyPlugin.Setting", buf, ARRAYSIZE(buf))
-extern "C" __declspec(dllexport) BOOL InterposerGetConfigString(const wchar_t* dotPath, wchar_t* buffer, DWORD bufferSize);
-
-// Register default configuration for a plugin. pluginName is the key under
-// Plugins: in Config.yml (e.g. L"CDKey"). yamlDefaults is a YAML map body
-// defining the default keys and values (e.g. L"Mask: '****'\nKeyPath: ''").
-//
-// If a Plugins.<pluginName> section already exists in Config.yml, the defaults
-// are NOT written — the user's existing configuration is preserved. Otherwise
-// the defaults are merged into the in-memory config (immediately available via
-// InterposerGetConfigString) and appended to Config.yml on disk.
-//
-// Returns TRUE if the section already existed or defaults were written
-// successfully. Returns FALSE on error (bad YAML, file write failure).
-extern "C" __declspec(dllexport) BOOL InterposerRegisterPluginConfig(const wchar_t* pluginName, const wchar_t* yamlDefaults);
-
-// Write a scalar value back to Config.yml by dot-separated YAML path. The path
-// must lie inside a plugin section -- Plugins.<Name>.<Key>[.<Key>...] -- since
-// every other key is read once at startup and a write would not take effect.
-// Missing keys and intermediate maps are created.
-//
-// The value is visible to InterposerGetConfigString immediately and is patched
-// into Config.yml in place, preserving comments and formatting. Only when the
-// existing text is in a form the patcher does not rewrite (e.g. a flow map) is
-// the Plugins section re-emitted, which drops comments inside that section only.
-//
-// Returns FALSE if the path is outside Plugins.<Name>, if it collides with an
-// existing value of a different shape (a map where a scalar is being written,
-// or a scalar where the path needs a map), or if Config.yml could not be
-// written. On a write failure the in-memory value has still been updated.
-extern "C" __declspec(dllexport) BOOL InterposerSetConfigString(const wchar_t* dotPath, const wchar_t* value);
+// The plugin API (InterposerGetUsername, InterposerLog, InterposerGetConfigString,
+// InterposerRegisterPluginConfig, InterposerSetConfigString) is declared in the
+// public header.
+#include "LANCommander.Interposer.h"

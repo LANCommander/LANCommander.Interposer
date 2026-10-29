@@ -28,6 +28,12 @@ x86\
     LANCommander.Interposer.Plugin.CDKey.dll
   .interposer\
     Config.yml
+SDK\
+  include\
+    LANCommander.Interposer.h
+  lib\
+    x86\LANCommander.Interposer.lib
+    x64\LANCommander.Interposer.lib
 ```
 
 :::note Unified Binary
@@ -47,6 +53,9 @@ executable.
 | `dinput.dll` | DirectInput 3/7 era games. They commonly import `dinput.dll` and nothing else that can be proxied, so this is often the only method that reaches them. Pair it with the [DirectInput](/Interposer/DirectInput) settings. |
 | `LANCommander.Interposer.asi` | The game already has an ASI loader installed. |
 | `LANCommander.Interposer.dll` | You control loading yourself — via the bundled injector, a launcher, or your own bootstrap code. |
+
+`SDK\` is for game patches that link the Interposer rather than relying on a
+load method. See [Linking from a Game Patch](GamePatches).
 
 `Plugins\` is shipped but not active. To enable a plugin, copy it into
 `.interposer\Plugins\` beside the DLL and add its section under `Plugins:` in

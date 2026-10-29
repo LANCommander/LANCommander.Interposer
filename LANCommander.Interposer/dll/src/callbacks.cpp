@@ -1,4 +1,5 @@
 #include "callbacks.h"
+#include "instance.h"
 #include "pipe_events.h"
 #include <atomic>
 
@@ -19,31 +20,43 @@ static std::atomic<InterposerRelayCallback>    g_relayCallback{nullptr};
 // ---------------------------------------------------------------------------
 extern "C" __declspec(dllexport) void InterposerRegisterFileCallback(InterposerFileCallback cb)
 {
+    FORWARD_TO_PRIMARY(InterposerRegisterFileCallback, cb);
+
     g_fileCallback.store(cb, std::memory_order_release);
 }
 
 extern "C" __declspec(dllexport) void InterposerRegisterRegistryCallback(InterposerRegistryCallback cb)
 {
+    FORWARD_TO_PRIMARY(InterposerRegisterRegistryCallback, cb);
+
     g_registryCallback.store(cb, std::memory_order_release);
 }
 
 extern "C" __declspec(dllexport) void InterposerRegisterDnsCallback(InterposerDnsCallback cb)
 {
+    FORWARD_TO_PRIMARY(InterposerRegisterDnsCallback, cb);
+
     g_dnsCallback.store(cb, std::memory_order_release);
 }
 
 extern "C" __declspec(dllexport) void InterposerRegisterNetworkCallback(InterposerNetworkCallback cb)
 {
+    FORWARD_TO_PRIMARY(InterposerRegisterNetworkCallback, cb);
+
     g_networkCallback.store(cb, std::memory_order_release);
 }
 
 extern "C" __declspec(dllexport) void InterposerRegisterIdentityCallback(InterposerIdentityCallback cb)
 {
+    FORWARD_TO_PRIMARY(InterposerRegisterIdentityCallback, cb);
+
     g_identityCallback.store(cb, std::memory_order_release);
 }
 
 extern "C" __declspec(dllexport) void InterposerRegisterRelayCallback(InterposerRelayCallback cb)
 {
+    FORWARD_TO_PRIMARY(InterposerRegisterRelayCallback, cb);
+
     g_relayCallback.store(cb, std::memory_order_release);
 }
 

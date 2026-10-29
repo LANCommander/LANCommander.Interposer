@@ -482,7 +482,7 @@ OptionSchema: |
             Local:
               Type: string
               DisplayName: Local
-              Description: Absolute path to a local directory
+              Description: Absolute path to a local directory. %GAMEDIR% and the other path tokens expand, so '%GAMEDIR%\maps' works wherever the game is installed.
             Remote:
               Type: string
               DisplayName: Remote

@@ -23,6 +23,7 @@
 #include <mswsock.h>
 
 #include "network.h"
+#include "instance.h"
 #include "callbacks.h"
 #include "config.h"
 #include "fastdl.h"
@@ -2982,6 +2983,8 @@ void RemoveNetworkHooks()
 extern "C" __declspec(dllexport) DWORD InterposerEnumNetworkAdapters(
     InterposerNetworkAdapter* buffer, DWORD capacity, DWORD* outCount)
 {
+    FORWARD_TO_PRIMARY(InterposerEnumNetworkAdapters, buffer, capacity, outCount);
+
     if (outCount)
         *outCount = 0;
 

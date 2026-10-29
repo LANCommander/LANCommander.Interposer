@@ -1,64 +1,9 @@
 #pragma once
 #include <windows.h>
 
-// ---------------------------------------------------------------------------
-// Callback typedefs — registered by plugins/managed code via the exported
-// InterposerRegister*Callback functions. Called from hook implementations
-// on the same thread that triggered the hook.
-//
-// All callbacks are notification-only (observe, not modify). They fire
-// regardless of logging flags but respect reentrancy guards.
-// ---------------------------------------------------------------------------
-
-// File operations: CreateFile, GetFileAttributes, FindFirstFile,
-// Delete, Move, Copy, LoadLibrary.
-typedef void (*InterposerFileCallback)(
-    const wchar_t* verb,           // e.g. "FILE READ", "FILE REDIRECT", "FILE DELETE"
-    const wchar_t* path,           // primary path
-    const wchar_t* secondaryPath); // redirect/destination path, or null
-
-// Registry operations: Open, Create, Query, Set, Delete, Enum.
-typedef void (*InterposerRegistryCallback)(
-    const wchar_t* verb,       // e.g. "REG OPEN", "REG READ", "REG WRITE"
-    const wchar_t* keyPath,    // full key path
-    const wchar_t* valueName); // value name, or null
-
-// DNS resolution: getaddrinfo, gethostbyname, GetAddrInfoEx.
-typedef void (*InterposerDnsCallback)(
-    const wchar_t* hostname,            // original hostname
-    const wchar_t* redirectedHostname); // redirected hostname (same if no redirect)
-
-// Network connections: connect, send/recv address discovery.
-typedef void (*InterposerNetworkCallback)(
-    const wchar_t* address, // IP address or hostname
-    int port);              // port number (0 if unknown)
-
-// Identity: GetUserName, GetComputerName.
-typedef void (*InterposerIdentityCallback)(
-    const wchar_t* type,  // "USERNAME" or "COMPUTERNAME"
-    const wchar_t* value); // the returned value
-
-// Network relay: connection state changes and peers joining or leaving.
-//   kind     "STATE"      address = our virtual address (empty before the first
-//                         Welcome), detail = state name, value = RelayState
-//            "PEER JOIN"  address = the peer's virtual address, detail = its
-//            "PEER LEAVE" player name, value = its relay client id
-typedef void (*InterposerRelayCallback)(
-    const wchar_t* kind,
-    const wchar_t* address,
-    const wchar_t* detail,
-    int value);
-
-// ---------------------------------------------------------------------------
-// Registration exports — called by plugins via GetProcAddress or by
-// managed code via P/Invoke. Pass null to unregister.
-// ---------------------------------------------------------------------------
-extern "C" __declspec(dllexport) void InterposerRegisterFileCallback(InterposerFileCallback cb);
-extern "C" __declspec(dllexport) void InterposerRegisterRegistryCallback(InterposerRegistryCallback cb);
-extern "C" __declspec(dllexport) void InterposerRegisterDnsCallback(InterposerDnsCallback cb);
-extern "C" __declspec(dllexport) void InterposerRegisterNetworkCallback(InterposerNetworkCallback cb);
-extern "C" __declspec(dllexport) void InterposerRegisterIdentityCallback(InterposerIdentityCallback cb);
-extern "C" __declspec(dllexport) void InterposerRegisterRelayCallback(InterposerRelayCallback cb);
+// The callback typedefs and the InterposerRegister*Callback exports are part of
+// the public API, declared in LANCommander.Interposer.h.
+#include "LANCommander.Interposer.h"
 
 // ---------------------------------------------------------------------------
 // Internal fire helpers — called from hook implementations. No-op when the

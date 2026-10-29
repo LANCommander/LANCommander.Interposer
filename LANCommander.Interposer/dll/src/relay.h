@@ -135,43 +135,6 @@ void RelayDisconnect();
 // A JSON snapshot of the state, for the control pipe.
 std::wstring RelayStatusJson();
 
-// ---------------------------------------------------------------------------
-// Exports -- in-process control, for plugins (GetProcAddress) and managed code
-// (P/Invoke). Fixed-layout structs, caller-owned buffers.
-// ---------------------------------------------------------------------------
-typedef struct InterposerRelayStatus {
-    DWORD            size;               // caller sets to sizeof(InterposerRelayStatus)
-    int              state;              // RelayState
-    DWORD            clientId;
-    wchar_t          virtualAddress[16];
-    wchar_t          netmask[16];
-    wchar_t          network[128];
-    wchar_t          server[256];
-    int              udpActive;          // 1 = datagrams are going over UDP, 0 = TCP fallback
-    DWORD            peerCount;
-    unsigned __int64 bytesSent;
-    unsigned __int64 bytesReceived;
-    unsigned __int64 datagramsSent;
-    unsigned __int64 datagramsReceived;
-    DWORD            streamsOpen;
-    wchar_t          lastError[256];
-} InterposerRelayStatus;
-
-typedef struct InterposerRelayPeer {
-    DWORD   clientId;
-    wchar_t virtualAddress[16];
-    wchar_t name[128];
-} InterposerRelayPeer;
-
-// Fill *status. Returns FALSE if status is null or status->size is too small.
-extern "C" __declspec(dllexport) BOOL InterposerRelayGetStatus(InterposerRelayStatus* status);
-
-// Same contract as InterposerEnumNetworkAdapters: returns the total number of
-// peers, writes up to capacity of them, and the number written to *outCount.
-extern "C" __declspec(dllexport) DWORD InterposerRelayEnumPeers(
-    InterposerRelayPeer* buffer, DWORD capacity, DWORD* outCount);
-
-// yamlOverrides may be null. See RelayConnect.
-extern "C" __declspec(dllexport) BOOL InterposerRelayConnect(const wchar_t* yamlOverrides);
-
-extern "C" __declspec(dllexport) void InterposerRelayDisconnect();
+// The in-process control exports (InterposerRelayGetStatus, ...EnumPeers,
+// ...Connect, ...Disconnect) and their structs are declared in the public header.
+#include "LANCommander.Interposer.h"

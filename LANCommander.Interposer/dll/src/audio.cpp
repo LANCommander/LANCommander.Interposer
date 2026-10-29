@@ -10,6 +10,7 @@
 #include <vector>
 
 #include "audio.h"
+#include "instance.h"
 #include "config.h"
 
 // ---------------------------------------------------------------------------
@@ -2068,6 +2069,8 @@ void RemoveAudioHooks()
 extern "C" __declspec(dllexport) DWORD InterposerEnumAudioDevices(
     InterposerAudioDevice* buffer, DWORD capacity, DWORD* outCount)
 {
+    FORWARD_TO_PRIMARY(InterposerEnumAudioDevices, buffer, capacity, outCount);
+
     if (outCount)
         *outCount = 0;
 

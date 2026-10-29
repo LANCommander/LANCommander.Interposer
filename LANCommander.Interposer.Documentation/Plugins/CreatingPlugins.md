@@ -36,6 +36,14 @@ BOOL APIENTRY DllMain(HMODULE /*hModule*/, DWORD /*fdwReason*/, LPVOID /*lpReser
 
 ## Resolving the API
 
+:::tip Use the header
+The release ZIP's `SDK\include\LANCommander.Interposer.h` declares every function and
+struct below, with the right calling convention. A plugin can include it for the
+types and use `decltype(&InterposerLog)` for its function pointers. Plugins do not
+need the import library next to it. That is for
+[game patches that link the Interposer](../GamePatches).
+:::
+
 Declare function pointer types for the Interposer exports you need and resolve them with `GetProcAddress` using the `hInterposer` handle:
 
 :::caution Calling convention
@@ -69,7 +77,7 @@ static bool ResolveAPI(HMODULE hInterposer)
 
 ## API Reference
 
-All exported functions use the `WINAPI` (`__stdcall`) calling convention and undecorated `extern "C"` names.
+All exported functions use the `__cdecl` calling convention and undecorated `extern "C"` names. See the caution above.
 
 ### `InterposerRegisterPluginConfig`
 

@@ -28,6 +28,10 @@ x86\                                     32-bit game executables
   LANCommander.Interposer.Injector.exe     inject into a running/launching game
   Plugins\                                 optional plugins, not enabled by default
   .interposer\Config.yml                   settings
+SDK\                                     for game patches that link the Interposer
+  include\LANCommander.Interposer.h
+  lib\x86\LANCommander.Interposer.lib
+  lib\x64\LANCommander.Interposer.lib
 ```
 
 `version.dll`, `dinput8.dll`, `dinput.dll` and `LANCommander.Interposer.asi` are
@@ -79,6 +83,15 @@ matching section under `Plugins:` in `Config.yml`.
 |---|---|
 | `LANCommander.Interposer.Plugin.CDKey.dll` | Serves a per-player CD key from the virtual registry |
 | `LANCommander.Interposer.Plugin.Mouse.dll` | Stops stair-stepped mouse look in older engines, and scales each axis |
+
+## Shipping it with a game patch
+
+If you make a patch for a game, it can link the Interposer so every player gets
+FastDL, redirection and the rest without installing anything else. Add
+`SDK\include` to your include path, link the `.lib` that matches the game's
+architecture, and ship `LANCommander.Interposer.dll` and `.interposer\` beside
+the game executable. The guide is at
+<https://lancommander.app/Interposer/GamePatches>.
 
 ## Using this with LANCommander
 
