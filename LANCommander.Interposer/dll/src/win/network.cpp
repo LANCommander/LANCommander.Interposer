@@ -26,6 +26,7 @@
 #include "instance.h"
 #include "callbacks.h"
 #include "config.h"
+#include "network_filter.h"
 #include "fastdl.h"
 #include "ipx.h"
 #include "relay.h"
@@ -263,7 +264,7 @@ static bool IsPortFiltered(int port)
 // An adapter is KEPT if it matches ANY populated criterion. When no filter is
 // configured the feature is inert.
 // ---------------------------------------------------------------------------
-static inline bool NaActive() { return g_naEnabled && g_naAnyFilters; }
+static inline bool NaActive() { return netfilter::Active(); }
 
 // The adapter-enumeration hooks are needed when filtering is active, when
 // network logging is on (so every enumeration request can be logged even with
@@ -277,42 +278,23 @@ static inline bool NetworkHooksWanted()
            RelayHooksWanted();
 }
 
-// ipHostOrder: an IPv4 address already in HOST byte order.
-static bool SubnetMatch(uint32_t ipHostOrder)
-{
-    for (const auto& s : g_naSubnets)
-        if ((ipHostOrder & s.mask) == s.network)
-            return true;
-    return false;
-}
+// The subnet/name/MAC predicates live in core/network_filter.cpp, shared with
+// the Linux adapter enumeration. These are the Windows call shapes over them.
 
 // in_addr / sin_addr store IPv4 in network byte order; convert before comparing.
 static bool SubnetMatchInAddr(const in_addr& a)
 {
-    return SubnetMatch(ntohl(a.s_addr));
+    return netfilter::SubnetMatch(ntohl(a.s_addr));
 }
 
 static bool NameMatch(const wchar_t* name)
 {
-    if (!name || !name[0]) return false;
-    try
-    {
-        const std::wstring s(name);
-        for (const auto& re : g_naNames)
-            if (std::regex_search(s, re))
-                return true;
-    }
-    catch (const std::regex_error&) { /* pathological input — treat as no match */ }
-    return false;
+    return name && name[0] && netfilter::NameMatch(name);
 }
 
 static bool MacMatch(const BYTE* addr, size_t len)
 {
-    if (!addr || len != 6) return false;
-    for (const auto& m : g_naMacs)
-        if (memcmp(m.data(), addr, 6) == 0)
-            return true;
-    return false;
+    return netfilter::MacMatch(addr, len);
 }
 
 // Returns true when a gethostbyname argument refers to the local machine:

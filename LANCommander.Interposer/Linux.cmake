@@ -12,6 +12,7 @@ add_library(LANCommander.Interposer SHARED
     dll/src/platform/linux/platform.cpp
     dll/src/linux/files.cpp
     dll/src/linux/hooks.cpp
+    dll/src/linux/identity.cpp
     dll/src/linux/instance.cpp
     dll/src/linux/network.cpp
     dll/src/linux/unsupported.cpp

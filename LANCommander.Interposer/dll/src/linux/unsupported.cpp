@@ -4,8 +4,9 @@
 // without the subsystem: each reports "nothing there" rather than failing.
 //
 // The virtual registry, the audio device filter and the DirectInput mouse
-// transform are Windows features and stay here. Network adapters and the relay
-// arrive with the Linux network hooks; rich presence with a Linux Discord IPC.
+// transform are Windows features and stay here. The adapter enumeration and DNS
+// redirects are implemented (linux/network.cpp); the relay arrives with the
+// socket hooks, and rich presence with a Linux Discord IPC.
 
 #include "instance.h"
 
@@ -25,16 +26,6 @@ INTERPOSER_API DWORD InterposerSetRegistryValueBySuffix(const wchar_t* keySuffix
 }
 
 // ── Devices ───────────────────────────────────────────────────────────────────
-
-INTERPOSER_API DWORD InterposerEnumNetworkAdapters(InterposerNetworkAdapter* buffer, DWORD capacity, DWORD* outCount)
-{
-    FORWARD_TO_PRIMARY(InterposerEnumNetworkAdapters, buffer, capacity, outCount);
-
-    if (outCount)
-        *outCount = 0;
-
-    return 0;
-}
 
 INTERPOSER_API DWORD InterposerEnumAudioDevices(InterposerAudioDevice* buffer, DWORD capacity, DWORD* outCount)
 {

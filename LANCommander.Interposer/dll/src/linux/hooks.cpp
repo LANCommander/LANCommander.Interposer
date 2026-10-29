@@ -3,6 +3,8 @@
 #include "fastdl.h"
 #include "files.h"
 #include "hooking.h"
+#include "identity.h"
+#include "network.h"
 #include "pipe_events.h"
 #include "plugins.h"
 
@@ -16,6 +18,8 @@ void InstallHooks()
 
     InitFastDL();
     InstallFileHooks();
+    InstallNetworkHooks();
+    InstallIdentityHooks();
 
     hooking::EnableAll();
 

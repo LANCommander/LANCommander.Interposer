@@ -24,7 +24,9 @@
 
 #include <dlfcn.h>
 #include <fcntl.h>
+#include <netdb.h>
 #include <sys/stat.h>
+#include <sys/utsname.h>
 #include <sys/wait.h>
 #include <unistd.h>
 
@@ -677,6 +679,119 @@ static void RunFileHookTests(const fs::path& tmp)
         "F-05: the write reached the redirect target, not the original path");
 }
 
+// ── Adapter enumeration ───────────────────────────────────────────────────────
+
+using FnEnumAdapters = DWORD (*)(InterposerNetworkAdapter*, DWORD, DWORD*);
+
+static void RunAdapterEnumTests(void* so)
+{
+    printf("\n--- Adapter Enumeration Tests ---\n");
+
+    auto enumerate = Resolve<FnEnumAdapters>(so, "InterposerEnumNetworkAdapters");
+    ASSERT(enumerate != nullptr, "N-01: InterposerEnumNetworkAdapters is exported");
+    if (!enumerate) return;
+
+    DWORD total = enumerate(nullptr, 0, nullptr);
+    ASSERT(total >= 1, "N-02: at least one adapter is reported (loopback)");
+
+    std::vector<InterposerNetworkAdapter> adapters(total);
+    DWORD written = 0;
+    enumerate(adapters.data(), total, &written);
+
+    bool loopbackAllowed = false;
+    for (DWORD i = 0; i < written; ++i)
+    {
+        if (std::wcscmp(adapters[i].friendlyName, L"lo") == 0 && adapters[i].allowed)
+            loopbackAllowed = true;
+    }
+
+    // The main fixture sets no NetworkAdapters filter, so every adapter is allowed.
+    ASSERT(loopbackAllowed, "N-03: with no filter, loopback is present and allowed");
+}
+
+// ── Identity, DNS, adapter filter (preloaded) ──────────────────────────────────
+
+static int RunNetChild()
+{
+    printf("\n--- Network Tests (child process) ---\n");
+
+    // Computer-name override through both interposers.
+    char host[256]{};
+    ASSERT(gethostname(host, sizeof(host)) == 0 && std::string(host) == "NetBox",
+        "ID-01: gethostname returns the configured computer name");
+
+    struct utsname u{};
+    ASSERT(uname(&u) == 0 && std::string(u.nodename) == "NetBox",
+        "ID-02: uname's nodename returns the configured computer name");
+
+    // A DNS redirect: redirect.invalid never resolves, 127.0.0.1 always does,
+    // so a success means the rule rewrote it.
+    addrinfo hints{};
+    hints.ai_family = AF_INET;
+    addrinfo* res = nullptr;
+    const int rc = getaddrinfo("redirect.invalid", nullptr, &hints, &res);
+    ASSERT(rc == 0, "DNS-01: getaddrinfo of a redirected host resolves via the replacement");
+    if (res) freeaddrinfo(res);
+
+    // The adapter filter names only loopback, so lo is allowed and anything else
+    // is hidden.
+    auto enumerate = reinterpret_cast<FnEnumAdapters>(dlsym(RTLD_DEFAULT, "InterposerEnumNetworkAdapters"));
+    DWORD total = enumerate ? enumerate(nullptr, 0, nullptr) : 0;
+    std::vector<InterposerNetworkAdapter> adapters(total);
+    DWORD written = 0;
+    if (enumerate) enumerate(adapters.data(), total, &written);
+
+    bool loAllowed = false, othersHidden = true;
+    for (DWORD i = 0; i < written; ++i)
+    {
+        const bool isLo = std::wcscmp(adapters[i].friendlyName, L"lo") == 0;
+        if (isLo && adapters[i].allowed) loAllowed = true;
+        if (!isLo && adapters[i].allowed) othersHidden = false;
+    }
+
+    ASSERT(loAllowed && othersHidden,
+        "NA-01: the NetworkAdapters filter keeps the named adapter and hides the rest");
+
+    return g_fail;
+}
+
+static void RunNetTests(const fs::path& tmp)
+{
+    printf("\n--- Network Tests ---\n");
+
+    const fs::path dir    = tmp / "Net";
+    const fs::path soPath = StageCopy(dir);
+
+    WriteText(dir / ".interposer" / "Config.yml",
+        "Logging:\n"
+        "  Identity: true\n"
+        "  DnsRedirects: true\n"
+        "\n"
+        "Player:\n"
+        "  ComputerName: NetBox\n"
+        "\n"
+        "DnsRedirects:\n"
+        "  - Pattern: '^redirect\\.invalid$'\n"
+        "    Replacement: '127.0.0.1'\n"
+        "\n"
+        "NetworkAdapters:\n"
+        "  Enabled: true\n"
+        "  Names: ['^lo$']\n");
+
+    const int code = RunChild({ "--net-child" },
+        { "LD_PRELOAD=" + soPath.string(),
+          "INTERPOSER_TARGET=" + ExecutablePath().filename().string(),
+          "INTERPOSER_BASE_DIRECTORY=" + dir.string() });
+
+    ASSERT(code == 0, "N-00: the network child reported no failures");
+
+    const std::string log = ReadText(FindLog(dir));
+    ASSERT(Contains(log, "[DNS REDIRECT]") && Contains(log, "redirect.invalid"),
+        "DNS-02: the redirect is recorded in the session log");
+    ASSERT(Contains(log, "[IDENTITY]") && Contains(log, "NetBox"),
+        "ID-03: the computer-name override is recorded in the session log");
+}
+
 // ── Main suite ────────────────────────────────────────────────────────────────
 
 static void WriteFixture(const fs::path& dir)
@@ -721,6 +836,9 @@ int main(int argc, char** argv)
     if (argc >= 3 && strcmp(argv[1], "--file-hook-child") == 0)
         return RunFileHookChild(argv[2]);
 
+    if (argc >= 2 && strcmp(argv[1], "--net-child") == 0)
+        return RunNetChild();
+
     char tmpTemplate[] = "/tmp/InterposerTest.XXXXXX";
 
     if (!mkdtemp(tmpTemplate))
@@ -755,6 +873,7 @@ int main(int argc, char** argv)
     RunPluginConfigTests(so);
     RunSdkTests(so);
     RunPluginTests(mainDir);
+    RunAdapterEnumTests(so);
 
     dlclose(so);
 
@@ -786,6 +905,7 @@ int main(int argc, char** argv)
     RunSecondInstanceTests(tmp);
     RunPreloadTests(tmp);
     RunFileHookTests(tmp);
+    RunNetTests(tmp);
 
     printf("\n=== Results: %d passed, %d failed ===\n", g_pass, g_fail);
 
