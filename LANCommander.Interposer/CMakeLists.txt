@@ -1,16 +1,23 @@
-find_package(minhook CONFIG REQUIRED)
 find_package(yaml-cpp CONFIG REQUIRED)
-
-# ── The hook DLL ──────────────────────────────────────────────────────────────
 
 # core/ is portable: it reaches the OS only through platform/platform.h. win/ is
 # everything Windows-only -- the hook subsystems, DllMain, the init sequence --
-# and platform/win/ implements the platform layer.
+# and platform/win/ implements the platform layer; linux/ and platform/linux/
+# are the same for Linux (Linux.cmake).
 set(INTERPOSER_CORE_SOURCES
     dll/src/core/callbacks.cpp
     dll/src/core/config.cpp
     dll/src/core/plugins.cpp
 )
+
+if(NOT WIN32)
+    include(Linux.cmake)
+    return()
+endif()
+
+find_package(minhook CONFIG REQUIRED)
+
+# ── The hook DLL ──────────────────────────────────────────────────────────────
 
 add_library(LANCommander.Interposer SHARED
     ${INTERPOSER_CORE_SOURCES}

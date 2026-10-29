@@ -165,6 +165,19 @@ cmake --build --preset windows-x64-release
 Use the `windows-x86` presets for 32-bit. Everything lands in `out/windows-<arch>/bin/<Config>/`,
 with the plugins under `Plugins/` and the SDK import library in `out/windows-<arch>/lib/<Config>/`.
 
+### Linux
+
+The Linux shared object (`libLANCommander.Interposer.so`, loaded with `LD_PRELOAD`) is built
+inside a Debian 12 container:
+
+```bash
+docker build -f docker/build.Dockerfile -t lancommander-interposer-build docker
+docker run --rm -v "$PWD:/src" lancommander-interposer-build sh -c "cmake --preset linux-x64 && cmake --build --preset linux-x64-release"
+```
+
+Use the `linux-x86` presets for 32-bit. Linux support is in progress: the configuration, log,
+plugins and SDK work; the file and network hooks do not exist yet.
+
 ### .NET Bindings
 
 ```bash
