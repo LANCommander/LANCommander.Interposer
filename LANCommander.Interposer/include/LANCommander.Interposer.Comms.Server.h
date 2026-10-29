@@ -1,5 +1,5 @@
 /*
- * LANCommander Comms - server API.
+ * LANCommander.Interposer.Comms.Server.h -- voice chat, server API.
  *
  * Typical game-server flow:
  *   interposer_comms_server_config cfg; interposer_comms_server_config_init(&cfg); cfg.port = ...;
@@ -16,7 +16,7 @@
 #ifndef INTERPOSER_COMMS_SERVER_H
 #define INTERPOSER_COMMS_SERVER_H
 
-#include "comms.h"
+#include "LANCommander.Interposer.Comms.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -132,27 +132,27 @@ typedef struct interposer_comms_server_event {
 
 /* ---- Lifecycle ---------------------------------------------------------- */
 
-INTERPOSER_COMMS_API void         INTERPOSER_COMMS_CALL interposer_comms_server_config_init(interposer_comms_server_config* config);
-INTERPOSER_COMMS_API interposer_comms_result INTERPOSER_COMMS_CALL interposer_comms_server_create(const interposer_comms_server_config* config, interposer_comms_server** out_server);
-INTERPOSER_COMMS_API interposer_comms_result INTERPOSER_COMMS_CALL interposer_comms_server_start(interposer_comms_server* server);
-INTERPOSER_COMMS_API interposer_comms_result INTERPOSER_COMMS_CALL interposer_comms_server_stop(interposer_comms_server* server);
-INTERPOSER_COMMS_API void         INTERPOSER_COMMS_CALL interposer_comms_server_destroy(interposer_comms_server* server);
+INTERPOSER_API void         INTERPOSER_CALL interposer_comms_server_config_init(interposer_comms_server_config* config);
+INTERPOSER_API interposer_comms_result INTERPOSER_CALL interposer_comms_server_create(const interposer_comms_server_config* config, interposer_comms_server** out_server);
+INTERPOSER_API interposer_comms_result INTERPOSER_CALL interposer_comms_server_start(interposer_comms_server* server);
+INTERPOSER_API interposer_comms_result INTERPOSER_CALL interposer_comms_server_stop(interposer_comms_server* server);
+INTERPOSER_API void         INTERPOSER_CALL interposer_comms_server_destroy(interposer_comms_server* server);
 
 /* Returns INTERPOSER_COMMS_OK and fills *out_event if one was pending, INTERPOSER_COMMS_ERR_NOT_FOUND if the queue is empty. */
-INTERPOSER_COMMS_API interposer_comms_result INTERPOSER_COMMS_CALL interposer_comms_server_poll_event(interposer_comms_server* server, interposer_comms_server_event* out_event);
+INTERPOSER_API interposer_comms_result INTERPOSER_CALL interposer_comms_server_poll_event(interposer_comms_server* server, interposer_comms_server_event* out_event);
 
 /* ---- Players ------------------------------------------------------------ */
 
 /* Registers a game player. game_player_id is opaque to the library (e.g. a SteamID or slot). */
-INTERPOSER_COMMS_API interposer_comms_result INTERPOSER_COMMS_CALL interposer_comms_server_add_player(interposer_comms_server* server, uint64_t game_player_id,
+INTERPOSER_API interposer_comms_result INTERPOSER_CALL interposer_comms_server_add_player(interposer_comms_server* server, uint64_t game_player_id,
                                                           const char* name, interposer_comms_player_id* out_player);
-INTERPOSER_COMMS_API interposer_comms_result INTERPOSER_COMMS_CALL interposer_comms_server_remove_player(interposer_comms_server* server, interposer_comms_player_id player);
-INTERPOSER_COMMS_API interposer_comms_result INTERPOSER_COMMS_CALL interposer_comms_server_find_player(interposer_comms_server* server, uint64_t game_player_id,
+INTERPOSER_API interposer_comms_result INTERPOSER_CALL interposer_comms_server_remove_player(interposer_comms_server* server, interposer_comms_player_id player);
+INTERPOSER_API interposer_comms_result INTERPOSER_CALL interposer_comms_server_find_player(interposer_comms_server* server, uint64_t game_player_id,
                                                            interposer_comms_player_id* out_player);
-INTERPOSER_COMMS_API interposer_comms_result INTERPOSER_COMMS_CALL interposer_comms_server_get_player_info(interposer_comms_server* server, interposer_comms_player_id player,
+INTERPOSER_API interposer_comms_result INTERPOSER_CALL interposer_comms_server_get_player_info(interposer_comms_server* server, interposer_comms_player_id player,
                                                                interposer_comms_server_player_info* out_info);
 /* Fills up to capacity ids; *out_count receives the total number of players. */
-INTERPOSER_COMMS_API interposer_comms_result INTERPOSER_COMMS_CALL interposer_comms_server_list_players(interposer_comms_server* server, interposer_comms_player_id* out_ids,
+INTERPOSER_API interposer_comms_result INTERPOSER_CALL interposer_comms_server_list_players(interposer_comms_server* server, interposer_comms_player_id* out_ids,
                                                             uint32_t capacity, uint32_t* out_count);
 
 /*
@@ -161,54 +161,54 @@ INTERPOSER_COMMS_API interposer_comms_result INTERPOSER_COMMS_CALL interposer_co
  */
 
 /* INTERPOSER_COMMS_AUTH_TOKEN: single-use token the game hands to its client. Writes a NUL-terminated string. */
-INTERPOSER_COMMS_API interposer_comms_result INTERPOSER_COMMS_CALL interposer_comms_server_create_join_token(interposer_comms_server* server, interposer_comms_player_id player,
+INTERPOSER_API interposer_comms_result INTERPOSER_CALL interposer_comms_server_create_join_token(interposer_comms_server* server, interposer_comms_player_id player,
                                                                  char* out_token, size_t token_capacity);
 
-INTERPOSER_COMMS_API interposer_comms_result INTERPOSER_COMMS_CALL interposer_comms_server_kick_player(interposer_comms_server* server, interposer_comms_player_id player, const char* reason);
-INTERPOSER_COMMS_API interposer_comms_result INTERPOSER_COMMS_CALL interposer_comms_server_set_player_muted(interposer_comms_server* server, interposer_comms_player_id player, int muted);
+INTERPOSER_API interposer_comms_result INTERPOSER_CALL interposer_comms_server_kick_player(interposer_comms_server* server, interposer_comms_player_id player, const char* reason);
+INTERPOSER_API interposer_comms_result INTERPOSER_CALL interposer_comms_server_set_player_muted(interposer_comms_server* server, interposer_comms_player_id player, int muted);
 
 /* ---- Proximity ---------------------------------------------------------- */
 
-INTERPOSER_COMMS_API void         INTERPOSER_COMMS_CALL interposer_comms_zone_config_init(interposer_comms_zone_config* config);
+INTERPOSER_API void         INTERPOSER_CALL interposer_comms_zone_config_init(interposer_comms_zone_config* config);
 /* Zone 0 always exists with default config. */
-INTERPOSER_COMMS_API interposer_comms_result INTERPOSER_COMMS_CALL interposer_comms_server_configure_zone(interposer_comms_server* server, interposer_comms_zone_id zone,
+INTERPOSER_API interposer_comms_result INTERPOSER_CALL interposer_comms_server_configure_zone(interposer_comms_server* server, interposer_comms_zone_id zone,
                                                               const interposer_comms_zone_config* config);
 
 /*
  * Server-authoritative position report; always accepted regardless of authority mode.
  * forward may be NULL. Players without a position never hear or are heard via proximity.
  */
-INTERPOSER_COMMS_API interposer_comms_result INTERPOSER_COMMS_CALL interposer_comms_server_update_player_position(interposer_comms_server* server, interposer_comms_player_id player,
+INTERPOSER_API interposer_comms_result INTERPOSER_CALL interposer_comms_server_update_player_position(interposer_comms_server* server, interposer_comms_player_id player,
                                                                       interposer_comms_zone_id zone, interposer_comms_vec3 position,
                                                                       const interposer_comms_vec3* forward);
-INTERPOSER_COMMS_API interposer_comms_result INTERPOSER_COMMS_CALL interposer_comms_server_clear_player_position(interposer_comms_server* server, interposer_comms_player_id player);
+INTERPOSER_API interposer_comms_result INTERPOSER_CALL interposer_comms_server_clear_player_position(interposer_comms_server* server, interposer_comms_player_id player);
 /* Whether this player's client-reported positions (interposer_comms_client_report_position) are accepted. */
-INTERPOSER_COMMS_API interposer_comms_result INTERPOSER_COMMS_CALL interposer_comms_server_set_position_authority(interposer_comms_server* server, interposer_comms_player_id player,
+INTERPOSER_API interposer_comms_result INTERPOSER_CALL interposer_comms_server_set_position_authority(interposer_comms_server* server, interposer_comms_player_id player,
                                                                       interposer_comms_position_authority authority);
 
 /* Extra gain [0..1] applied from speaker to listener (occlusion, walls, game rules). 1 = clear. */
-INTERPOSER_COMMS_API interposer_comms_result INTERPOSER_COMMS_CALL interposer_comms_server_set_pair_attenuation(interposer_comms_server* server, interposer_comms_player_id listener,
+INTERPOSER_API interposer_comms_result INTERPOSER_CALL interposer_comms_server_set_pair_attenuation(interposer_comms_server* server, interposer_comms_player_id listener,
                                                                     interposer_comms_player_id speaker, float gain);
 /* Allow/deny proximity voice for a player entirely (e.g. dead/spectating). */
-INTERPOSER_COMMS_API interposer_comms_result INTERPOSER_COMMS_CALL interposer_comms_server_set_proximity_enabled(interposer_comms_server* server, interposer_comms_player_id player,
+INTERPOSER_API interposer_comms_result INTERPOSER_CALL interposer_comms_server_set_proximity_enabled(interposer_comms_server* server, interposer_comms_player_id player,
                                                                      int can_speak, int can_listen);
 
 /* ---- Groups ------------------------------------------------------------- */
 
-INTERPOSER_COMMS_API void         INTERPOSER_COMMS_CALL interposer_comms_group_config_init(interposer_comms_group_config* config);
-INTERPOSER_COMMS_API interposer_comms_result INTERPOSER_COMMS_CALL interposer_comms_server_create_group(interposer_comms_server* server, const interposer_comms_group_config* config,
+INTERPOSER_API void         INTERPOSER_CALL interposer_comms_group_config_init(interposer_comms_group_config* config);
+INTERPOSER_API interposer_comms_result INTERPOSER_CALL interposer_comms_server_create_group(interposer_comms_server* server, const interposer_comms_group_config* config,
                                                             interposer_comms_group_id* out_group);
-INTERPOSER_COMMS_API interposer_comms_result INTERPOSER_COMMS_CALL interposer_comms_server_destroy_group(interposer_comms_server* server, interposer_comms_group_id group);
-INTERPOSER_COMMS_API interposer_comms_result INTERPOSER_COMMS_CALL interposer_comms_server_add_to_group(interposer_comms_server* server, interposer_comms_group_id group, interposer_comms_player_id player);
-INTERPOSER_COMMS_API interposer_comms_result INTERPOSER_COMMS_CALL interposer_comms_server_remove_from_group(interposer_comms_server* server, interposer_comms_group_id group, interposer_comms_player_id player);
-INTERPOSER_COMMS_API interposer_comms_result INTERPOSER_COMMS_CALL interposer_comms_server_set_member_permissions(interposer_comms_server* server, interposer_comms_group_id group,
+INTERPOSER_API interposer_comms_result INTERPOSER_CALL interposer_comms_server_destroy_group(interposer_comms_server* server, interposer_comms_group_id group);
+INTERPOSER_API interposer_comms_result INTERPOSER_CALL interposer_comms_server_add_to_group(interposer_comms_server* server, interposer_comms_group_id group, interposer_comms_player_id player);
+INTERPOSER_API interposer_comms_result INTERPOSER_CALL interposer_comms_server_remove_from_group(interposer_comms_server* server, interposer_comms_group_id group, interposer_comms_player_id player);
+INTERPOSER_API interposer_comms_result INTERPOSER_CALL interposer_comms_server_set_member_permissions(interposer_comms_server* server, interposer_comms_group_id group,
                                                                       interposer_comms_player_id player, int can_speak, int can_listen);
 /* All groups, including player-created PRIVATE groups. */
-INTERPOSER_COMMS_API interposer_comms_result INTERPOSER_COMMS_CALL interposer_comms_server_list_groups(interposer_comms_server* server, interposer_comms_group_id* out_ids,
+INTERPOSER_API interposer_comms_result INTERPOSER_CALL interposer_comms_server_list_groups(interposer_comms_server* server, interposer_comms_group_id* out_ids,
                                                            uint32_t capacity, uint32_t* out_count);
-INTERPOSER_COMMS_API interposer_comms_result INTERPOSER_COMMS_CALL interposer_comms_server_get_group_info(interposer_comms_server* server, interposer_comms_group_id group,
+INTERPOSER_API interposer_comms_result INTERPOSER_CALL interposer_comms_server_get_group_info(interposer_comms_server* server, interposer_comms_group_id group,
                                                               interposer_comms_server_group_info* out_info);
-INTERPOSER_COMMS_API interposer_comms_result INTERPOSER_COMMS_CALL interposer_comms_server_list_group_members(interposer_comms_server* server, interposer_comms_group_id group,
+INTERPOSER_API interposer_comms_result INTERPOSER_CALL interposer_comms_server_list_group_members(interposer_comms_server* server, interposer_comms_group_id group,
                                                                   interposer_comms_player_id* out_ids, uint32_t capacity,
                                                                   uint32_t* out_count);
 
@@ -223,9 +223,9 @@ INTERPOSER_COMMS_API interposer_comms_result INTERPOSER_COMMS_CALL interposer_co
  * Bandwidth figures include estimated IP/UDP/ENet overhead. When max_upstream_kbps_per_client is set, the
  * Opus bitrate each client is told to use is lowered to fit within it.
  */
-INTERPOSER_COMMS_API interposer_comms_result INTERPOSER_COMMS_CALL interposer_comms_server_update_limits(interposer_comms_server* server, const interposer_comms_server_config* config);
+INTERPOSER_API interposer_comms_result INTERPOSER_CALL interposer_comms_server_update_limits(interposer_comms_server* server, const interposer_comms_server_config* config);
 /* Current configuration (string fields point into server-owned storage, valid until destroy). */
-INTERPOSER_COMMS_API interposer_comms_result INTERPOSER_COMMS_CALL interposer_comms_server_get_config(interposer_comms_server* server, interposer_comms_server_config* out_config);
+INTERPOSER_API interposer_comms_result INTERPOSER_CALL interposer_comms_server_get_config(interposer_comms_server* server, interposer_comms_server_config* out_config);
 
 /*
  * Executes a text admin command and writes human-readable output to out_text (may be NULL). Intended to be
@@ -241,7 +241,7 @@ INTERPOSER_COMMS_API interposer_comms_result INTERPOSER_COMMS_CALL interposer_co
  * <player> is a voice player id, "#id", or an exact (case-insensitive) name; quote names with spaces.
  * Returns the command's result; INTERPOSER_COMMS_ERR_BUFFER_TOO_SMALL if out_text was truncated (the command still ran).
  */
-INTERPOSER_COMMS_API interposer_comms_result INTERPOSER_COMMS_CALL interposer_comms_server_execute_command(interposer_comms_server* server, const char* command,
+INTERPOSER_API interposer_comms_result INTERPOSER_CALL interposer_comms_server_execute_command(interposer_comms_server* server, const char* command,
                                                                char* out_text, size_t text_capacity);
 
 #ifdef __cplusplus

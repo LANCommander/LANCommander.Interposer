@@ -11,6 +11,7 @@
 // directory and prints where it is.
 
 #include "LANCommander.Interposer.h"
+#include "LANCommander.Interposer.Comms.Server.h"
 
 #include <cstdio>
 #include <cstdlib>
@@ -144,6 +145,52 @@ template <typename Fn>
 static Fn Resolve(void* module, const char* name)
 {
     return reinterpret_cast<Fn>(dlsym(module, name));
+}
+
+// A voice server on loopback, an ephemeral port, through the given copy's
+// exports. Starting one logs "voice server listening on port".
+static void* StartVoiceServer(void* module)
+{
+    auto init   = Resolve<decltype(&interposer_comms_server_config_init)>(module, "interposer_comms_server_config_init");
+    auto create = Resolve<decltype(&interposer_comms_server_create)>(module, "interposer_comms_server_create");
+    auto start  = Resolve<decltype(&interposer_comms_server_start)>(module, "interposer_comms_server_start");
+    auto destroy = Resolve<decltype(&interposer_comms_server_destroy)>(module, "interposer_comms_server_destroy");
+
+    if (!init || !create || !start || !destroy)
+        return nullptr;
+
+    interposer_comms_server_config config;
+    init(&config);
+    config.port         = 0;
+    config.bind_address = "127.0.0.1";
+
+    interposer_comms_server* server = nullptr;
+
+    if (create(&config, &server) != INTERPOSER_COMMS_OK)
+        return nullptr;
+
+    if (start(server) != INTERPOSER_COMMS_OK)
+    {
+        destroy(server);
+        return nullptr;
+    }
+
+    return server;
+}
+
+static void StopVoiceServer(void* module, void* server)
+{
+    auto destroy = Resolve<decltype(&interposer_comms_server_destroy)>(module, "interposer_comms_server_destroy");
+
+    if (destroy && server)
+        destroy(static_cast<interposer_comms_server*>(server));
+}
+
+// An interposer_comms_log_fn that counts the server's "listening" line.
+static void CountVoiceListening(interposer_comms_log_level, const char* message, void* userData)
+{
+    if (strstr(message, "voice server listening"))
+        ++*static_cast<int*>(userData);
 }
 
 static std::wstring GetConfig(FnGetConfig get, const wchar_t* path)
@@ -515,6 +562,36 @@ static int RunSecondInstanceChild(const fs::path& primaryDir, const fs::path& se
     ASSERT(CountLinesContaining(ReadText(FindLog(primaryDir)), "[INSTANCE]", "forwarded by the second copy") == 1,
         "MI-04: InterposerLog through the second copy writes to the first copy's log");
 
+    // Voice forwards like the rest of the API. A handler set through the second
+    // copy is only heard by a server started through the first if the handler
+    // was forwarded; a server started through the second copy is only in the
+    // first copy's log if the server functions were.
+    {
+        int heard = 0;
+        auto setHandler = Resolve<decltype(&interposer_comms_set_log_handler)>(secondary, "interposer_comms_set_log_handler");
+        auto setSession = Resolve<decltype(&interposer_comms_set_session_logging)>(secondary, "interposer_comms_set_session_logging");
+
+        // Through the second copy too, so MI-08 also proves it forwards: the
+        // second copy has no session log of its own to write to.
+        if (setSession)
+            setSession(INTERPOSER_COMMS_LOG_INFO);
+
+        if (setHandler)
+            setHandler(CountVoiceListening, INTERPOSER_COMMS_LOG_INFO, &heard);
+
+        StopVoiceServer(primary, StartVoiceServer(primary));
+
+        ASSERT(heard == 1, "MI-07: a voice log handler set through the second copy hears the first copy's server");
+
+        if (setHandler)
+            setHandler(nullptr, INTERPOSER_COMMS_LOG_OFF, nullptr);
+
+        StopVoiceServer(secondary, StartVoiceServer(secondary));
+
+        ASSERT(CountLinesContaining(ReadText(FindLog(primaryDir)), "[VOICE]", "voice server listening") == 2,
+            "MI-08: voice servers started through either copy run in the first copy and log to its session log");
+    }
+
     dlclose(secondary);
     dlclose(primary);
 
@@ -813,23 +890,39 @@ static void RunCommsTests(void* so)
 {
     printf("\n--- Voice (Comms) Tests ---\n");
 
-    // The vendored Comms API, re-exported under the interposer_comms_ namespace.
+    // The voice API, exported beside Interposer* under the interposer_comms_ namespace.
     auto apiVersion    = reinterpret_cast<uint32_t (*)()>(dlsym(so, "interposer_comms_get_api_version"));
     auto versionString = reinterpret_cast<const char* (*)()>(dlsym(so, "interposer_comms_get_version_string"));
 
     ASSERT(apiVersion && apiVersion() == 1,
-        "V-01: interposer_comms_get_api_version is re-exported and returns the API version");
+        "VC-01: interposer_comms_get_api_version is re-exported and returns the API version");
 
     ASSERT(versionString && versionString() && versionString()[0] != '\0',
-        "V-02: interposer_comms_get_version_string is re-exported");
+        "VC-02: interposer_comms_get_version_string is re-exported");
 
     // A representative server and client entry point from each half.
     ASSERT(dlsym(so, "interposer_comms_server_create") && dlsym(so, "interposer_comms_client_create"),
-        "V-03: the server and client voice API are both present");
+        "VC-03: the server and client voice API are both present");
 
     // The original comms_ namespace must be gone -- the rebrand is complete.
     ASSERT(!dlsym(so, "comms_get_api_version") && !dlsym(so, "comms_server_create"),
-        "V-04: the un-prefixed comms_ names are not exported");
+        "VC-04: the un-prefixed comms_ names are not exported");
+
+    // Checked in the session log after dlclose. The first server starts before
+    // session logging is on, and must not be in it.
+    StopVoiceServer(so, StartVoiceServer(so));
+
+    auto setSession = Resolve<decltype(&interposer_comms_set_session_logging)>(so, "interposer_comms_set_session_logging");
+
+    if (setSession)
+        setSession(INTERPOSER_COMMS_LOG_INFO);
+
+    void* server = StartVoiceServer(so);
+    ASSERT(server != nullptr, "VC-05: a voice server starts on loopback");
+    StopVoiceServer(so, server);
+
+    if (setSession)
+        setSession(INTERPOSER_COMMS_LOG_OFF);
 }
 
 // ── Main suite ────────────────────────────────────────────────────────────────
@@ -933,6 +1026,8 @@ int main(int argc, char** argv)
         "L-01: the session log is opened under .interposer/Logs with its header");
     ASSERT(CountLinesContaining(log, "[SDK PROBE]", "logged through the linked probe") == 1,
         "SDK-06: InterposerLog through the linked probe writes one session log line");
+    ASSERT(CountLinesContaining(log, "[VOICE]", "voice server listening on port") == 1,
+        "VC-06: voice output reaches the session log once, and only, after interposer_comms_set_session_logging");
 
     RunPluginConfigPersistenceTests(mainDir / ".interposer" / "Config.yml");
 

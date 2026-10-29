@@ -1,5 +1,23 @@
 find_package(yaml-cpp CONFIG REQUIRED)
 
+# Voice (core/voice/, the interposer_comms_* API): Opus, ENet and miniaudio from
+# vcpkg. miniaudio and opus ship no CMake config, so they are located directly.
+find_package(unofficial-enet CONFIG REQUIRED)
+
+find_path(OPUS_INCLUDE_DIR opus.h PATH_SUFFIXES opus REQUIRED)
+set(INTERPOSER_VCPKG_PREFIX ${VCPKG_INSTALLED_DIR}/${VCPKG_TARGET_TRIPLET})
+find_library(OPUS_LIBRARY_RELEASE opus PATHS ${INTERPOSER_VCPKG_PREFIX}/lib NO_DEFAULT_PATH REQUIRED)
+find_library(OPUS_LIBRARY_DEBUG   opus PATHS ${INTERPOSER_VCPKG_PREFIX}/debug/lib NO_DEFAULT_PATH REQUIRED)
+add_library(interposer_opus INTERFACE)
+target_include_directories(interposer_opus INTERFACE ${OPUS_INCLUDE_DIR})
+target_link_libraries(interposer_opus INTERFACE optimized ${OPUS_LIBRARY_RELEASE} debug ${OPUS_LIBRARY_DEBUG})
+
+find_path(MINIAUDIO_INCLUDE_DIR miniaudio.h REQUIRED)
+add_library(interposer_miniaudio INTERFACE)
+target_include_directories(interposer_miniaudio INTERFACE ${MINIAUDIO_INCLUDE_DIR})
+
+set(INTERPOSER_VOICE_LIBRARIES interposer_opus unofficial::enet::enet interposer_miniaudio)
+
 # core/ is portable: it reaches the OS only through platform/platform.h. win/ is
 # everything Windows-only -- the hook subsystems, DllMain, the init sequence --
 # and platform/win/ implements the platform layer; linux/ and platform/linux/
@@ -12,6 +30,23 @@ set(INTERPOSER_CORE_SOURCES
     dll/src/core/network_filter.cpp
     dll/src/core/pipe_events.cpp
     dll/src/core/plugins.cpp
+    # Voice chat. Portable like the rest of core/, but through ENet and
+    # miniaudio rather than platform.h: those are its platform layer.
+    dll/src/core/voice/common/log.cpp
+    dll/src/core/voice/common/miniaudio_impl.cpp
+    dll/src/core/voice/common/version.cpp
+    dll/src/core/voice/server/server_admin.cpp
+    dll/src/core/voice/server/server_api.cpp
+    dll/src/core/voice/server/server_groups.cpp
+    dll/src/core/voice/server/server_limits.cpp
+    dll/src/core/voice/server/server_network.cpp
+    dll/src/core/voice/server/spatial_grid.cpp
+    dll/src/core/voice/client/audio_devices.cpp
+    dll/src/core/voice/client/client_api.cpp
+    dll/src/core/voice/client/client_audio.cpp
+    dll/src/core/voice/client/client_groups.cpp
+    dll/src/core/voice/client/client_network.cpp
+    dll/src/core/voice/client/client_voice.cpp
 )
 
 if(NOT WIN32)
@@ -20,8 +55,6 @@ if(NOT WIN32)
 endif()
 
 find_package(minhook CONFIG REQUIRED)
-
-include(Comms.cmake)
 
 # ── The hook DLL ──────────────────────────────────────────────────────────────
 
@@ -62,8 +95,8 @@ target_include_directories(LANCommander.Interposer
     PRIVATE dll/src/core dll/src/platform dll/src/win
     PUBLIC  include)
 target_link_libraries(LANCommander.Interposer PRIVATE
-    minhook::minhook yaml-cpp::yaml-cpp winhttp ws2_32 version
-    interposer_comms)
+    minhook::minhook yaml-cpp::yaml-cpp winhttp ws2_32 version winmm
+    ${INTERPOSER_VOICE_LIBRARIES})
 
 interposer_ship_target(LANCommander.Interposer)
 interposer_version_resource(LANCommander.Interposer)

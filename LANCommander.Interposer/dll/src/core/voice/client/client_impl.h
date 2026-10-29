@@ -1,9 +1,9 @@
 #pragma once
 
-#include <comms/client.h>
+#include "LANCommander.Interposer.Comms.Client.h"
 
-#include "common/protocol.h"
-#include "common/util.h"
+#include "voice/common/protocol.h"
+#include "voice/common/util.h"
 
 #include <enet/enet.h>
 #include <opus.h>

@@ -1,6 +1,6 @@
-#include "client/client_impl.h"
+#include "voice/client/client_impl.h"
 
-#include "common/log.h"
+#include "voice/common/log.h"
 
 #include <algorithm>
 

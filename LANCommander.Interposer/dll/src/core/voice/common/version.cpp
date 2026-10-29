@@ -1,19 +1,25 @@
-#include <comms/comms.h>
+#include "LANCommander.Interposer.Comms.h"
+#include "instance.h"
+#include "version_info.h"
 
 extern "C" {
 
-INTERPOSER_COMMS_API uint32_t INTERPOSER_COMMS_CALL interposer_comms_get_api_version(void)
+INTERPOSER_API uint32_t INTERPOSER_CALL interposer_comms_get_api_version(void)
 {
+    FORWARD_TO_PRIMARY(interposer_comms_get_api_version);
     return INTERPOSER_COMMS_API_VERSION;
 }
 
-INTERPOSER_COMMS_API const char* INTERPOSER_COMMS_CALL interposer_comms_get_version_string(void)
+INTERPOSER_API const char* INTERPOSER_CALL interposer_comms_get_version_string(void)
 {
-    return INTERPOSER_COMMS_VERSION_STRING;
+    FORWARD_TO_PRIMARY(interposer_comms_get_version_string);
+    // Voice ships in the Interposer, so it carries the Interposer's version.
+    return VER_PRODUCTVERSION_STR;
 }
 
-INTERPOSER_COMMS_API const char* INTERPOSER_COMMS_CALL interposer_comms_result_to_string(interposer_comms_result result)
+INTERPOSER_API const char* INTERPOSER_CALL interposer_comms_result_to_string(interposer_comms_result result)
 {
+    FORWARD_TO_PRIMARY(interposer_comms_result_to_string, result);
     switch (result) {
     case INTERPOSER_COMMS_OK:                    return "OK";
     case INTERPOSER_COMMS_ERR_UNKNOWN:           return "Unknown error";

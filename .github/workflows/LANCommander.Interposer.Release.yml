@@ -263,14 +263,14 @@ jobs:
             Copy-Item -Recurse $sampleDir "$archDir\"
           }
 
-          # The SDK a game patch links against: the Interposer header, the
-          # vendored Comms voice headers (the re-exported interposer_comms_* API),
-          # and the import library the DLL link produced for each architecture.
-          # The .lib carries the Interposer* and interposer_comms_* exports --
-          # proxy.def marks the system-DLL exports PRIVATE.
-          New-Item -ItemType Directory -Force "$d\SDK\include\comms" | Out-Null
-          Copy-Item 'LANCommander.Interposer\include\LANCommander.Interposer.h' "$d\SDK\include\"
-          Copy-Item 'LANCommander.Interposer\comms\include\comms\*.h' "$d\SDK\include\comms\"
+          # The SDK a game patch links against: the public headers -- the
+          # Interposer* API, the interposer_comms_* voice API and the export
+          # macros both share -- and the import library the DLL link produced
+          # for each architecture. The .lib carries the Interposer* and
+          # interposer_comms_* exports; proxy.def marks the system-DLL exports
+          # PRIVATE.
+          New-Item -ItemType Directory -Force "$d\SDK\include" | Out-Null
+          Copy-Item 'LANCommander.Interposer\include\LANCommander.Interposer*.h' "$d\SDK\include\"
 
           foreach ($arch in @('x64', 'x86')) {
             $source = "out\windows-$arch\lib\Release\LANCommander.Interposer.lib"
@@ -293,7 +293,10 @@ jobs:
           $zf.Dispose()
 
           $expected = @('README.md', 'SDK/include/LANCommander.Interposer.h',
-                        'SDK/include/comms/comms.h', 'SDK/include/comms/client.h', 'SDK/include/comms/server.h')
+                        'SDK/include/LANCommander.Interposer.Export.h',
+                        'SDK/include/LANCommander.Interposer.Comms.h',
+                        'SDK/include/LANCommander.Interposer.Comms.Client.h',
+                        'SDK/include/LANCommander.Interposer.Comms.Server.h')
           foreach ($arch in @('x64', 'x86')) {
             $expected += "$arch/LANCommander.Interposer.dll"
             $expected += "$arch/LANCommander.Interposer.Injector.exe"

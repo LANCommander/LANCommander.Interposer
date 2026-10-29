@@ -24,7 +24,11 @@ The release ZIP has an `SDK\` folder:
 ```
 SDK\
   include\
-    LANCommander.Interposer.h      the whole API, plain C
+    LANCommander.Interposer.h                the Interposer* API, plain C
+    LANCommander.Interposer.Comms.h          voice chat: common definitions
+    LANCommander.Interposer.Comms.Client.h   voice chat: the game client side
+    LANCommander.Interposer.Comms.Server.h   voice chat: the game server side
+    LANCommander.Interposer.Export.h         the export macros all of them share
   lib\
     x86\LANCommander.Interposer.lib
     x64\LANCommander.Interposer.lib
@@ -37,7 +41,16 @@ default calling convention (`/Gz`) still calls it correctly. Buffers are always
 owned by the caller, so your patch and the Interposer do not need to share a C
 runtime.
 
-The import library contains only the `Interposer*` functions. The DLL also
+The voice headers declare the `interposer_comms_*` functions: proximity and
+group voice chat over Opus, built into the same DLL. They are plain C89 and need
+nothing from `<windows.h>`, so they can be included from an old game SDK as they
+are. Voice is driven entirely by your patch -- there is nothing to set in
+`Config.yml` -- and that includes its logging: call
+`interposer_comms_set_session_logging(INTERPOSER_COMMS_LOG_INFO)` to have the
+voice library's messages written to the session log beside the Interposer's own.
+
+The import library contains only the `Interposer*` and `interposer_comms_*`
+functions. The DLL also
 exports the `version.dll` and DirectInput entry points it uses as a proxy, but
 those are left out of the `.lib`, so linking it next to `version.lib` or
 `dinput8.lib` never binds `GetFileVersionInfoW` or `DirectInput8Create` to the

@@ -1,4 +1,5 @@
-#include "client/client_impl.h"
+#include "voice/client/client_impl.h"
+#include "instance.h"
 
 #include <cstring>
 
@@ -102,9 +103,10 @@ bool handle_group_message(interposer_comms_client* client, uint8_t message, prot
 
 extern "C" {
 
-INTERPOSER_COMMS_API interposer_comms_result INTERPOSER_COMMS_CALL interposer_comms_client_list_groups(interposer_comms_client* client, interposer_comms_group_id* out_ids,
+INTERPOSER_API interposer_comms_result INTERPOSER_CALL interposer_comms_client_list_groups(interposer_comms_client* client, interposer_comms_group_id* out_ids,
                                                            uint32_t capacity, uint32_t* out_count)
 {
+    FORWARD_TO_PRIMARY(interposer_comms_client_list_groups, client, out_ids, capacity, out_count);
     if (!client || !out_count || (capacity > 0 && !out_ids))
         return INTERPOSER_COMMS_ERR_INVALID_ARGUMENT;
     std::lock_guard lock(client->mutex);
@@ -118,9 +120,10 @@ INTERPOSER_COMMS_API interposer_comms_result INTERPOSER_COMMS_CALL interposer_co
     return count > capacity ? INTERPOSER_COMMS_ERR_BUFFER_TOO_SMALL : INTERPOSER_COMMS_OK;
 }
 
-INTERPOSER_COMMS_API interposer_comms_result INTERPOSER_COMMS_CALL interposer_comms_client_get_group_info(interposer_comms_client* client, interposer_comms_group_id group,
+INTERPOSER_API interposer_comms_result INTERPOSER_CALL interposer_comms_client_get_group_info(interposer_comms_client* client, interposer_comms_group_id group,
                                                               interposer_comms_client_group_info* out_info)
 {
+    FORWARD_TO_PRIMARY(interposer_comms_client_get_group_info, client, group, out_info);
     if (!client || !out_info)
         return INTERPOSER_COMMS_ERR_INVALID_ARGUMENT;
     std::lock_guard lock(client->mutex);
@@ -146,10 +149,11 @@ INTERPOSER_COMMS_API interposer_comms_result INTERPOSER_COMMS_CALL interposer_co
     return INTERPOSER_COMMS_OK;
 }
 
-INTERPOSER_COMMS_API interposer_comms_result INTERPOSER_COMMS_CALL interposer_comms_client_list_group_members(interposer_comms_client* client, interposer_comms_group_id group,
+INTERPOSER_API interposer_comms_result INTERPOSER_CALL interposer_comms_client_list_group_members(interposer_comms_client* client, interposer_comms_group_id group,
                                                                   interposer_comms_player_id* out_ids, uint32_t capacity,
                                                                   uint32_t* out_count)
 {
+    FORWARD_TO_PRIMARY(interposer_comms_client_list_group_members, client, group, out_ids, capacity, out_count);
     if (!client || !out_count || (capacity > 0 && !out_ids))
         return INTERPOSER_COMMS_ERR_INVALID_ARGUMENT;
     std::lock_guard lock(client->mutex);
@@ -166,8 +170,9 @@ INTERPOSER_COMMS_API interposer_comms_result INTERPOSER_COMMS_CALL interposer_co
     return count > capacity ? INTERPOSER_COMMS_ERR_BUFFER_TOO_SMALL : INTERPOSER_COMMS_OK;
 }
 
-INTERPOSER_COMMS_API interposer_comms_result INTERPOSER_COMMS_CALL interposer_comms_client_create_private_group(interposer_comms_client* client, const char* name, const char* password)
+INTERPOSER_API interposer_comms_result INTERPOSER_CALL interposer_comms_client_create_private_group(interposer_comms_client* client, const char* name, const char* password)
 {
+    FORWARD_TO_PRIMARY(interposer_comms_client_create_private_group, client, name, password);
     if (!client || !name || !*name || std::strlen(name) > proto::kMaxGroupNameLength || !valid_password(password))
         return INTERPOSER_COMMS_ERR_INVALID_ARGUMENT;
     proto::Writer w(proto::kCreateGroup);
@@ -175,8 +180,9 @@ INTERPOSER_COMMS_API interposer_comms_result INTERPOSER_COMMS_CALL interposer_co
     return send_request(client, w);
 }
 
-INTERPOSER_COMMS_API interposer_comms_result INTERPOSER_COMMS_CALL interposer_comms_client_join_group(interposer_comms_client* client, interposer_comms_group_id group, const char* password)
+INTERPOSER_API interposer_comms_result INTERPOSER_CALL interposer_comms_client_join_group(interposer_comms_client* client, interposer_comms_group_id group, const char* password)
 {
+    FORWARD_TO_PRIMARY(interposer_comms_client_join_group, client, group, password);
     if (!client || group == INTERPOSER_COMMS_INVALID_ID || !valid_password(password))
         return INTERPOSER_COMMS_ERR_INVALID_ARGUMENT;
     proto::Writer w(proto::kJoinGroup);
@@ -184,8 +190,9 @@ INTERPOSER_COMMS_API interposer_comms_result INTERPOSER_COMMS_CALL interposer_co
     return send_request(client, w);
 }
 
-INTERPOSER_COMMS_API interposer_comms_result INTERPOSER_COMMS_CALL interposer_comms_client_leave_group(interposer_comms_client* client, interposer_comms_group_id group)
+INTERPOSER_API interposer_comms_result INTERPOSER_CALL interposer_comms_client_leave_group(interposer_comms_client* client, interposer_comms_group_id group)
 {
+    FORWARD_TO_PRIMARY(interposer_comms_client_leave_group, client, group);
     if (!client || group == INTERPOSER_COMMS_INVALID_ID)
         return INTERPOSER_COMMS_ERR_INVALID_ARGUMENT;
     proto::Writer w(proto::kLeaveGroup);
@@ -193,8 +200,9 @@ INTERPOSER_COMMS_API interposer_comms_result INTERPOSER_COMMS_CALL interposer_co
     return send_request(client, w);
 }
 
-INTERPOSER_COMMS_API interposer_comms_result INTERPOSER_COMMS_CALL interposer_comms_client_invite_to_group(interposer_comms_client* client, interposer_comms_group_id group, interposer_comms_player_id player)
+INTERPOSER_API interposer_comms_result INTERPOSER_CALL interposer_comms_client_invite_to_group(interposer_comms_client* client, interposer_comms_group_id group, interposer_comms_player_id player)
 {
+    FORWARD_TO_PRIMARY(interposer_comms_client_invite_to_group, client, group, player);
     if (!client || group == INTERPOSER_COMMS_INVALID_ID || player == INTERPOSER_COMMS_INVALID_ID)
         return INTERPOSER_COMMS_ERR_INVALID_ARGUMENT;
     proto::Writer w(proto::kInviteToGroup);
@@ -202,8 +210,9 @@ INTERPOSER_COMMS_API interposer_comms_result INTERPOSER_COMMS_CALL interposer_co
     return send_request(client, w);
 }
 
-INTERPOSER_COMMS_API interposer_comms_result INTERPOSER_COMMS_CALL interposer_comms_client_set_group_listening(interposer_comms_client* client, interposer_comms_group_id group, int listening)
+INTERPOSER_API interposer_comms_result INTERPOSER_CALL interposer_comms_client_set_group_listening(interposer_comms_client* client, interposer_comms_group_id group, int listening)
 {
+    FORWARD_TO_PRIMARY(interposer_comms_client_set_group_listening, client, group, listening);
     if (!client || group == INTERPOSER_COMMS_INVALID_ID)
         return INTERPOSER_COMMS_ERR_INVALID_ARGUMENT;
     proto::Writer w(proto::kSetListening);

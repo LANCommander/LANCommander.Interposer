@@ -9,7 +9,7 @@
 //
 // Every packet starts with a u8 message id.
 
-#include <comms/comms.h>
+#include "LANCommander.Interposer.Comms.h"
 
 #include <cstdint>
 #include <cstring>

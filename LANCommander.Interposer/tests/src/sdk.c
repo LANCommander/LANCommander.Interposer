@@ -17,6 +17,7 @@
  * correctly.
  */
 #include "LANCommander.Interposer.h"
+#include "LANCommander.Interposer.Comms.h"
 
 BOOL __cdecl SdkGetConfigString(const wchar_t* dotPath, wchar_t* buffer, DWORD bufferSize)
 {
@@ -44,6 +45,13 @@ DWORD __cdecl SdkEnumNetworkAdapterCount(void)
 {
     DWORD written = 0;
     return InterposerEnumNetworkAdapters(NULL, 0, &written);
+}
+
+/* The voice API, from the same import library. C and /Gz matter here too: the
+ * voice headers must be plain C and state their convention. */
+unsigned __cdecl SdkVoiceApiVersion(void)
+{
+    return interposer_comms_get_api_version();
 }
 
 /* The import's address slot, which the first call filled in when it resolved

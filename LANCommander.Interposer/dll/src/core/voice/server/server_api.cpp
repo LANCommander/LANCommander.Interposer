@@ -1,7 +1,8 @@
-#include "server/server_impl.h"
+#include "voice/server/server_impl.h"
+#include "instance.h"
 
-#include "common/enet_runtime.h"
-#include "common/log.h"
+#include "voice/common/enet_runtime.h"
+#include "voice/common/log.h"
 
 #include <algorithm>
 #include <cmath>
@@ -68,8 +69,9 @@ extern "C" {
 
 /* ---- Lifecycle ---------------------------------------------------------- */
 
-INTERPOSER_COMMS_API void INTERPOSER_COMMS_CALL interposer_comms_server_config_init(interposer_comms_server_config* config)
+INTERPOSER_API void INTERPOSER_CALL interposer_comms_server_config_init(interposer_comms_server_config* config)
 {
+    FORWARD_TO_PRIMARY(interposer_comms_server_config_init, config);
     if (!config)
         return;
     *config = interposer_comms_server_config{};
@@ -90,8 +92,9 @@ INTERPOSER_COMMS_API void INTERPOSER_COMMS_CALL interposer_comms_server_config_i
     config->max_client_speed = 0.0f;
 }
 
-INTERPOSER_COMMS_API interposer_comms_result INTERPOSER_COMMS_CALL interposer_comms_server_create(const interposer_comms_server_config* config, interposer_comms_server** out_server)
+INTERPOSER_API interposer_comms_result INTERPOSER_CALL interposer_comms_server_create(const interposer_comms_server_config* config, interposer_comms_server** out_server)
 {
+    FORWARD_TO_PRIMARY(interposer_comms_server_create, config, out_server);
     if (!config || !out_server || config->struct_size < sizeof(interposer_comms_server_config))
         return INTERPOSER_COMMS_ERR_INVALID_ARGUMENT;
 
@@ -121,8 +124,9 @@ INTERPOSER_COMMS_API interposer_comms_result INTERPOSER_COMMS_CALL interposer_co
     return INTERPOSER_COMMS_OK;
 }
 
-INTERPOSER_COMMS_API interposer_comms_result INTERPOSER_COMMS_CALL interposer_comms_server_start(interposer_comms_server* server)
+INTERPOSER_API interposer_comms_result INTERPOSER_CALL interposer_comms_server_start(interposer_comms_server* server)
 {
+    FORWARD_TO_PRIMARY(interposer_comms_server_start, server);
     if (!server)
         return INTERPOSER_COMMS_ERR_INVALID_ARGUMENT;
     std::lock_guard lock(server->mutex);
@@ -150,8 +154,9 @@ INTERPOSER_COMMS_API interposer_comms_result INTERPOSER_COMMS_CALL interposer_co
     return INTERPOSER_COMMS_OK;
 }
 
-INTERPOSER_COMMS_API interposer_comms_result INTERPOSER_COMMS_CALL interposer_comms_server_stop(interposer_comms_server* server)
+INTERPOSER_API interposer_comms_result INTERPOSER_CALL interposer_comms_server_stop(interposer_comms_server* server)
 {
+    FORWARD_TO_PRIMARY(interposer_comms_server_stop, server);
     if (!server)
         return INTERPOSER_COMMS_ERR_INVALID_ARGUMENT;
     if (!server->running.exchange(false))
@@ -164,8 +169,9 @@ INTERPOSER_COMMS_API interposer_comms_result INTERPOSER_COMMS_CALL interposer_co
     return INTERPOSER_COMMS_OK;
 }
 
-INTERPOSER_COMMS_API void INTERPOSER_COMMS_CALL interposer_comms_server_destroy(interposer_comms_server* server)
+INTERPOSER_API void INTERPOSER_CALL interposer_comms_server_destroy(interposer_comms_server* server)
 {
+    FORWARD_TO_PRIMARY(interposer_comms_server_destroy, server);
     if (!server)
         return;
     interposer_comms_server_stop(server);
@@ -173,8 +179,9 @@ INTERPOSER_COMMS_API void INTERPOSER_COMMS_CALL interposer_comms_server_destroy(
     EnetRuntime::release();
 }
 
-INTERPOSER_COMMS_API interposer_comms_result INTERPOSER_COMMS_CALL interposer_comms_server_poll_event(interposer_comms_server* server, interposer_comms_server_event* out_event)
+INTERPOSER_API interposer_comms_result INTERPOSER_CALL interposer_comms_server_poll_event(interposer_comms_server* server, interposer_comms_server_event* out_event)
 {
+    FORWARD_TO_PRIMARY(interposer_comms_server_poll_event, server, out_event);
     if (!server || !out_event)
         return INTERPOSER_COMMS_ERR_INVALID_ARGUMENT;
     std::lock_guard lock(server->mutex);
@@ -187,9 +194,10 @@ INTERPOSER_COMMS_API interposer_comms_result INTERPOSER_COMMS_CALL interposer_co
 
 /* ---- Players ------------------------------------------------------------ */
 
-INTERPOSER_COMMS_API interposer_comms_result INTERPOSER_COMMS_CALL interposer_comms_server_add_player(interposer_comms_server* server, uint64_t game_player_id,
+INTERPOSER_API interposer_comms_result INTERPOSER_CALL interposer_comms_server_add_player(interposer_comms_server* server, uint64_t game_player_id,
                                                           const char* name, interposer_comms_player_id* out_player)
 {
+    FORWARD_TO_PRIMARY(interposer_comms_server_add_player, server, game_player_id, name, out_player);
     if (!server || !name || !*name || !out_player)
         return INTERPOSER_COMMS_ERR_INVALID_ARGUMENT;
     std::lock_guard lock(server->mutex);
@@ -213,8 +221,9 @@ INTERPOSER_COMMS_API interposer_comms_result INTERPOSER_COMMS_CALL interposer_co
     return INTERPOSER_COMMS_OK;
 }
 
-INTERPOSER_COMMS_API interposer_comms_result INTERPOSER_COMMS_CALL interposer_comms_server_remove_player(interposer_comms_server* server, interposer_comms_player_id player)
+INTERPOSER_API interposer_comms_result INTERPOSER_CALL interposer_comms_server_remove_player(interposer_comms_server* server, interposer_comms_player_id player)
 {
+    FORWARD_TO_PRIMARY(interposer_comms_server_remove_player, server, player);
     if (!server)
         return INTERPOSER_COMMS_ERR_INVALID_ARGUMENT;
     std::lock_guard lock(server->mutex);
@@ -224,9 +233,10 @@ INTERPOSER_COMMS_API interposer_comms_result INTERPOSER_COMMS_CALL interposer_co
     return INTERPOSER_COMMS_OK;
 }
 
-INTERPOSER_COMMS_API interposer_comms_result INTERPOSER_COMMS_CALL interposer_comms_server_find_player(interposer_comms_server* server, uint64_t game_player_id,
+INTERPOSER_API interposer_comms_result INTERPOSER_CALL interposer_comms_server_find_player(interposer_comms_server* server, uint64_t game_player_id,
                                                            interposer_comms_player_id* out_player)
 {
+    FORWARD_TO_PRIMARY(interposer_comms_server_find_player, server, game_player_id, out_player);
     if (!server || !out_player || game_player_id == 0)
         return INTERPOSER_COMMS_ERR_INVALID_ARGUMENT;
     std::lock_guard lock(server->mutex);
@@ -239,9 +249,10 @@ INTERPOSER_COMMS_API interposer_comms_result INTERPOSER_COMMS_CALL interposer_co
     return INTERPOSER_COMMS_ERR_NOT_FOUND;
 }
 
-INTERPOSER_COMMS_API interposer_comms_result INTERPOSER_COMMS_CALL interposer_comms_server_get_player_info(interposer_comms_server* server, interposer_comms_player_id player,
+INTERPOSER_API interposer_comms_result INTERPOSER_CALL interposer_comms_server_get_player_info(interposer_comms_server* server, interposer_comms_player_id player,
                                                                interposer_comms_server_player_info* out_info)
 {
+    FORWARD_TO_PRIMARY(interposer_comms_server_get_player_info, server, player, out_info);
     if (!server || !out_info)
         return INTERPOSER_COMMS_ERR_INVALID_ARGUMENT;
     std::lock_guard lock(server->mutex);
@@ -263,9 +274,10 @@ INTERPOSER_COMMS_API interposer_comms_result INTERPOSER_COMMS_CALL interposer_co
     return INTERPOSER_COMMS_OK;
 }
 
-INTERPOSER_COMMS_API interposer_comms_result INTERPOSER_COMMS_CALL interposer_comms_server_list_players(interposer_comms_server* server, interposer_comms_player_id* out_ids,
+INTERPOSER_API interposer_comms_result INTERPOSER_CALL interposer_comms_server_list_players(interposer_comms_server* server, interposer_comms_player_id* out_ids,
                                                             uint32_t capacity, uint32_t* out_count)
 {
+    FORWARD_TO_PRIMARY(interposer_comms_server_list_players, server, out_ids, capacity, out_count);
     if (!server || !out_count || (capacity > 0 && !out_ids))
         return INTERPOSER_COMMS_ERR_INVALID_ARGUMENT;
     std::lock_guard lock(server->mutex);
@@ -275,9 +287,10 @@ INTERPOSER_COMMS_API interposer_comms_result INTERPOSER_COMMS_CALL interposer_co
     return fill_ids(ids, out_ids, capacity, out_count);
 }
 
-INTERPOSER_COMMS_API interposer_comms_result INTERPOSER_COMMS_CALL interposer_comms_server_create_join_token(interposer_comms_server* server, interposer_comms_player_id player,
+INTERPOSER_API interposer_comms_result INTERPOSER_CALL interposer_comms_server_create_join_token(interposer_comms_server* server, interposer_comms_player_id player,
                                                                  char* out_token, size_t token_capacity)
 {
+    FORWARD_TO_PRIMARY(interposer_comms_server_create_join_token, server, player, out_token, token_capacity);
     if (!server || !out_token)
         return INTERPOSER_COMMS_ERR_INVALID_ARGUMENT;
     if (token_capacity < 33)
@@ -291,16 +304,18 @@ INTERPOSER_COMMS_API interposer_comms_result INTERPOSER_COMMS_CALL interposer_co
     return INTERPOSER_COMMS_OK;
 }
 
-INTERPOSER_COMMS_API interposer_comms_result INTERPOSER_COMMS_CALL interposer_comms_server_kick_player(interposer_comms_server* server, interposer_comms_player_id player, const char* reason)
+INTERPOSER_API interposer_comms_result INTERPOSER_CALL interposer_comms_server_kick_player(interposer_comms_server* server, interposer_comms_player_id player, const char* reason)
 {
+    FORWARD_TO_PRIMARY(interposer_comms_server_kick_player, server, player, reason);
     if (!server)
         return INTERPOSER_COMMS_ERR_INVALID_ARGUMENT;
     std::lock_guard lock(server->mutex);
     return kick_player(server, player, reason ? reason : "kicked");
 }
 
-INTERPOSER_COMMS_API interposer_comms_result INTERPOSER_COMMS_CALL interposer_comms_server_set_player_muted(interposer_comms_server* server, interposer_comms_player_id player, int muted)
+INTERPOSER_API interposer_comms_result INTERPOSER_CALL interposer_comms_server_set_player_muted(interposer_comms_server* server, interposer_comms_player_id player, int muted)
 {
+    FORWARD_TO_PRIMARY(interposer_comms_server_set_player_muted, server, player, muted);
     if (!server)
         return INTERPOSER_COMMS_ERR_INVALID_ARGUMENT;
     std::lock_guard lock(server->mutex);
@@ -309,8 +324,9 @@ INTERPOSER_COMMS_API interposer_comms_result INTERPOSER_COMMS_CALL interposer_co
 
 /* ---- Proximity ---------------------------------------------------------- */
 
-INTERPOSER_COMMS_API void INTERPOSER_COMMS_CALL interposer_comms_zone_config_init(interposer_comms_zone_config* config)
+INTERPOSER_API void INTERPOSER_CALL interposer_comms_zone_config_init(interposer_comms_zone_config* config)
 {
+    FORWARD_TO_PRIMARY(interposer_comms_zone_config_init, config);
     if (!config)
         return;
     *config = interposer_comms_zone_config{};
@@ -322,9 +338,10 @@ INTERPOSER_COMMS_API void INTERPOSER_COMMS_CALL interposer_comms_zone_config_ini
     config->left_handed = 0;
 }
 
-INTERPOSER_COMMS_API interposer_comms_result INTERPOSER_COMMS_CALL interposer_comms_server_configure_zone(interposer_comms_server* server, interposer_comms_zone_id zone,
+INTERPOSER_API interposer_comms_result INTERPOSER_CALL interposer_comms_server_configure_zone(interposer_comms_server* server, interposer_comms_zone_id zone,
                                                               const interposer_comms_zone_config* config)
 {
+    FORWARD_TO_PRIMARY(interposer_comms_server_configure_zone, server, zone, config);
     if (!server || !valid_zone_config(config))
         return INTERPOSER_COMMS_ERR_INVALID_ARGUMENT;
     std::lock_guard lock(server->mutex);
@@ -334,10 +351,11 @@ INTERPOSER_COMMS_API interposer_comms_result INTERPOSER_COMMS_CALL interposer_co
     return INTERPOSER_COMMS_OK;
 }
 
-INTERPOSER_COMMS_API interposer_comms_result INTERPOSER_COMMS_CALL interposer_comms_server_update_player_position(interposer_comms_server* server, interposer_comms_player_id player,
+INTERPOSER_API interposer_comms_result INTERPOSER_CALL interposer_comms_server_update_player_position(interposer_comms_server* server, interposer_comms_player_id player,
                                                                       interposer_comms_zone_id zone, interposer_comms_vec3 position,
                                                                       const interposer_comms_vec3* forward)
 {
+    FORWARD_TO_PRIMARY(interposer_comms_server_update_player_position, server, player, zone, position, forward);
     if (!server || !std::isfinite(position.x) || !std::isfinite(position.y) || !std::isfinite(position.z))
         return INTERPOSER_COMMS_ERR_INVALID_ARGUMENT;
     std::lock_guard lock(server->mutex);
@@ -349,8 +367,9 @@ INTERPOSER_COMMS_API interposer_comms_result INTERPOSER_COMMS_CALL interposer_co
     return INTERPOSER_COMMS_OK;
 }
 
-INTERPOSER_COMMS_API interposer_comms_result INTERPOSER_COMMS_CALL interposer_comms_server_clear_player_position(interposer_comms_server* server, interposer_comms_player_id player)
+INTERPOSER_API interposer_comms_result INTERPOSER_CALL interposer_comms_server_clear_player_position(interposer_comms_server* server, interposer_comms_player_id player)
 {
+    FORWARD_TO_PRIMARY(interposer_comms_server_clear_player_position, server, player);
     if (!server)
         return INTERPOSER_COMMS_ERR_INVALID_ARGUMENT;
     std::lock_guard lock(server->mutex);
@@ -360,9 +379,10 @@ INTERPOSER_COMMS_API interposer_comms_result INTERPOSER_COMMS_CALL interposer_co
     return INTERPOSER_COMMS_OK;
 }
 
-INTERPOSER_COMMS_API interposer_comms_result INTERPOSER_COMMS_CALL interposer_comms_server_set_position_authority(interposer_comms_server* server, interposer_comms_player_id player,
+INTERPOSER_API interposer_comms_result INTERPOSER_CALL interposer_comms_server_set_position_authority(interposer_comms_server* server, interposer_comms_player_id player,
                                                                       interposer_comms_position_authority authority)
 {
+    FORWARD_TO_PRIMARY(interposer_comms_server_set_position_authority, server, player, authority);
     if (!server || (authority != INTERPOSER_COMMS_POSITION_SERVER && authority != INTERPOSER_COMMS_POSITION_CLIENT))
         return INTERPOSER_COMMS_ERR_INVALID_ARGUMENT;
     std::lock_guard lock(server->mutex);
@@ -372,9 +392,10 @@ INTERPOSER_COMMS_API interposer_comms_result INTERPOSER_COMMS_CALL interposer_co
     return INTERPOSER_COMMS_OK;
 }
 
-INTERPOSER_COMMS_API interposer_comms_result INTERPOSER_COMMS_CALL interposer_comms_server_set_pair_attenuation(interposer_comms_server* server, interposer_comms_player_id listener,
+INTERPOSER_API interposer_comms_result INTERPOSER_CALL interposer_comms_server_set_pair_attenuation(interposer_comms_server* server, interposer_comms_player_id listener,
                                                                     interposer_comms_player_id speaker, float gain)
 {
+    FORWARD_TO_PRIMARY(interposer_comms_server_set_pair_attenuation, server, listener, speaker, gain);
     if (!server || !(gain >= 0.0f))
         return INTERPOSER_COMMS_ERR_INVALID_ARGUMENT;
     std::lock_guard lock(server->mutex);
@@ -389,9 +410,10 @@ INTERPOSER_COMMS_API interposer_comms_result INTERPOSER_COMMS_CALL interposer_co
     return INTERPOSER_COMMS_OK;
 }
 
-INTERPOSER_COMMS_API interposer_comms_result INTERPOSER_COMMS_CALL interposer_comms_server_set_proximity_enabled(interposer_comms_server* server, interposer_comms_player_id player,
+INTERPOSER_API interposer_comms_result INTERPOSER_CALL interposer_comms_server_set_proximity_enabled(interposer_comms_server* server, interposer_comms_player_id player,
                                                                      int can_speak, int can_listen)
 {
+    FORWARD_TO_PRIMARY(interposer_comms_server_set_proximity_enabled, server, player, can_speak, can_listen);
     if (!server)
         return INTERPOSER_COMMS_ERR_INVALID_ARGUMENT;
     std::lock_guard lock(server->mutex);
@@ -403,8 +425,9 @@ INTERPOSER_COMMS_API interposer_comms_result INTERPOSER_COMMS_CALL interposer_co
 
 /* ---- Groups ------------------------------------------------------------- */
 
-INTERPOSER_COMMS_API void INTERPOSER_COMMS_CALL interposer_comms_group_config_init(interposer_comms_group_config* config)
+INTERPOSER_API void INTERPOSER_CALL interposer_comms_group_config_init(interposer_comms_group_config* config)
 {
+    FORWARD_TO_PRIMARY(interposer_comms_group_config_init, config);
     if (!config)
         return;
     *config = interposer_comms_group_config{};
@@ -413,9 +436,10 @@ INTERPOSER_COMMS_API void INTERPOSER_COMMS_CALL interposer_comms_group_config_in
     config->parent = INTERPOSER_COMMS_INVALID_ID;
 }
 
-INTERPOSER_COMMS_API interposer_comms_result INTERPOSER_COMMS_CALL interposer_comms_server_create_group(interposer_comms_server* server, const interposer_comms_group_config* config,
+INTERPOSER_API interposer_comms_result INTERPOSER_CALL interposer_comms_server_create_group(interposer_comms_server* server, const interposer_comms_group_config* config,
                                                             interposer_comms_group_id* out_group)
 {
+    FORWARD_TO_PRIMARY(interposer_comms_server_create_group, server, config, out_group);
     if (!server || !config || !out_group || config->struct_size < sizeof(interposer_comms_group_config)
         || !config->name || !*config->name || std::strlen(config->name) > proto::kMaxGroupNameLength
         || (config->type != INTERPOSER_COMMS_GROUP_SERVER && config->type != INTERPOSER_COMMS_GROUP_CHANNEL))
@@ -425,8 +449,9 @@ INTERPOSER_COMMS_API interposer_comms_result INTERPOSER_COMMS_CALL interposer_co
                         config->parent, config->max_members, config->players_can_leave != 0, out_group);
 }
 
-INTERPOSER_COMMS_API interposer_comms_result INTERPOSER_COMMS_CALL interposer_comms_server_destroy_group(interposer_comms_server* server, interposer_comms_group_id group)
+INTERPOSER_API interposer_comms_result INTERPOSER_CALL interposer_comms_server_destroy_group(interposer_comms_server* server, interposer_comms_group_id group)
 {
+    FORWARD_TO_PRIMARY(interposer_comms_server_destroy_group, server, group);
     if (!server)
         return INTERPOSER_COMMS_ERR_INVALID_ARGUMENT;
     std::lock_guard lock(server->mutex);
@@ -436,25 +461,28 @@ INTERPOSER_COMMS_API interposer_comms_result INTERPOSER_COMMS_CALL interposer_co
     return INTERPOSER_COMMS_OK;
 }
 
-INTERPOSER_COMMS_API interposer_comms_result INTERPOSER_COMMS_CALL interposer_comms_server_add_to_group(interposer_comms_server* server, interposer_comms_group_id group, interposer_comms_player_id player)
+INTERPOSER_API interposer_comms_result INTERPOSER_CALL interposer_comms_server_add_to_group(interposer_comms_server* server, interposer_comms_group_id group, interposer_comms_player_id player)
 {
+    FORWARD_TO_PRIMARY(interposer_comms_server_add_to_group, server, group, player);
     if (!server)
         return INTERPOSER_COMMS_ERR_INVALID_ARGUMENT;
     std::lock_guard lock(server->mutex);
     return add_member(server, group, player);
 }
 
-INTERPOSER_COMMS_API interposer_comms_result INTERPOSER_COMMS_CALL interposer_comms_server_remove_from_group(interposer_comms_server* server, interposer_comms_group_id group, interposer_comms_player_id player)
+INTERPOSER_API interposer_comms_result INTERPOSER_CALL interposer_comms_server_remove_from_group(interposer_comms_server* server, interposer_comms_group_id group, interposer_comms_player_id player)
 {
+    FORWARD_TO_PRIMARY(interposer_comms_server_remove_from_group, server, group, player);
     if (!server)
         return INTERPOSER_COMMS_ERR_INVALID_ARGUMENT;
     std::lock_guard lock(server->mutex);
     return remove_member(server, group, player);
 }
 
-INTERPOSER_COMMS_API interposer_comms_result INTERPOSER_COMMS_CALL interposer_comms_server_set_member_permissions(interposer_comms_server* server, interposer_comms_group_id group,
+INTERPOSER_API interposer_comms_result INTERPOSER_CALL interposer_comms_server_set_member_permissions(interposer_comms_server* server, interposer_comms_group_id group,
                                                                       interposer_comms_player_id player, int can_speak, int can_listen)
 {
+    FORWARD_TO_PRIMARY(interposer_comms_server_set_member_permissions, server, group, player, can_speak, can_listen);
     if (!server)
         return INTERPOSER_COMMS_ERR_INVALID_ARGUMENT;
     std::lock_guard lock(server->mutex);
@@ -470,9 +498,10 @@ INTERPOSER_COMMS_API interposer_comms_result INTERPOSER_COMMS_CALL interposer_co
     return INTERPOSER_COMMS_OK;
 }
 
-INTERPOSER_COMMS_API interposer_comms_result INTERPOSER_COMMS_CALL interposer_comms_server_list_groups(interposer_comms_server* server, interposer_comms_group_id* out_ids,
+INTERPOSER_API interposer_comms_result INTERPOSER_CALL interposer_comms_server_list_groups(interposer_comms_server* server, interposer_comms_group_id* out_ids,
                                                            uint32_t capacity, uint32_t* out_count)
 {
+    FORWARD_TO_PRIMARY(interposer_comms_server_list_groups, server, out_ids, capacity, out_count);
     if (!server || !out_count || (capacity > 0 && !out_ids))
         return INTERPOSER_COMMS_ERR_INVALID_ARGUMENT;
     std::lock_guard lock(server->mutex);
@@ -482,9 +511,10 @@ INTERPOSER_COMMS_API interposer_comms_result INTERPOSER_COMMS_CALL interposer_co
     return fill_ids(ids, out_ids, capacity, out_count);
 }
 
-INTERPOSER_COMMS_API interposer_comms_result INTERPOSER_COMMS_CALL interposer_comms_server_get_group_info(interposer_comms_server* server, interposer_comms_group_id group,
+INTERPOSER_API interposer_comms_result INTERPOSER_CALL interposer_comms_server_get_group_info(interposer_comms_server* server, interposer_comms_group_id group,
                                                               interposer_comms_server_group_info* out_info)
 {
+    FORWARD_TO_PRIMARY(interposer_comms_server_get_group_info, server, group, out_info);
     if (!server || !out_info)
         return INTERPOSER_COMMS_ERR_INVALID_ARGUMENT;
     std::lock_guard lock(server->mutex);
@@ -506,10 +536,11 @@ INTERPOSER_COMMS_API interposer_comms_result INTERPOSER_COMMS_CALL interposer_co
     return INTERPOSER_COMMS_OK;
 }
 
-INTERPOSER_COMMS_API interposer_comms_result INTERPOSER_COMMS_CALL interposer_comms_server_list_group_members(interposer_comms_server* server, interposer_comms_group_id group,
+INTERPOSER_API interposer_comms_result INTERPOSER_CALL interposer_comms_server_list_group_members(interposer_comms_server* server, interposer_comms_group_id group,
                                                                   interposer_comms_player_id* out_ids, uint32_t capacity,
                                                                   uint32_t* out_count)
 {
+    FORWARD_TO_PRIMARY(interposer_comms_server_list_group_members, server, group, out_ids, capacity, out_count);
     if (!server || !out_count || (capacity > 0 && !out_ids))
         return INTERPOSER_COMMS_ERR_INVALID_ARGUMENT;
     std::lock_guard lock(server->mutex);
@@ -524,16 +555,18 @@ INTERPOSER_COMMS_API interposer_comms_result INTERPOSER_COMMS_CALL interposer_co
 
 /* ---- Limits & management ------------------------------------------------ */
 
-INTERPOSER_COMMS_API interposer_comms_result INTERPOSER_COMMS_CALL interposer_comms_server_update_limits(interposer_comms_server* server, const interposer_comms_server_config* config)
+INTERPOSER_API interposer_comms_result INTERPOSER_CALL interposer_comms_server_update_limits(interposer_comms_server* server, const interposer_comms_server_config* config)
 {
+    FORWARD_TO_PRIMARY(interposer_comms_server_update_limits, server, config);
     if (!server || !config || config->struct_size < sizeof(interposer_comms_server_config))
         return INTERPOSER_COMMS_ERR_INVALID_ARGUMENT;
     std::lock_guard lock(server->mutex);
     return apply_limits(server, *config);
 }
 
-INTERPOSER_COMMS_API interposer_comms_result INTERPOSER_COMMS_CALL interposer_comms_server_get_config(interposer_comms_server* server, interposer_comms_server_config* out_config)
+INTERPOSER_API interposer_comms_result INTERPOSER_CALL interposer_comms_server_get_config(interposer_comms_server* server, interposer_comms_server_config* out_config)
 {
+    FORWARD_TO_PRIMARY(interposer_comms_server_get_config, server, out_config);
     if (!server || !out_config)
         return INTERPOSER_COMMS_ERR_INVALID_ARGUMENT;
     std::lock_guard lock(server->mutex);
@@ -541,9 +574,10 @@ INTERPOSER_COMMS_API interposer_comms_result INTERPOSER_COMMS_CALL interposer_co
     return INTERPOSER_COMMS_OK;
 }
 
-INTERPOSER_COMMS_API interposer_comms_result INTERPOSER_COMMS_CALL interposer_comms_server_execute_command(interposer_comms_server* server, const char* command,
+INTERPOSER_API interposer_comms_result INTERPOSER_CALL interposer_comms_server_execute_command(interposer_comms_server* server, const char* command,
                                                                char* out_text, size_t text_capacity)
 {
+    FORWARD_TO_PRIMARY(interposer_comms_server_execute_command, server, command, out_text, text_capacity);
     if (!server || !command)
         return INTERPOSER_COMMS_ERR_INVALID_ARGUMENT;
     std::string output;

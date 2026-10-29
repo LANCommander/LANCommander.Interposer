@@ -316,6 +316,11 @@ void LogRelay(const wchar_t* verb, const wchar_t* info, const wchar_t* detail = 
 // Logging.Level Debug; the per-datagram lines require Trace.
 void LogRelayDiag(const wchar_t* verb, const wchar_t* info, const wchar_t* detail = nullptr);
 
+// Write a line of the voice library's own output. Not gated here: the patch
+// sets the threshold with interposer_comms_set_session_logging, and
+// voice/common/log.cpp applies it before calling. Log-only.
+void LogVoice(const wchar_t* verb, const wchar_t* message);
+
 // Redirect diagnostics. No-op below Debug level or when the subsystem flag is false.
 // Unlike LogFileAccess/LogRegistryAccess these deliberately do NOT fire plugin or
 // named-pipe callbacks — the diagnostic verbs are log-only and must not widen the

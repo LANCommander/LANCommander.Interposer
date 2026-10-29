@@ -1,6 +1,7 @@
-#include "client/client_impl.h"
+#include "voice/client/client_impl.h"
+#include "instance.h"
 
-#include "common/log.h"
+#include "voice/common/log.h"
 
 #include <cstdio>
 #include <cstring>
@@ -61,9 +62,10 @@ void encode_device_id(const ma_device_id& id, char* out, size_t capacity)
 
 } // namespace
 
-extern "C" INTERPOSER_COMMS_API interposer_comms_result INTERPOSER_COMMS_CALL interposer_comms_list_audio_devices(interposer_comms_device_type type, interposer_comms_audio_device* out_devices,
+extern "C" INTERPOSER_API interposer_comms_result INTERPOSER_CALL interposer_comms_list_audio_devices(interposer_comms_device_type type, interposer_comms_audio_device* out_devices,
                                                               uint32_t capacity, uint32_t* out_count)
 {
+    FORWARD_TO_PRIMARY(interposer_comms_list_audio_devices, type, out_devices, capacity, out_count);
     if (!out_count || (capacity > 0 && !out_devices))
         return INTERPOSER_COMMS_ERR_INVALID_ARGUMENT;
 

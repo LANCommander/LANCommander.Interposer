@@ -1,6 +1,6 @@
-#include "server/server_impl.h"
+#include "voice/server/server_impl.h"
 
-#include "common/log.h"
+#include "voice/common/log.h"
 
 #include <algorithm>
 #include <cctype>

@@ -29,7 +29,9 @@ x86\                                     32-bit game executables
   Plugins\                                 optional plugins, not enabled by default
   .interposer\Config.yml                   settings
 SDK\                                     for game patches that link the Interposer
-  include\LANCommander.Interposer.h
+  include\LANCommander.Interposer.h          the Interposer* API
+  include\LANCommander.Interposer.Comms*.h   voice chat (interposer_comms_*)
+  include\LANCommander.Interposer.Export.h   shared by both
   lib\x86\LANCommander.Interposer.lib
   lib\x64\LANCommander.Interposer.lib
 ```
@@ -87,7 +89,7 @@ matching section under `Plugins:` in `Config.yml`.
 ## Shipping it with a game patch
 
 If you make a patch for a game, it can link the Interposer so every player gets
-FastDL, redirection and the rest without installing anything else. Add
+FastDL, redirection, voice chat and the rest without installing anything else. Add
 `SDK\include` to your include path, link the `.lib` that matches the game's
 architecture, and ship `LANCommander.Interposer.dll` and `.interposer\` beside
 the game executable. The guide is at

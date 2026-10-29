@@ -1,5 +1,5 @@
 /*
- * LANCommander Comms - client API.
+ * LANCommander.Interposer.Comms.Client.h -- voice chat, client API.
  *
  * Typical game-client flow:
  *   interposer_comms_client_config cfg; interposer_comms_client_config_init(&cfg);
@@ -13,7 +13,7 @@
 #ifndef INTERPOSER_COMMS_CLIENT_H
 #define INTERPOSER_COMMS_CLIENT_H
 
-#include "comms.h"
+#include "LANCommander.Interposer.Comms.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -190,78 +190,78 @@ typedef struct interposer_comms_client_event {
 
 /* ---- Lifecycle ---------------------------------------------------------- */
 
-INTERPOSER_COMMS_API void         INTERPOSER_COMMS_CALL interposer_comms_client_config_init(interposer_comms_client_config* config);
-INTERPOSER_COMMS_API interposer_comms_result INTERPOSER_COMMS_CALL interposer_comms_client_create(const interposer_comms_client_config* config, interposer_comms_client** out_client);
-INTERPOSER_COMMS_API void         INTERPOSER_COMMS_CALL interposer_comms_client_destroy(interposer_comms_client* client);
+INTERPOSER_API void         INTERPOSER_CALL interposer_comms_client_config_init(interposer_comms_client_config* config);
+INTERPOSER_API interposer_comms_result INTERPOSER_CALL interposer_comms_client_create(const interposer_comms_client_config* config, interposer_comms_client** out_client);
+INTERPOSER_API void         INTERPOSER_CALL interposer_comms_client_destroy(interposer_comms_client* client);
 
-INTERPOSER_COMMS_API void         INTERPOSER_COMMS_CALL interposer_comms_connect_info_init(interposer_comms_connect_info* info);
+INTERPOSER_API void         INTERPOSER_CALL interposer_comms_connect_info_init(interposer_comms_connect_info* info);
 /* Asynchronous; watch for STATE_CHANGED events. */
-INTERPOSER_COMMS_API interposer_comms_result INTERPOSER_COMMS_CALL interposer_comms_client_connect(interposer_comms_client* client, const interposer_comms_connect_info* info);
-INTERPOSER_COMMS_API interposer_comms_result INTERPOSER_COMMS_CALL interposer_comms_client_disconnect(interposer_comms_client* client);
-INTERPOSER_COMMS_API interposer_comms_connection_state INTERPOSER_COMMS_CALL interposer_comms_client_get_state(interposer_comms_client* client);
-INTERPOSER_COMMS_API interposer_comms_player_id INTERPOSER_COMMS_CALL interposer_comms_client_get_local_player(interposer_comms_client* client);
+INTERPOSER_API interposer_comms_result INTERPOSER_CALL interposer_comms_client_connect(interposer_comms_client* client, const interposer_comms_connect_info* info);
+INTERPOSER_API interposer_comms_result INTERPOSER_CALL interposer_comms_client_disconnect(interposer_comms_client* client);
+INTERPOSER_API interposer_comms_connection_state INTERPOSER_CALL interposer_comms_client_get_state(interposer_comms_client* client);
+INTERPOSER_API interposer_comms_player_id INTERPOSER_CALL interposer_comms_client_get_local_player(interposer_comms_client* client);
 
 /* Returns INTERPOSER_COMMS_OK and fills *out_event if one was pending, INTERPOSER_COMMS_ERR_NOT_FOUND if the queue is empty. */
-INTERPOSER_COMMS_API interposer_comms_result INTERPOSER_COMMS_CALL interposer_comms_client_poll_event(interposer_comms_client* client, interposer_comms_client_event* out_event);
+INTERPOSER_API interposer_comms_result INTERPOSER_CALL interposer_comms_client_poll_event(interposer_comms_client* client, interposer_comms_client_event* out_event);
 
 /* ---- Discovery ---------------------------------------------------------- */
 
 /* Broadcasts a LAN probe; results arrive as DISCOVERY_RESULT events. port 0 = default. */
-INTERPOSER_COMMS_API interposer_comms_result INTERPOSER_COMMS_CALL interposer_comms_client_discover(interposer_comms_client* client, uint16_t discovery_port, uint32_t timeout_ms);
-INTERPOSER_COMMS_API interposer_comms_result INTERPOSER_COMMS_CALL interposer_comms_client_get_discovered_servers(interposer_comms_client* client, interposer_comms_discovered_server* out_servers,
+INTERPOSER_API interposer_comms_result INTERPOSER_CALL interposer_comms_client_discover(interposer_comms_client* client, uint16_t discovery_port, uint32_t timeout_ms);
+INTERPOSER_API interposer_comms_result INTERPOSER_CALL interposer_comms_client_get_discovered_servers(interposer_comms_client* client, interposer_comms_discovered_server* out_servers,
                                                                       uint32_t capacity, uint32_t* out_count);
 
 /* ---- Audio devices ------------------------------------------------------ */
 
-INTERPOSER_COMMS_API interposer_comms_result INTERPOSER_COMMS_CALL interposer_comms_list_audio_devices(interposer_comms_device_type type, interposer_comms_audio_device* out_devices,
+INTERPOSER_API interposer_comms_result INTERPOSER_CALL interposer_comms_list_audio_devices(interposer_comms_device_type type, interposer_comms_audio_device* out_devices,
                                                            uint32_t capacity, uint32_t* out_count);
-INTERPOSER_COMMS_API interposer_comms_result INTERPOSER_COMMS_CALL interposer_comms_client_set_capture_device(interposer_comms_client* client, const char* device_id);
-INTERPOSER_COMMS_API interposer_comms_result INTERPOSER_COMMS_CALL interposer_comms_client_set_playback_device(interposer_comms_client* client, const char* device_id);
+INTERPOSER_API interposer_comms_result INTERPOSER_CALL interposer_comms_client_set_capture_device(interposer_comms_client* client, const char* device_id);
+INTERPOSER_API interposer_comms_result INTERPOSER_CALL interposer_comms_client_set_playback_device(interposer_comms_client* client, const char* device_id);
 
 /* ---- Transmit: mode, push-to-talk, voice activation --------------------- */
 
-INTERPOSER_COMMS_API interposer_comms_result INTERPOSER_COMMS_CALL interposer_comms_client_set_transmit_mode(interposer_comms_client* client, interposer_comms_transmit_mode mode);
-INTERPOSER_COMMS_API interposer_comms_transmit_mode INTERPOSER_COMMS_CALL interposer_comms_client_get_transmit_mode(interposer_comms_client* client);
+INTERPOSER_API interposer_comms_result INTERPOSER_CALL interposer_comms_client_set_transmit_mode(interposer_comms_client* client, interposer_comms_transmit_mode mode);
+INTERPOSER_API interposer_comms_transmit_mode INTERPOSER_CALL interposer_comms_client_get_transmit_mode(interposer_comms_client* client);
 
 /* Default targets for VOICE_ACTIVITY/CONTINUOUS and for PTT slots without their own targets. */
-INTERPOSER_COMMS_API interposer_comms_result INTERPOSER_COMMS_CALL interposer_comms_client_set_talk_targets(interposer_comms_client* client, const interposer_comms_talk_target* targets,
+INTERPOSER_API interposer_comms_result INTERPOSER_CALL interposer_comms_client_set_talk_targets(interposer_comms_client* client, const interposer_comms_talk_target* targets,
                                                                 uint32_t count);
 /* Bind a PTT slot to its own targets (count 0 = use default talk targets). */
-INTERPOSER_COMMS_API interposer_comms_result INTERPOSER_COMMS_CALL interposer_comms_client_set_ptt_targets(interposer_comms_client* client, uint32_t slot,
+INTERPOSER_API interposer_comms_result INTERPOSER_CALL interposer_comms_client_set_ptt_targets(interposer_comms_client* client, uint32_t slot,
                                                                const interposer_comms_talk_target* targets, uint32_t count);
 /* Call on key down (pressed = 1) and key up (pressed = 0). Holding several slots sends to the union. */
-INTERPOSER_COMMS_API interposer_comms_result INTERPOSER_COMMS_CALL interposer_comms_client_set_push_to_talk(interposer_comms_client* client, uint32_t slot, int pressed);
-INTERPOSER_COMMS_API interposer_comms_result INTERPOSER_COMMS_CALL interposer_comms_client_set_ptt_release_delay(interposer_comms_client* client, uint32_t delay_ms);
+INTERPOSER_API interposer_comms_result INTERPOSER_CALL interposer_comms_client_set_push_to_talk(interposer_comms_client* client, uint32_t slot, int pressed);
+INTERPOSER_API interposer_comms_result INTERPOSER_CALL interposer_comms_client_set_ptt_release_delay(interposer_comms_client* client, uint32_t delay_ms);
 
-INTERPOSER_COMMS_API void         INTERPOSER_COMMS_CALL interposer_comms_voice_activation_settings_init(interposer_comms_voice_activation_settings* settings);
-INTERPOSER_COMMS_API interposer_comms_result INTERPOSER_COMMS_CALL interposer_comms_client_set_voice_activation(interposer_comms_client* client,
+INTERPOSER_API void         INTERPOSER_CALL interposer_comms_voice_activation_settings_init(interposer_comms_voice_activation_settings* settings);
+INTERPOSER_API interposer_comms_result INTERPOSER_CALL interposer_comms_client_set_voice_activation(interposer_comms_client* client,
                                                                     const interposer_comms_voice_activation_settings* settings);
-INTERPOSER_COMMS_API interposer_comms_result INTERPOSER_COMMS_CALL interposer_comms_client_get_voice_activation(interposer_comms_client* client,
+INTERPOSER_API interposer_comms_result INTERPOSER_CALL interposer_comms_client_get_voice_activation(interposer_comms_client* client,
                                                                     interposer_comms_voice_activation_settings* out_settings);
 
-INTERPOSER_COMMS_API interposer_comms_result INTERPOSER_COMMS_CALL interposer_comms_client_get_transmit_state(interposer_comms_client* client, interposer_comms_transmit_state* out_state);
+INTERPOSER_API interposer_comms_result INTERPOSER_CALL interposer_comms_client_get_transmit_state(interposer_comms_client* client, interposer_comms_transmit_state* out_state);
 
-INTERPOSER_COMMS_API interposer_comms_result INTERPOSER_COMMS_CALL interposer_comms_client_set_self_muted(interposer_comms_client* client, int muted);
-INTERPOSER_COMMS_API interposer_comms_result INTERPOSER_COMMS_CALL interposer_comms_client_set_self_deafened(interposer_comms_client* client, int deafened);
-INTERPOSER_COMMS_API interposer_comms_result INTERPOSER_COMMS_CALL interposer_comms_client_set_input_gain(interposer_comms_client* client, float gain);
-INTERPOSER_COMMS_API interposer_comms_result INTERPOSER_COMMS_CALL interposer_comms_client_set_master_volume(interposer_comms_client* client, float volume);
+INTERPOSER_API interposer_comms_result INTERPOSER_CALL interposer_comms_client_set_self_muted(interposer_comms_client* client, int muted);
+INTERPOSER_API interposer_comms_result INTERPOSER_CALL interposer_comms_client_set_self_deafened(interposer_comms_client* client, int deafened);
+INTERPOSER_API interposer_comms_result INTERPOSER_CALL interposer_comms_client_set_input_gain(interposer_comms_client* client, float gain);
+INTERPOSER_API interposer_comms_result INTERPOSER_CALL interposer_comms_client_set_master_volume(interposer_comms_client* client, float volume);
 
 /* ---- Other players & talk indicators ------------------------------------ */
 
-INTERPOSER_COMMS_API interposer_comms_result INTERPOSER_COMMS_CALL interposer_comms_client_set_player_muted(interposer_comms_client* client, interposer_comms_player_id player, int muted);
-INTERPOSER_COMMS_API interposer_comms_result INTERPOSER_COMMS_CALL interposer_comms_client_set_player_volume(interposer_comms_client* client, interposer_comms_player_id player, float volume);
-INTERPOSER_COMMS_API interposer_comms_result INTERPOSER_COMMS_CALL interposer_comms_client_get_player_info(interposer_comms_client* client, interposer_comms_player_id player,
+INTERPOSER_API interposer_comms_result INTERPOSER_CALL interposer_comms_client_set_player_muted(interposer_comms_client* client, interposer_comms_player_id player, int muted);
+INTERPOSER_API interposer_comms_result INTERPOSER_CALL interposer_comms_client_set_player_volume(interposer_comms_client* client, interposer_comms_player_id player, float volume);
+INTERPOSER_API interposer_comms_result INTERPOSER_CALL interposer_comms_client_get_player_info(interposer_comms_client* client, interposer_comms_player_id player,
                                                                interposer_comms_client_player_info* out_info);
-INTERPOSER_COMMS_API interposer_comms_result INTERPOSER_COMMS_CALL interposer_comms_client_list_players(interposer_comms_client* client, interposer_comms_player_id* out_ids,
+INTERPOSER_API interposer_comms_result INTERPOSER_CALL interposer_comms_client_list_players(interposer_comms_client* client, interposer_comms_player_id* out_ids,
                                                             uint32_t capacity, uint32_t* out_count);
 /* Maps a game's own player id to the voice id (e.g. to draw a speaker icon over a player model). */
-INTERPOSER_COMMS_API interposer_comms_result INTERPOSER_COMMS_CALL interposer_comms_client_find_player(interposer_comms_client* client, uint64_t game_player_id,
+INTERPOSER_API interposer_comms_result INTERPOSER_CALL interposer_comms_client_find_player(interposer_comms_client* client, uint64_t game_player_id,
                                                            interposer_comms_player_id* out_player);
 
 /* Snapshot of everyone currently being heard. Cheap; safe to call every frame. */
-INTERPOSER_COMMS_API interposer_comms_result INTERPOSER_COMMS_CALL interposer_comms_client_get_active_speakers(interposer_comms_client* client, interposer_comms_speaker_info* out_speakers,
+INTERPOSER_API interposer_comms_result INTERPOSER_CALL interposer_comms_client_get_active_speakers(interposer_comms_client* client, interposer_comms_speaker_info* out_speakers,
                                                                    uint32_t capacity, uint32_t* out_count);
-INTERPOSER_COMMS_API int          INTERPOSER_COMMS_CALL interposer_comms_client_is_player_speaking(interposer_comms_client* client, interposer_comms_player_id player);
+INTERPOSER_API int          INTERPOSER_CALL interposer_comms_client_is_player_speaking(interposer_comms_client* client, interposer_comms_player_id player);
 
 /* ---- Groups ------------------------------------------------------------- */
 
@@ -270,11 +270,11 @@ INTERPOSER_COMMS_API int          INTERPOSER_COMMS_CALL interposer_comms_client_
  * and PRIVATE groups the local player belongs to or has been invited to. Member lists only contain
  * connected players. GROUP_ADDED/REMOVED fire as groups become visible/hidden.
  */
-INTERPOSER_COMMS_API interposer_comms_result INTERPOSER_COMMS_CALL interposer_comms_client_list_groups(interposer_comms_client* client, interposer_comms_group_id* out_ids,
+INTERPOSER_API interposer_comms_result INTERPOSER_CALL interposer_comms_client_list_groups(interposer_comms_client* client, interposer_comms_group_id* out_ids,
                                                            uint32_t capacity, uint32_t* out_count);
-INTERPOSER_COMMS_API interposer_comms_result INTERPOSER_COMMS_CALL interposer_comms_client_get_group_info(interposer_comms_client* client, interposer_comms_group_id group,
+INTERPOSER_API interposer_comms_result INTERPOSER_CALL interposer_comms_client_get_group_info(interposer_comms_client* client, interposer_comms_group_id group,
                                                               interposer_comms_client_group_info* out_info);
-INTERPOSER_COMMS_API interposer_comms_result INTERPOSER_COMMS_CALL interposer_comms_client_list_group_members(interposer_comms_client* client, interposer_comms_group_id group,
+INTERPOSER_API interposer_comms_result INTERPOSER_CALL interposer_comms_client_list_group_members(interposer_comms_client* client, interposer_comms_group_id group,
                                                                   interposer_comms_player_id* out_ids, uint32_t capacity,
                                                                   uint32_t* out_count);
 /*
@@ -283,15 +283,15 @@ INTERPOSER_COMMS_API interposer_comms_result INTERPOSER_COMMS_CALL interposer_co
  */
 
 /* Name is 1-63 bytes. The creator becomes owner; the new group arrives as GROUP_ADDED with owner = local player. */
-INTERPOSER_COMMS_API interposer_comms_result INTERPOSER_COMMS_CALL interposer_comms_client_create_private_group(interposer_comms_client* client, const char* name, const char* password);
+INTERPOSER_API interposer_comms_result INTERPOSER_CALL interposer_comms_client_create_private_group(interposer_comms_client* client, const char* name, const char* password);
 /* CHANNEL: free to join (password if set). PRIVATE: requires an invite or the password. SERVER: never. */
-INTERPOSER_COMMS_API interposer_comms_result INTERPOSER_COMMS_CALL interposer_comms_client_join_group(interposer_comms_client* client, interposer_comms_group_id group, const char* password);
+INTERPOSER_API interposer_comms_result INTERPOSER_CALL interposer_comms_client_join_group(interposer_comms_client* client, interposer_comms_group_id group, const char* password);
 /* SERVER groups only if the server allows it. Ownership of a PRIVATE group passes on; empty PRIVATE groups are destroyed. */
-INTERPOSER_COMMS_API interposer_comms_result INTERPOSER_COMMS_CALL interposer_comms_client_leave_group(interposer_comms_client* client, interposer_comms_group_id group);
+INTERPOSER_API interposer_comms_result INTERPOSER_CALL interposer_comms_client_leave_group(interposer_comms_client* client, interposer_comms_group_id group);
 /* Members may invite to PRIVATE and CHANNEL groups; an invite bypasses the password. */
-INTERPOSER_COMMS_API interposer_comms_result INTERPOSER_COMMS_CALL interposer_comms_client_invite_to_group(interposer_comms_client* client, interposer_comms_group_id group, interposer_comms_player_id player);
+INTERPOSER_API interposer_comms_result INTERPOSER_CALL interposer_comms_client_invite_to_group(interposer_comms_client* client, interposer_comms_group_id group, interposer_comms_player_id player);
 /* Stop hearing a group without leaving it (the server stops forwarding it, saving bandwidth). */
-INTERPOSER_COMMS_API interposer_comms_result INTERPOSER_COMMS_CALL interposer_comms_client_set_group_listening(interposer_comms_client* client, interposer_comms_group_id group, int listening);
+INTERPOSER_API interposer_comms_result INTERPOSER_CALL interposer_comms_client_set_group_listening(interposer_comms_client* client, interposer_comms_group_id group, int listening);
 
 /* ---- Positions ---------------------------------------------------------- */
 
@@ -300,7 +300,7 @@ INTERPOSER_COMMS_API interposer_comms_result INTERPOSER_COMMS_CALL interposer_co
  * this player INTERPOSER_COMMS_POSITION_CLIENT authority (legacy games where the server has no position data);
  * otherwise ignored. Server-reported positions are recommended to prevent abuse.
  */
-INTERPOSER_COMMS_API interposer_comms_result INTERPOSER_COMMS_CALL interposer_comms_client_report_position(interposer_comms_client* client, interposer_comms_zone_id zone, interposer_comms_vec3 position,
+INTERPOSER_API interposer_comms_result INTERPOSER_CALL interposer_comms_client_report_position(interposer_comms_client* client, interposer_comms_zone_id zone, interposer_comms_vec3 position,
                                                                const interposer_comms_vec3* forward);
 
 /*
@@ -315,10 +315,10 @@ INTERPOSER_COMMS_API interposer_comms_result INTERPOSER_COMMS_CALL interposer_co
  * `right` is the listener's right vector in world space (e.g. Unity transform.right, Unreal GetRightVector);
  * passing it instead of an up vector avoids left/right-handed ambiguity. Vectors need not be normalized.
  */
-INTERPOSER_COMMS_API interposer_comms_result INTERPOSER_COMMS_CALL interposer_comms_client_set_listener(interposer_comms_client* client, interposer_comms_vec3 position, interposer_comms_vec3 forward,
+INTERPOSER_API interposer_comms_result INTERPOSER_CALL interposer_comms_client_set_listener(interposer_comms_client* client, interposer_comms_vec3 position, interposer_comms_vec3 forward,
                                                             interposer_comms_vec3 right);
-INTERPOSER_COMMS_API interposer_comms_result INTERPOSER_COMMS_CALL interposer_comms_client_clear_listener(interposer_comms_client* client);
-INTERPOSER_COMMS_API interposer_comms_result INTERPOSER_COMMS_CALL interposer_comms_client_set_speaker_position_override(interposer_comms_client* client, interposer_comms_player_id player,
+INTERPOSER_API interposer_comms_result INTERPOSER_CALL interposer_comms_client_clear_listener(interposer_comms_client* client);
+INTERPOSER_API interposer_comms_result INTERPOSER_CALL interposer_comms_client_set_speaker_position_override(interposer_comms_client* client, interposer_comms_player_id player,
                                                                              const interposer_comms_vec3* position /* NULL = clear */);
 
 /* ---- Remote admin ------------------------------------------------------- */
@@ -328,27 +328,27 @@ INTERPOSER_COMMS_API interposer_comms_result INTERPOSER_COMMS_CALL interposer_co
  * "kick 12 spamming"). Requires connecting with a valid admin_key. Asynchronous: the result arrives as
  * an ADMIN_RESPONSE event carrying *out_request_id (may be NULL).
  */
-INTERPOSER_COMMS_API interposer_comms_result INTERPOSER_COMMS_CALL interposer_comms_client_send_admin_command(interposer_comms_client* client, const char* command,
+INTERPOSER_API interposer_comms_result INTERPOSER_CALL interposer_comms_client_send_admin_command(interposer_comms_client* client, const char* command,
                                                                   uint32_t* out_request_id);
 /* Full output of a recent admin response (the last 16 are kept). Fails with BUFFER_TOO_SMALL but still
  * writes a truncated, NUL-terminated copy if text_capacity is too small; *out_length (may be NULL)
  * receives the full length excluding the terminator. */
-INTERPOSER_COMMS_API interposer_comms_result INTERPOSER_COMMS_CALL interposer_comms_client_get_admin_response(interposer_comms_client* client, uint32_t request_id,
+INTERPOSER_API interposer_comms_result INTERPOSER_CALL interposer_comms_client_get_admin_response(interposer_comms_client* client, uint32_t request_id,
                                                                   char* out_text, size_t text_capacity,
                                                                   size_t* out_length);
-INTERPOSER_COMMS_API int          INTERPOSER_COMMS_CALL interposer_comms_client_is_admin(interposer_comms_client* client);
+INTERPOSER_API int          INTERPOSER_CALL interposer_comms_client_is_admin(interposer_comms_client* client);
 
 /* ---- External audio ----------------------------------------------------- */
 
 /* INTERPOSER_COMMS_CAPTURE_EXTERNAL: mono float PCM at sample_rate (resampled internally to 48 kHz). */
-INTERPOSER_COMMS_API interposer_comms_result INTERPOSER_COMMS_CALL interposer_comms_client_push_capture(interposer_comms_client* client, const float* samples,
+INTERPOSER_API interposer_comms_result INTERPOSER_CALL interposer_comms_client_push_capture(interposer_comms_client* client, const float* samples,
                                                             uint32_t frame_count, uint32_t sample_rate);
 /*
  * INTERPOSER_COMMS_PLAYBACK_EXTERNAL: pulls decoded mono 48 kHz float PCM for one speaker, already scaled by
  * per-player volume/mute (but NOT spatialized - feed it to an engine 3D source). Missing data is
  * filled with silence (PLC). *out_frames receives frames written.
  */
-INTERPOSER_COMMS_API interposer_comms_result INTERPOSER_COMMS_CALL interposer_comms_client_read_speaker_audio(interposer_comms_client* client, interposer_comms_player_id player,
+INTERPOSER_API interposer_comms_result INTERPOSER_CALL interposer_comms_client_read_speaker_audio(interposer_comms_client* client, interposer_comms_player_id player,
                                                                   float* out_samples, uint32_t frame_capacity,
                                                                   uint32_t* out_frames);
 

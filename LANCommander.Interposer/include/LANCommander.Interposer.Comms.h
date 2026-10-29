@@ -1,7 +1,14 @@
 /*
- * LANCommander Comms - common definitions.
+ * LANCommander.Interposer.Comms.h -- voice chat, common definitions.
  *
- * Plain C ABI. Include <comms/server.h> and/or <comms/client.h>.
+ * Proximity and group voice over Opus, built into the Interposer and exported
+ * beside its Interposer* API: the same DLL (or .so) and the same import
+ * library. Plain C ABI. Include LANCommander.Interposer.Comms.Server.h and/or
+ * LANCommander.Interposer.Comms.Client.h.
+ *
+ * As with the rest of the Interposer's API, a second copy loaded into a
+ * process that already has one forwards every function to the first, so a
+ * handle created through either copy is valid through both.
  *
  * Kept C89-compatible (no // comments, no stdbool, declarations-first friendly) so it can be
  * consumed by mod SDKs of older games built with old toolchains. Available as x86 and x64.
@@ -22,20 +29,7 @@
 #  include <stdint.h>
 #endif
 
-#if defined(_WIN32)
-#  if defined(INTERPOSER_COMMS_STATIC)
-#    define INTERPOSER_COMMS_API
-#  elif defined(INTERPOSER_COMMS_BUILDING)
-#    define INTERPOSER_COMMS_API __declspec(dllexport)
-#  else
-#    define INTERPOSER_COMMS_API __declspec(dllimport)
-#  endif
-   /* Explicit so 32-bit consumers built with /Gz or /Gr still call correctly. */
-#  define INTERPOSER_COMMS_CALL __cdecl
-#else
-#  define INTERPOSER_COMMS_API __attribute__((visibility("default")))
-#  define INTERPOSER_COMMS_CALL
-#endif
+#include "LANCommander.Interposer.Export.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -126,14 +120,20 @@ typedef enum interposer_comms_log_level {
 } interposer_comms_log_level;
 
 /* May be invoked from any library thread; must be thread-safe and must not call back into the library. */
-typedef void (INTERPOSER_COMMS_CALL *interposer_comms_log_fn)(interposer_comms_log_level level, const char* message, void* user_data);
+typedef void (INTERPOSER_CALL *interposer_comms_log_fn)(interposer_comms_log_level level, const char* message, void* user_data);
 
-INTERPOSER_COMMS_API uint32_t     INTERPOSER_COMMS_CALL interposer_comms_get_api_version(void);
-INTERPOSER_COMMS_API const char*  INTERPOSER_COMMS_CALL interposer_comms_get_version_string(void);
-INTERPOSER_COMMS_API const char*  INTERPOSER_COMMS_CALL interposer_comms_result_to_string(interposer_comms_result result);
+INTERPOSER_API uint32_t     INTERPOSER_CALL interposer_comms_get_api_version(void);
+INTERPOSER_API const char*  INTERPOSER_CALL interposer_comms_get_version_string(void);
+INTERPOSER_API const char*  INTERPOSER_CALL interposer_comms_result_to_string(interposer_comms_result result);
 
 /* Global, process-wide. Pass NULL to disable. */
-INTERPOSER_COMMS_API void         INTERPOSER_COMMS_CALL interposer_comms_set_log_handler(interposer_comms_log_fn fn, interposer_comms_log_level min_level, void* user_data);
+INTERPOSER_API void         INTERPOSER_CALL interposer_comms_set_log_handler(interposer_comms_log_fn fn, interposer_comms_log_level min_level, void* user_data);
+
+/* Also write the library's messages at min_level and above to the Interposer's
+ * session log (.interposer\Logs\<timestamp>.log), as [VOICE], [VOICE WARNING]
+ * and [VOICE ERROR] lines. Off (INTERPOSER_COMMS_LOG_OFF) until a patch turns it
+ * on; independent of any handler set above. Process-wide. */
+INTERPOSER_API void         INTERPOSER_CALL interposer_comms_set_session_logging(interposer_comms_log_level min_level);
 
 #ifdef __cplusplus
 }

@@ -1,6 +1,6 @@
 #pragma once
 
-#include <comms/comms.h>
+#include "LANCommander.Interposer.Comms.h"
 
 #include <cmath>
 #include <cstdint>

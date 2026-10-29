@@ -22,6 +22,10 @@
  * that crosses this boundary, which is what makes it safe to call from a
  * module built with a different compiler or C runtime.
  *
+ * Voice chat -- the interposer_comms_* API -- has headers of its own:
+ * LANCommander.Interposer.Comms.Client.h and LANCommander.Interposer.Comms.Server.h.
+ * The same import library carries both.
+ *
  * If a second copy of the Interposer is loaded into a process that already
  * has one -- a patch that links it, in a game LANCommander has also deployed
  * it to -- the second copy installs no hooks of its own and forwards every
@@ -49,20 +53,7 @@ typedef int32_t  LONG;
 #  endif
 #endif
 
-#ifdef _WIN32
-#  ifdef INTERPOSER_BUILDING_DLL
-#    define INTERPOSER_API __declspec(dllexport)
-#  else
-#    define INTERPOSER_API __declspec(dllimport)
-#  endif
-#  define INTERPOSER_CALL    __cdecl
-   /* Callbacks the Interposer calls that predate INTERPOSER_CALL: WINAPI. */
-#  define INTERPOSER_STDCALL __stdcall
-#else
-#  define INTERPOSER_API __attribute__((visibility("default")))
-#  define INTERPOSER_CALL
-#  define INTERPOSER_STDCALL
-#endif
+#include "LANCommander.Interposer.Export.h"
 
 #ifdef __cplusplus
 extern "C" {

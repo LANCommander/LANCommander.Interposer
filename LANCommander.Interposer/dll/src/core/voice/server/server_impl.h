@@ -1,11 +1,11 @@
 #pragma once
 
-#include <comms/server.h>
+#include "LANCommander.Interposer.Comms.Server.h"
 
-#include "common/protocol.h"
-#include "common/rate_limit.h"
-#include "common/util.h"
-#include "server/spatial_grid.h"
+#include "voice/common/protocol.h"
+#include "voice/common/rate_limit.h"
+#include "voice/common/util.h"
+#include "voice/server/spatial_grid.h"
 
 #include <enet/enet.h>
 

@@ -1,6 +1,6 @@
 #pragma once
 
-#include "common/protocol.h"
+#include "voice/common/protocol.h"
 
 #include <enet/enet.h>
 

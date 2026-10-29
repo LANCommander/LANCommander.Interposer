@@ -855,6 +855,11 @@ void LogRelayDiag(const wchar_t* verb, const wchar_t* info, const wchar_t* detai
     WriteLogLine(verb, info, detail);
 }
 
+void LogVoice(const wchar_t* verb, const wchar_t* message)
+{
+    WriteLogLine(verb, message, nullptr);
+}
+
 void LogOsVersion(const wchar_t* verb, const wchar_t* info, const wchar_t* detail)
 {
     if (!g_logOsVersion)

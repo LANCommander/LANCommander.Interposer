@@ -172,6 +172,16 @@ Gated by `Logging.Relay`. Like the DirectInput and audio verbs these are log-onl
 | `[IPX]` | An emulated IPX socket was created, or a request the emulation cannot serve was refused (SPX, an overlapped receive). |
 | `[RELAY SEND]` / `[RELAY RECV]` | One datagram relayed out or delivered in, with its size and ports. `Trace` level only. |
 
+### Voice Operations
+
+The voice library's own messages, from a [game patch](/Interposer/GamePatches) that uses voice chat. There is no `Logging` key for them: voice only runs when a patch drives it, so the patch turns these lines on itself with `interposer_comms_set_session_logging(level)`, which writes every message at `level` and above. They are off until it does. A patch that wants the messages in-process registers `interposer_comms_set_log_handler` instead; the two are independent.
+
+| Verb | Meaning |
+|---|---|
+| `[VOICE]` | Informational: a voice server listening, a client connected, a player joining or leaving, limits changed. A patch that asks for `INTERPOSER_COMMS_LOG_DEBUG` or `_TRACE` also gets the library's debug and trace messages under this verb. |
+| `[VOICE WARNING]` | Something the library recovered from: an audio device that would not open, a player kicked for flooding. |
+| `[VOICE ERROR]` | A failure: a voice server that could not bind its port, a codec that could not be created. |
+
 ### Audio Device Operations
 
 | Verb | Meaning |

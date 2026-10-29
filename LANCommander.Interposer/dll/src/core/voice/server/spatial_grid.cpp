@@ -1,4 +1,4 @@
-#include "server/spatial_grid.h"
+#include "voice/server/spatial_grid.h"
 
 #include <algorithm>
 
