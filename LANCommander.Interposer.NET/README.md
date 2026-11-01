@@ -37,6 +37,22 @@ The DLL is located automatically next to the application (`interposer.dll` or `L
 interposer.Start(startInfo, dllPath: @"C:\Tools\LANCommander.Interposer.dll");
 ```
 
+The package copies both architectures' DLL and injector into `x86\` and `x64\` in your output. To put them somewhere else, set `InterposerNativeOutputPath` in your project and point `InterposerService.LibraryDirectory` at the same place before starting anything:
+
+```xml
+<PropertyGroup>
+  <InterposerNativeOutputPath>Libraries\Interposer\</InterposerNativeOutputPath>
+  <!-- Optional: leave out the copy of your own architecture's DLL beside the application -->
+  <InterposerCopyApplicationDll>false</InterposerCopyApplicationDll>
+</PropertyGroup>
+```
+
+```csharp
+InterposerService.LibraryDirectory = Path.Combine(AppContext.BaseDirectory, "Libraries", "Interposer");
+```
+
+A library project whose host deploys the binaries itself can set `InterposerCopyNativeBinaries` to `false`, so its own copies do not flow into the host's output.
+
 ## Plugin API (in-process)
 
 These methods are only callable from within a process that has the Interposer DLL loaded.

@@ -1,8 +1,20 @@
 <Project xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+  <!--
+    Consumer switches, all optional:
+
+    InterposerNativeOutputPath    Output subdirectory that x86\ and x64\ go under, e.g.
+                                  "Libraries\Interposer\". Defaults to the output root. A host that
+                                  moves them sets InterposerService.LibraryDirectory to match.
+    InterposerCopyApplicationDll  false leaves out the DLL beside the application (see below).
+    InterposerCopyNativeBinaries  false copies no native binaries at all, for a project whose host
+                                  deploys them itself.
+  -->
   <PropertyGroup>
     <_InterposerRuntimes>$(MSBuildThisFileDirectory)..\runtimes\</_InterposerRuntimes>
     <_InterposerNative>$(MSBuildThisFileDirectory)..\native\</_InterposerNative>
-    <_InterposerForWindows Condition="'$(RuntimeIdentifier)' == '' Or $(RuntimeIdentifier.StartsWith('win'))">true</_InterposerForWindows>
+    <_InterposerForWindows Condition="('$(RuntimeIdentifier)' == '' Or $(RuntimeIdentifier.StartsWith('win'))) And '$(InterposerCopyNativeBinaries)' != 'false'">true</_InterposerForWindows>
+    <_InterposerNativeOutputPath>$(InterposerNativeOutputPath)</_InterposerNativeOutputPath>
+    <_InterposerNativeOutputPath Condition="'$(_InterposerNativeOutputPath)' != '' And !HasTrailingSlash('$(_InterposerNativeOutputPath)')">$(_InterposerNativeOutputPath)\</_InterposerNativeOutputPath>
   </PropertyGroup>
 
   <!--
@@ -17,32 +29,32 @@
           Condition="Exists('$(_InterposerNative)x86\LANCommander.Interposer.dll')"
           CopyToOutputDirectory="PreserveNewest"
           ExcludeFromSingleFile="true"
-          Link="x86\LANCommander.Interposer.dll" />
+          Link="$(_InterposerNativeOutputPath)x86\LANCommander.Interposer.dll" />
     <None Include="$(_InterposerNative)x86\LANCommander.Interposer.Injector.exe"
           Condition="Exists('$(_InterposerNative)x86\LANCommander.Interposer.Injector.exe')"
           CopyToOutputDirectory="PreserveNewest"
           ExcludeFromSingleFile="true"
-          Link="x86\LANCommander.Interposer.Injector.exe" />
+          Link="$(_InterposerNativeOutputPath)x86\LANCommander.Interposer.Injector.exe" />
     <None Include="$(_InterposerNative)x64\LANCommander.Interposer.dll"
           Condition="Exists('$(_InterposerNative)x64\LANCommander.Interposer.dll')"
           CopyToOutputDirectory="PreserveNewest"
           ExcludeFromSingleFile="true"
-          Link="x64\LANCommander.Interposer.dll" />
+          Link="$(_InterposerNativeOutputPath)x64\LANCommander.Interposer.dll" />
     <None Include="$(_InterposerNative)x64\LANCommander.Interposer.Injector.exe"
           Condition="Exists('$(_InterposerNative)x64\LANCommander.Interposer.Injector.exe')"
           CopyToOutputDirectory="PreserveNewest"
           ExcludeFromSingleFile="true"
-          Link="x64\LANCommander.Interposer.Injector.exe" />
+          Link="$(_InterposerNativeOutputPath)x64\LANCommander.Interposer.Injector.exe" />
   </ItemGroup>
 
   <!-- The DLL matching the consumer's platform beside the application, as before, for hosts that pass its path themselves. -->
-  <ItemGroup Condition="'$(_InterposerForWindows)' == 'true' And ('$(PlatformTarget)' == 'x86' Or '$(RuntimeIdentifier)' == 'win-x86')">
+  <ItemGroup Condition="'$(_InterposerForWindows)' == 'true' And '$(InterposerCopyApplicationDll)' != 'false' And ('$(PlatformTarget)' == 'x86' Or '$(RuntimeIdentifier)' == 'win-x86')">
     <None Include="$(_InterposerRuntimes)win-x86\native\LANCommander.Interposer.dll"
           Condition="Exists('$(_InterposerRuntimes)win-x86\native\LANCommander.Interposer.dll')"
           CopyToOutputDirectory="PreserveNewest"
           Link="LANCommander.Interposer.dll" />
   </ItemGroup>
-  <ItemGroup Condition="'$(_InterposerForWindows)' == 'true' And '$(PlatformTarget)' != 'x86' And '$(RuntimeIdentifier)' != 'win-x86'">
+  <ItemGroup Condition="'$(_InterposerForWindows)' == 'true' And '$(InterposerCopyApplicationDll)' != 'false' And '$(PlatformTarget)' != 'x86' And '$(RuntimeIdentifier)' != 'win-x86'">
     <None Include="$(_InterposerRuntimes)win-x64\native\LANCommander.Interposer.dll"
           Condition="Exists('$(_InterposerRuntimes)win-x64\native\LANCommander.Interposer.dll')"
           CopyToOutputDirectory="PreserveNewest"

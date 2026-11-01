@@ -1188,6 +1188,29 @@ namespace LANCommander.Interposer
 
         private const string InjectorName = "LANCommander.Interposer.Injector.exe";
 
+        /// <summary>
+        /// Optional directory holding the native binaries under <c>x86\</c> and <c>x64\</c>, for a
+        /// host that keeps them somewhere other than beside itself -- one that sets
+        /// <c>InterposerNativeOutputPath</c> in its project, for example. When set, it is searched
+        /// before the application's own directory. Applies to every instance in the process.
+        /// </summary>
+        public static string? LibraryDirectory { get; set; }
+
+        // The plugin API above P/Invokes the DLL into this process; without this, a host whose
+        // only copies are under LibraryDirectory could inject games but not call those.
+        static InterposerService()
+        {
+            NativeLibrary.SetDllImportResolver(typeof(InterposerService).Assembly, (name, _, _) =>
+            {
+                if (name != DllName || string.IsNullOrWhiteSpace(LibraryDirectory))
+                    return IntPtr.Zero;
+
+                var path = Path.Combine(Path.GetFullPath(LibraryDirectory), FolderName(CurrentArchitecture), DllName);
+
+                return File.Exists(path) && NativeLibrary.TryLoad(path, out var handle) ? handle : IntPtr.Zero;
+            });
+        }
+
         private enum Architecture { X86, X64 }
 
         /// <summary>The DLL to load into a target, and the injector to load it with when the target's architecture is not ours.</summary>
@@ -1263,6 +1286,9 @@ namespace LANCommander.Interposer
         private static List<string> ArchitectureCandidates(Architecture architecture, string fileName)
         {
             var candidates = new List<string>();
+
+            if (!string.IsNullOrWhiteSpace(LibraryDirectory))
+                candidates.Add(Path.Combine(Path.GetFullPath(LibraryDirectory), FolderName(architecture), fileName));
 
             foreach (var directory in ApplicationDirectories())
             {
