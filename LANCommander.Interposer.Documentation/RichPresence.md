@@ -138,6 +138,16 @@ RichPresence:
 
 See [Rich Presence Plugin API](/Interposer/Plugins/RichPresence) for details on writing plugins that update presence.
 
+## LANCommander
+
+When the LANCommander launcher starts a game through the Interposer, the DLL also reports presence to the launcher, which shows it to the other players on the server: in chat, and in the game's details. This needs no configuration and works with or without Discord — the `Discord` block only controls Discord. The launcher receives:
+
+- the defaults above, once at startup;
+- the full presence after every `InterposerUpdatePresence` from a plugin or game patch;
+- a clear after every `InterposerClearPresence`.
+
+Discord asset keys in `LargeImage` / `SmallImage` mean nothing outside Discord, so the launcher shows the game's icon from the LANCommander server in their place. An `https://` URL is passed through.
+
 ## Extensibility
 
-The rich presence system is designed with multiple backends in mind. Discord is the first supported backend, but the architecture allows additional backends (e.g. a LANCommander-native presence service) to be added in the future. All backends receive the same presence data — plugins don't need to know which backends are active.
+The rich presence system is designed with multiple backends in mind. Discord is a backend; every update also goes to the LANCommander launcher, as above. All receive the same presence data — plugins don't need to know which backends are active.

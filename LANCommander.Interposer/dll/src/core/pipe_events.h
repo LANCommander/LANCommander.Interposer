@@ -9,6 +9,7 @@ enum PipeEventType : int
     PIPE_EVENT_NETWORK  = 4,
     PIPE_EVENT_IDENTITY = 5,
     PIPE_EVENT_RELAY    = 6, // field1 kind, field2 address, field3 detail, intField value
+    PIPE_EVENT_PRESENCE = 7, // field1 kind ("UPDATE" | "CLEAR"), field2 JSON (UPDATE only)
 };
 
 // Try to connect to the host's named pipe (\\.\pipe\InterposerEvents_{pid}).

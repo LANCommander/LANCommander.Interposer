@@ -15,3 +15,4 @@ void FireDnsCallback(const wchar_t* hostname, const wchar_t* redirectedHostname)
 void FireNetworkCallback(const wchar_t* address, int port);
 void FireIdentityCallback(const wchar_t* type, const wchar_t* value);
 void FireRelayCallback(const wchar_t* kind, const wchar_t* address, const wchar_t* detail, int value);
+void FirePresenceCallback(const wchar_t* kind, const wchar_t* json);

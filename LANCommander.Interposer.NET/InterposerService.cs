@@ -223,6 +223,9 @@ namespace LANCommander.Interposer
         [DllImport(DllName, CallingConvention = CallingConvention.Cdecl)]
         private static extern void InterposerRegisterRelayCallback(IntPtr cb);
 
+        [DllImport(DllName, CallingConvention = CallingConvention.Cdecl)]
+        private static extern void InterposerRegisterPresenceCallback(IntPtr cb);
+
         // =================================================================
         // Native callback delegate types
         // =================================================================
@@ -245,6 +248,9 @@ namespace LANCommander.Interposer
         [UnmanagedFunctionPointer(CallingConvention.Cdecl, CharSet = CharSet.Unicode)]
         private delegate void NativeRelayCallback(IntPtr kind, IntPtr address, IntPtr detail, int value);
 
+        [UnmanagedFunctionPointer(CallingConvention.Cdecl, CharSet = CharSet.Unicode)]
+        private delegate void NativePresenceCallback(IntPtr kind, IntPtr json);
+
         // =================================================================
         // Instance state
         // =================================================================
@@ -255,6 +261,7 @@ namespace LANCommander.Interposer
         private NativeNetworkCallback _networkDelegate;
         private NativeIdentityCallback _identityDelegate;
         private NativeRelayCallback? _relayDelegate;
+        private NativePresenceCallback? _presenceDelegate;
         private bool _eventsEnabled;
 
         private IntPtr _fastDlMmf;
@@ -407,6 +414,14 @@ namespace LANCommander.Interposer
         /// Works cross-process via named pipe and in-process via <see cref="EnableEvents"/>.
         /// </summary>
         public event EventHandler<RelayPeerEventArgs>? RelayPeerLeft;
+
+        /// <summary>
+        /// Fires when the game's rich presence changes: once with the Config.yml defaults
+        /// at startup, then on every update and clear a game patch or plugin makes. Fires
+        /// whether or not a Discord backend is connected.
+        /// Works cross-process via named pipe and in-process via <see cref="EnableEvents"/>.
+        /// </summary>
+        public event EventHandler<PresenceChangedEventArgs>? PresenceChanged;
 
         // =================================================================
         // Injection - Process integration
@@ -747,6 +762,17 @@ namespace LANCommander.Interposer
                 _relayDelegate = null;
             }
 
+            // Absent from DLLs that predate presence events.
+            try
+            {
+                _presenceDelegate = OnPresenceCallback;
+                InterposerRegisterPresenceCallback(Marshal.GetFunctionPointerForDelegate(_presenceDelegate));
+            }
+            catch (EntryPointNotFoundException)
+            {
+                _presenceDelegate = null;
+            }
+
             _eventsEnabled = true;
         }
 
@@ -768,7 +794,11 @@ namespace LANCommander.Interposer
             if (_relayDelegate != null)
                 InterposerRegisterRelayCallback(IntPtr.Zero);
 
+            if (_presenceDelegate != null)
+                InterposerRegisterPresenceCallback(IntPtr.Zero);
+
             _relayDelegate = null;
+            _presenceDelegate = null;
             _fileDelegate = null;
             _registryDelegate = null;
             _dnsDelegate = null;
@@ -1697,6 +1727,26 @@ namespace LANCommander.Interposer
                 case 6: // RELAY
                     DispatchRelayEvent(field1, field2, field3, intField);
                     break;
+                case 7: // PRESENCE
+                    DispatchPresenceEvent(field1, field2);
+                    break;
+            }
+        }
+
+        // kind is "UPDATE" (json = the presence) or "CLEAR"; see InterposerPresenceCallback.
+        private void DispatchPresenceEvent(string? kind, string? json)
+        {
+            switch (kind)
+            {
+                case "UPDATE":
+                    var presence = RichPresence.FromJson(json);
+
+                    if (presence != null)
+                        PresenceChanged?.Invoke(this, new PresenceChangedEventArgs(presence));
+                    break;
+                case "CLEAR":
+                    PresenceChanged?.Invoke(this, new PresenceChangedEventArgs(null));
+                    break;
             }
         }
 
@@ -1765,6 +1815,13 @@ namespace LANCommander.Interposer
                 address != IntPtr.Zero ? Marshal.PtrToStringUni(address) : null,
                 detail != IntPtr.Zero ? Marshal.PtrToStringUni(detail) : null,
                 value);
+        }
+
+        private void OnPresenceCallback(IntPtr kind, IntPtr json)
+        {
+            DispatchPresenceEvent(
+                Marshal.PtrToStringUni(kind),
+                json != IntPtr.Zero ? Marshal.PtrToStringUni(json) : null);
         }
     }
 }

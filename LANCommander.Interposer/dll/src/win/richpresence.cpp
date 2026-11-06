@@ -2,6 +2,9 @@
 #include "instance.h"
 #include "config.h"
 #include "discord_ipc.h"
+#include "callbacks.h"
+
+#include <cstdio>
 
 #include <mutex>
 #include <string>
@@ -57,12 +60,83 @@ static void FlushToBackends()
         backend->UpdatePresence(g_presence);
 }
 
+static void AppendJsonString(std::string& out, const char* key, const std::string& value)
+{
+    out += '"';
+    out += key;
+    out += "\":\"";
+
+    for (char c : value)
+    {
+        switch (c)
+        {
+            case '"':  out += "\\\""; break;
+            case '\\': out += "\\\\"; break;
+            case '\n': out += "\\n";  break;
+            case '\r': out += "\\r";  break;
+            case '\t': out += "\\t";  break;
+            default:
+                if (static_cast<unsigned char>(c) < 0x20)
+                {
+                    char buf[8];
+                    std::snprintf(buf, sizeof(buf), "\\u%04x", static_cast<unsigned char>(c));
+                    out += buf;
+                }
+                else
+                {
+                    out += c;
+                }
+        }
+    }
+
+    out += "\",";
+}
+
+static void AppendJsonNumber(std::string& out, const char* key, long long value)
+{
+    char buf[64];
+    std::snprintf(buf, sizeof(buf), "\"%s\":%lld,", key, value);
+    out += buf;
+}
+
+// The presence as the JSON the launcher reads (PIPE_EVENT_PRESENCE "UPDATE").
+// Image fields carry whatever was set -- a Discord asset key or a URL -- and
+// the reader decides what it can show. Caller must hold g_rpMutex.
+static std::wstring PresenceToJson(const PresenceData& data)
+{
+    std::string json = "{";
+
+    AppendJsonNumber(json, "type",           data.type);
+    AppendJsonString(json, "name",           data.name);
+    AppendJsonString(json, "details",        data.details);
+    AppendJsonString(json, "detailsUrl",     data.detailsUrl);
+    AppendJsonString(json, "state",          data.state);
+    AppendJsonString(json, "stateUrl",       data.stateUrl);
+    AppendJsonNumber(json, "timestampStart", data.timestampStart);
+    AppendJsonNumber(json, "timestampEnd",   data.timestampEnd);
+    AppendJsonString(json, "largeImage",     data.largeImageKey);
+    AppendJsonString(json, "largeImageText", data.largeImageText);
+    AppendJsonString(json, "smallImage",     data.smallImageKey);
+    AppendJsonString(json, "smallImageText", data.smallImageText);
+    AppendJsonString(json, "partyId",        data.partyId);
+    AppendJsonNumber(json, "partySize",      data.partySize);
+    AppendJsonNumber(json, "partyMax",       data.partyMax);
+    AppendJsonString(json, "button1Text",    data.button1Text);
+    AppendJsonString(json, "button1Url",     data.button1Url);
+    AppendJsonString(json, "button2Text",    data.button2Text);
+    AppendJsonString(json, "button2Url",     data.button2Url);
+
+    json.back() = '}'; // replaces the trailing comma
+
+    return ToWide(json);
+}
+
 // ---------------------------------------------------------------------------
 // InitRichPresence
 // ---------------------------------------------------------------------------
 void InitRichPresence()
 {
-    std::lock_guard<std::mutex> lk(g_rpMutex);
+    std::unique_lock<std::mutex> lk(g_rpMutex);
 
     if (g_rpInitialized)
         return;
@@ -103,6 +177,14 @@ void InitRichPresence()
     }
 
     g_rpInitialized = true;
+
+    const std::wstring json = PresenceToJson(g_presence);
+
+    lk.unlock();
+
+    // The launcher hears the defaults whether or not any backend connected. Outside
+    // the lock: an in-process callback may set presence fields itself.
+    FirePresenceCallback(L"UPDATE", json.c_str());
 }
 
 // ---------------------------------------------------------------------------
@@ -243,9 +325,16 @@ void InterposerUpdatePresence()
 {
     FORWARD_TO_PRIMARY(InterposerUpdatePresence);
 
-    std::lock_guard<std::mutex> lk(g_rpMutex);
-    LogRichPresence(L"RP UPDATE", (L"Details=" + ToWide(g_presence.details) + L"  State=" + ToWide(g_presence.state)).c_str());
-    FlushToBackends();
+    std::wstring json;
+
+    {
+        std::lock_guard<std::mutex> lk(g_rpMutex);
+        LogRichPresence(L"RP UPDATE", (L"Details=" + ToWide(g_presence.details) + L"  State=" + ToWide(g_presence.state)).c_str());
+        FlushToBackends();
+        json = PresenceToJson(g_presence);
+    }
+
+    FirePresenceCallback(L"UPDATE", json.c_str());
 }
 
 extern "C" __declspec(dllexport)
@@ -253,13 +342,17 @@ void InterposerClearPresence()
 {
     FORWARD_TO_PRIMARY(InterposerClearPresence);
 
-    std::lock_guard<std::mutex> lk(g_rpMutex);
+    {
+        std::lock_guard<std::mutex> lk(g_rpMutex);
 
-    LogRichPresence(L"RP CLEAR", L"Reset to defaults");
+        LogRichPresence(L"RP CLEAR", L"Reset to defaults");
 
-    // Reset to config defaults
-    g_presence = g_defaults;
+        // Reset to config defaults
+        g_presence = g_defaults;
 
-    for (auto& backend : g_backends)
-        backend->ClearPresence();
+        for (auto& backend : g_backends)
+            backend->ClearPresence();
+    }
+
+    FirePresenceCallback(L"CLEAR", nullptr);
 }

@@ -4006,6 +4006,83 @@ extern "C" unsigned __cdecl SdkVoiceApiVersion(void);
 static const wchar_t* kSdkLogVerb    = L"SDK PROBE";
 static const wchar_t* kSdkLogMessage = L"written through the import library";
 
+// ── Rich presence events (RP-) ────────────────────────────────────────────────
+// The DLL reports presence to the launcher through InterposerPresenceCallback
+// (and the event pipe beside it), whether or not a Discord backend connected --
+// the fixture configures none.
+
+static std::vector<std::pair<std::wstring, std::wstring>> g_presenceEvents;
+
+static void __cdecl OnPresenceEvent(const wchar_t* kind, const wchar_t* json)
+{
+    g_presenceEvents.emplace_back(kind ? kind : L"", json ? json : L"<null>");
+}
+
+static void RunPresenceTests(HMODULE hDll)
+{
+    wprintf(L"\n--- Rich Presence Event Tests ---\n");
+
+    using FnRegister   = void (__cdecl*)(void (__cdecl*)(const wchar_t*, const wchar_t*));
+    using FnSetString  = void (__cdecl*)(const char*);
+    using FnSetParty   = void (__cdecl*)(const char*, int, int);
+    using FnSetTimes   = void (__cdecl*)(long long, long long);
+    using FnVoid       = void (__cdecl*)();
+
+    auto registerCb = reinterpret_cast<FnRegister>(GetProcAddress(hDll, "InterposerRegisterPresenceCallback"));
+    auto setDetails = reinterpret_cast<FnSetString>(GetProcAddress(hDll, "InterposerSetPresenceDetails"));
+    auto setState   = reinterpret_cast<FnSetString>(GetProcAddress(hDll, "InterposerSetPresenceState"));
+    auto setParty   = reinterpret_cast<FnSetParty>(GetProcAddress(hDll, "InterposerSetPresenceParty"));
+    auto setTimes   = reinterpret_cast<FnSetTimes>(GetProcAddress(hDll, "InterposerSetPresenceTimestamps"));
+    auto update     = reinterpret_cast<FnVoid>(GetProcAddress(hDll, "InterposerUpdatePresence"));
+    auto clear      = reinterpret_cast<FnVoid>(GetProcAddress(hDll, "InterposerClearPresence"));
+
+    ASSERT(registerCb != nullptr, L"RP-01: InterposerRegisterPresenceCallback is exported");
+
+    if (!registerCb || !setDetails || !setState || !setParty || !setTimes || !update || !clear)
+        return;
+
+    registerCb(OnPresenceEvent);
+
+    // Quotes, a backslash, a newline and non-ASCII UTF-8 (U+00E9) must survive as JSON.
+    setDetails("de_dust2 \"Competitive\" \\ A\nB caf\xC3\xA9");
+    setState("Score: 7 - 3");
+    setParty("lobby-1", 3, 8);
+    setTimes(1700000000LL, 0);
+
+    ASSERT(g_presenceEvents.empty(), L"RP-02: setters stage changes without firing an event");
+
+    update();
+
+    ASSERT(g_presenceEvents.size() == 1 && g_presenceEvents[0].first == L"UPDATE",
+        L"RP-03: InterposerUpdatePresence fires one UPDATE event");
+
+    if (g_presenceEvents.size() == 1)
+    {
+        const std::wstring& json = g_presenceEvents[0].second;
+
+        ASSERT(json.find(L"\"details\":\"de_dust2 \\\"Competitive\\\" \\\\ A\\nB caf\xE9\"") != std::wstring::npos,
+            L"RP-04: details is escaped JSON and decoded from UTF-8");
+        ASSERT(json.find(L"\"state\":\"Score: 7 - 3\"") != std::wstring::npos,
+            L"RP-05: state is carried");
+        ASSERT(json.find(L"\"partySize\":3") != std::wstring::npos && json.find(L"\"partyMax\":8") != std::wstring::npos,
+            L"RP-06: party size and max are numbers");
+        ASSERT(json.find(L"\"timestampStart\":1700000000") != std::wstring::npos,
+            L"RP-07: the start timestamp is carried as a 64-bit number");
+        ASSERT(json.front() == L'{' && json.back() == L'}' && json.find(L",}") == std::wstring::npos,
+            L"RP-08: the payload is one JSON object with no trailing comma");
+    }
+
+    clear();
+
+    ASSERT(g_presenceEvents.size() == 2 && g_presenceEvents[1].first == L"CLEAR" && g_presenceEvents[1].second == L"<null>",
+        L"RP-09: InterposerClearPresence fires CLEAR with no payload");
+
+    registerCb(nullptr);
+    update();
+
+    ASSERT(g_presenceEvents.size() == 2, L"RP-10: no event fires once the callback is unregistered");
+}
+
 static void RunSdkTests(HMODULE hDll)
 {
     wprintf(L"\n--- SDK Tests (import library) ---\n");
@@ -5619,6 +5696,7 @@ int wmain(int argc, wchar_t** argv)
     RunPluginConfigTests(hDll);
     RunVoiceTests(hDll);
     RunSdkTests(hDll);
+    RunPresenceTests(hDll);
 
     // ── Unload DLL ───────────────────────────────────────────────────────────
     // DLL_PROCESS_DETACH fires: RemoveRegistryHooks (SaveRegFile if dirty),

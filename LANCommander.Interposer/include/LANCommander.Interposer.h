@@ -158,12 +158,23 @@ typedef void (INTERPOSER_CALL* InterposerIdentityCallback)(
 typedef void (INTERPOSER_CALL* InterposerRelayCallback)(
     const wchar_t* kind, const wchar_t* address, const wchar_t* detail, int value);
 
+/* Rich presence, fired on every InterposerUpdatePresence / InterposerClearPresence
+ * and once with the Config.yml defaults at startup.
+ *   kind "UPDATE"   json = the presence now shown (see RichPresence.md for its
+ *                   fields; strings are empty and numbers 0 when unset)
+ *        "CLEAR"    json = NULL: the game shows no presence
+ * Fired after the presence lock is released, so the callback may call the
+ * InterposerSetPresence* functions. */
+typedef void (INTERPOSER_CALL* InterposerPresenceCallback)(
+    const wchar_t* kind, const wchar_t* json);
+
 INTERPOSER_API void INTERPOSER_CALL InterposerRegisterFileCallback(InterposerFileCallback cb);
 INTERPOSER_API void INTERPOSER_CALL InterposerRegisterRegistryCallback(InterposerRegistryCallback cb);
 INTERPOSER_API void INTERPOSER_CALL InterposerRegisterDnsCallback(InterposerDnsCallback cb);
 INTERPOSER_API void INTERPOSER_CALL InterposerRegisterNetworkCallback(InterposerNetworkCallback cb);
 INTERPOSER_API void INTERPOSER_CALL InterposerRegisterIdentityCallback(InterposerIdentityCallback cb);
 INTERPOSER_API void INTERPOSER_CALL InterposerRegisterRelayCallback(InterposerRelayCallback cb);
+INTERPOSER_API void INTERPOSER_CALL InterposerRegisterPresenceCallback(InterposerPresenceCallback cb);
 
 /* ===========================================================================
  * Network adapters

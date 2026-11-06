@@ -279,6 +279,7 @@ All rich presence API functions are thread-safe. They use internal locking, so y
 
 ## Notes
 
-- If rich presence is not configured (no `RichPresence` section or `Discord.Enabled` is `false`), all API functions are safe to call but do nothing.
+- If Discord is not configured (no `RichPresence` section or `Discord.Enabled` is `false`), all API functions are still safe to call. Updates still reach the LANCommander launcher when it started the game; see [Rich Presence](/Interposer/RichPresence#lancommander).
+- A host can observe every update and clear with `InterposerRegisterPresenceCallback` (in-process) or the event pipe (the .NET `InterposerService.PresenceChanged` event).
 - The Interposer handles reconnection automatically. If Discord restarts, the next `InterposerUpdatePresence` call will reconnect and resend the current state.
 - Presence updates are rate-limited by Discord to roughly one update every 15 seconds. Sending more frequently is safe but Discord will throttle them.

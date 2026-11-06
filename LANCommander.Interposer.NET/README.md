@@ -135,6 +135,22 @@ await interposer.DisconnectRelayAsync();
 
 Setting `Relay` at all - even with `Enabled = false` - makes the DLL install its socket hooks, which it can only do at startup; set it whenever the launcher may connect the game later. The relay events also arrive over the event pipe, so they need no `EnableEvents`. Inside the game process, `GetRelayStatus()`, `ConnectRelay()` and `DisconnectRelay()` call the DLL directly.
 
+## Rich Presence Events
+
+The DLL reports the game's rich presence to the launcher over the same event pipe: once with the `RichPresence` defaults from Config.yml at startup, then on every update and clear a game patch or plugin makes. It does so whether or not Discord is enabled or running, so a launcher can show what a player is doing without Discord.
+
+```csharp
+interposer.PresenceChanged += (s, e) =>
+{
+    if (e.Presence == null)
+        Console.WriteLine("Presence cleared");
+    else
+        Console.WriteLine($"{e.Presence.Details} / {e.Presence.State} ({e.Presence.PartySize} of {e.Presence.PartyMax})");
+};
+```
+
+`RichPresence` has every field the game can set (see [Rich Presence](https://github.com/LANCommander/LANCommander.Interposer/blob/main/LANCommander.Interposer.Documentation/RichPresence.md)); unset strings are empty and unset numbers 0. `LargeImage` and `SmallImage` hold what the game set, which is usually a Discord asset key: only `https://` URLs can be shown outside Discord. In-process, `EnableEvents` delivers the same event.
+
 The server side is the separate `LANCommander.Interposer.Relay` library. See the [Network Relay](https://github.com/LANCommander/LANCommander.Interposer/blob/main/LANCommander.Interposer.Documentation/NetworkRelay.md) docs.
 
 ## One DLL, Many Games
