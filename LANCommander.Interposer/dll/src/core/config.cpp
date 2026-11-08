@@ -112,6 +112,51 @@ std::string  g_msReporterName;
 int          g_msFlushInterval  = 2000;
 bool         g_logMatches       = false;
 
+bool IsGuidText(const std::string& s)
+{
+    if (s.size() != 36)
+        return false;
+
+    for (size_t i = 0; i < s.size(); ++i)
+    {
+        const bool dash = i == 8 || i == 13 || i == 18 || i == 23;
+
+        if (dash ? s[i] != '-' : !std::isxdigit(static_cast<unsigned char>(s[i])))
+            return false;
+    }
+
+    return true;
+}
+
+bool NormalizeMatchServerUrl(const std::wstring& input, std::wstring& url)
+{
+    url = ExpandEnvVars(input);
+
+    while (!url.empty() && (url.back() == L'/' || url.back() == L' '))
+        url.pop_back();
+
+    std::wstring lower = url.substr(0, 8);
+    for (auto& c : lower)
+        c = static_cast<wchar_t>(std::towlower(c));
+
+    return url.empty() || lower.rfind(L"http://", 0) == 0 || lower.rfind(L"https://", 0) == 0;
+}
+
+bool NormalizeReporterKind(const std::string& input, std::string& kind)
+{
+    std::string lower = input;
+
+    for (auto& c : lower)
+        c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+
+    if (lower == "server")      kind = "Server";
+    else if (lower == "host")   kind = "Host";
+    else if (lower == "client") kind = "Client";
+    else                        return false;
+
+    return true;
+}
+
 static std::vector<FileRedirect> g_redirects;
 static platform::FileHandle      g_logHandle = platform::kInvalidFile;
 static std::mutex                g_logMutex;
@@ -2604,22 +2649,6 @@ void LoadConfig()
     {
         auto text = [&](const char* key) { return ms[key] ? ms[key].as<std::string>("") : std::string(); };
 
-        auto isGuid = [](const std::string& s)
-        {
-            if (s.size() != 36)
-                return false;
-
-            for (size_t i = 0; i < s.size(); ++i)
-            {
-                const bool dash = i == 8 || i == 13 || i == 18 || i == 23;
-
-                if (dash ? s[i] != '-' : !std::isxdigit(static_cast<unsigned char>(s[i])))
-                    return false;
-            }
-
-            return true;
-        };
-
         try
         {
             if (ms["Enabled"])
@@ -2632,16 +2661,9 @@ void LoadConfig()
 
         if (ms["ServerUrl"])
         {
-            std::wstring url = ExpandEnvVars(Utf8ToWide(text("ServerUrl")));
+            std::wstring url;
 
-            while (!url.empty() && (url.back() == L'/' || url.back() == L' '))
-                url.pop_back();
-
-            std::wstring lower = url.substr(0, 8);
-            for (auto& c : lower)
-                c = static_cast<wchar_t>(std::towlower(c));
-
-            if (url.empty() || lower.rfind(L"http://", 0) == 0 || lower.rfind(L"https://", 0) == 0)
+            if (NormalizeMatchServerUrl(Utf8ToWide(text("ServerUrl")), url))
                 g_msServerUrl = url;
             else
                 configWarnings.push_back(L"MatchStatistics.ServerUrl is not an http:// or https:// URL: " + url);
@@ -2654,7 +2676,7 @@ void LoadConfig()
         {
             g_msGameId = text("GameId");
 
-            if (!g_msGameId.empty() && !isGuid(g_msGameId))
+            if (!g_msGameId.empty() && !IsGuidText(g_msGameId))
             {
                 configWarnings.push_back(L"MatchStatistics.GameId is not a GUID: " + Utf8ToWide(g_msGameId));
                 g_msGameId.clear();
@@ -2665,7 +2687,7 @@ void LoadConfig()
         {
             g_msServerId = text("ServerId");
 
-            if (!g_msServerId.empty() && !isGuid(g_msServerId))
+            if (!g_msServerId.empty() && !IsGuidText(g_msServerId))
             {
                 configWarnings.push_back(L"MatchStatistics.ServerId is not a GUID: " + Utf8ToWide(g_msServerId));
                 g_msServerId.clear();
@@ -2674,16 +2696,9 @@ void LoadConfig()
 
         if (ms["ReporterKind"])
         {
-            std::string kind = text("ReporterKind");
-            std::string lower = kind;
+            const std::string kind = text("ReporterKind");
 
-            for (auto& c : lower)
-                c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
-
-            if (lower == "server")      g_msReporterKind = "Server";
-            else if (lower == "host")   g_msReporterKind = "Host";
-            else if (lower == "client") g_msReporterKind = "Client";
-            else
+            if (!NormalizeReporterKind(kind, g_msReporterKind))
                 configWarnings.push_back(L"MatchStatistics.ReporterKind is not Server, Host or Client: " + Utf8ToWide(kind));
         }
 
@@ -2696,7 +2711,7 @@ void LoadConfig()
             {
                 const int interval = ms["FlushInterval"].as<int>();
 
-                if (interval >= 100 && interval <= 600000)
+                if (interval >= kMinMatchFlushInterval && interval <= kMaxMatchFlushInterval)
                     g_msFlushInterval = interval;
                 else
                     configWarnings.push_back(L"MatchStatistics.FlushInterval must be between 100 and 600000 ms");

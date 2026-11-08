@@ -46,6 +46,35 @@ MatchStatistics:
 A client patch needs no configuration. When the launcher started the game, the launcher reports
 the matches.
 
+### Settings from the host
+
+A host that keeps its settings elsewhere can set them at run time with
+`InterposerMatchConfigure` instead. For example, a game server plugin can read them from the
+server's own config files. The function takes the same fields as the YAML section. Any field left
+`NULL` keeps its current value, so `Config.yml` still supplies whatever the host leaves out.
+
+```c
+InterposerMatchConfig config = { sizeof(config) };
+config.enabled      = -1;                      /* unchanged */
+config.serverUrl    = "http://lancommander.lan:1337";
+config.token        = token;                   /* %VARIABLE% is expanded here too */
+config.gameId       = "6f1e2c64-0d47-4b8e-9a43-3a1c2bde0f11";
+config.reporterName = "CS:S server 1";
+
+if (!InterposerMatchConfigure(&config))
+    /* a value was invalid; nothing was changed, and the log says which */;
+```
+
+The values are checked the way `Config.yml`'s are. If any field is invalid, the call changes
+nothing and returns `FALSE`.
+
+- **Matches started afterwards** use the new settings. A match already open keeps its game,
+  server and reporter.
+- **Requests sent from then on** use the new URL and token, including requests for matches
+  already open. A request that was backing off is retried at once.
+- **Unsent matches from a previous run** in `.interposer/Matches/` are picked up by the first call
+  that completes the URL, token and game, as they are at startup when `Config.yml` has them.
+
 On Linux the Interposer only speaks plain `http://`. An `https://` server URL is logged once and
 nothing is sent.
 
@@ -102,6 +131,7 @@ void OnRoundEnd(const char* winningTeam)
 
 | Function | What it does |
 |---|---|
+| `InterposerMatchConfigure` | Sets the `MatchStatistics` settings at run time (see [Settings from the host](#settings-from-the-host)). |
 | `InterposerMatchStart` | Starts a match and returns its handle. Starting again under the same external id, in this process or after a restart, carries on with the same match. |
 | `InterposerMatchPlayerJoined` / `PlayerLeft` | A player joined (or changed name or team), or left. |
 | `InterposerMatchEvent` | Something happened. The payload is a JSON object or `NULL`. |

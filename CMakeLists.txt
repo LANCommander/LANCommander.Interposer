@@ -26,8 +26,8 @@ add_custom_target(interposer_version
     COMMAND "${CMAKE_COMMAND}"
         "-DOUTPUT=${INTERPOSER_GENERATED_DIR}/version_info.h"
         "-DVERSION=${INTERPOSER_VERSION}"
-        "-DSOURCE_DIR=${CMAKE_SOURCE_DIR}"
-        -P "${CMAKE_SOURCE_DIR}/build/GenerateVersion.cmake"
+        "-DSOURCE_DIR=${CMAKE_CURRENT_SOURCE_DIR}"
+        -P "${CMAKE_CURRENT_SOURCE_DIR}/build/GenerateVersion.cmake"
     BYPRODUCTS "${INTERPOSER_GENERATED_DIR}/version_info.h"
     COMMENT "Generating version_info.h"
     VERBATIM)

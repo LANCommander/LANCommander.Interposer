@@ -1,11 +1,19 @@
 #include "attach.h"
 
+#include "config.h"
 #include "hooks.h"
 #include "instance.h"
+#include "matches.h"
+#include "pipe_events.h"
+#include "plugins.h"
 #include "LANCommander.Interposer.Embedded.h"
 
 namespace
 {
+    // Set by InterposerEmbeddedAttachApiOnly: nothing was hooked, so detach
+    // has nothing to remove.
+    bool g_apiOnly = false;
+
     void WriteLog(const wchar_t* message)
     {
         wchar_t temporaryPath[MAX_PATH];
@@ -74,7 +82,41 @@ extern "C" BOOL InterposerEmbeddedAttach(HMODULE module)
     return AttachInterposer(module) ? TRUE : FALSE;
 }
 
+// The API without the hooks: the config and session log, the launcher's event
+// channel, match statistics and plugins, which is all a host that only reports
+// (a game server plugin) needs. No detour is placed, so the host may be
+// unloaded while the process runs on -- with hooks in KernelBase pointing into
+// it, that would leave a thread inside a detour returning into unmapped code.
+// The same as InterposerEmbeddedAttach on Linux.
+extern "C" BOOL InterposerEmbeddedAttachApiOnly(HMODULE module)
+{
+    if (!ClaimPrimaryInstance(module))
+        return FALSE;
+
+    g_apiOnly = true;
+
+    LoadConfig();
+    ConnectEventPipe();
+    InitMatches();
+    LoadPlugins();
+    return TRUE;
+}
+
 extern "C" void InterposerEmbeddedDetach(BOOL processTerminating)
 {
-    DetachInterposer(processTerminating != FALSE);
+    if (!g_apiOnly)
+    {
+        DetachInterposer(processTerminating != FALSE);
+        return;
+    }
+
+    if (PrimaryInstance())
+        return;
+
+    DisconnectEventPipe();
+    UnloadPlugins();
+    ShutdownMatches(processTerminating != FALSE);
+    CloseLog();
+    ReleasePrimaryInstance();
+    g_apiOnly = false;
 }

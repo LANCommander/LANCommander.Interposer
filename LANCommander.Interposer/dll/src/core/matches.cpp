@@ -641,8 +641,19 @@ struct Reply
 Reply Call(const wchar_t* method, const std::string& path, const void* body, size_t bytes,
            const wchar_t* contentType = L"application/json")
 {
-    const std::wstring url     = g_msServerUrl + Utf8ToWide(path);
-    const std::wstring headers = L"Authorization: Bearer " + Utf8ToWide(g_msToken) + L"\r\n" +
+    // InterposerMatchConfigure may replace these at any time, under g_mutex;
+    // never called with it held.
+    std::wstring serverUrl;
+    std::string  token;
+
+    {
+        std::lock_guard<std::mutex> lock(g_mutex);
+        serverUrl = g_msServerUrl;
+        token     = g_msToken;
+    }
+
+    const std::wstring url     = serverUrl + Utf8ToWide(path);
+    const std::wstring headers = L"Authorization: Bearer " + Utf8ToWide(token) + L"\r\n" +
                                  L"Content-Type: " + contentType + L"\r\n" +
                                  L"Accept: application/json\r\n";
 
@@ -666,7 +677,7 @@ Reply Call(const wchar_t* method, const std::string& path, const void* body, siz
     std::wstring summary = std::wstring(method) + L" " + Utf8ToWide(path) + L": ";
 
     if (s == 0)
-        summary += L"no response from " + g_msServerUrl;
+        summary += L"no response from " + serverUrl;
     else
     {
         summary += L"HTTP " + std::to_wstring(s);
@@ -1348,12 +1359,6 @@ void LoadSpooled(const std::wstring& dir)
     m->lastSequence   = NumberOf(meta, "lastSequence", 0);
     m->sequencesFinal = BoolOf(meta, "sequencesFinal");
 
-    if (m->gameId.empty())
-        m->gameId = g_msGameId;
-
-    if (m->reporterKind.empty())
-        m->reporterKind = g_msReporterKind;
-
     // Events: one per line. A line cut short by a crash fails to parse and is
     // dropped; so is any repeat a rewrite left behind.
     if (platform::ReadWholeFile(dir + L"events.jsonl", 512u << 20, raw))
@@ -1472,6 +1477,12 @@ void LoadSpooled(const std::wstring& dir)
 
     std::lock_guard<std::mutex> lock(g_mutex);
 
+    if (m->gameId.empty())
+        m->gameId = g_msGameId;
+
+    if (m->reporterKind.empty())
+        m->reporterKind = g_msReporterKind;
+
     m->handle = g_nextHandle++;
 
     LogMatch(L"MATCH START", (L"resuming " + Wide(m->externalId) + L" from " + dir).c_str(),
@@ -1502,8 +1513,28 @@ Match* OpenLocked(DWORD handle)
 // Lifecycle
 // ---------------------------------------------------------------------------
 
-void InitMatches()
+namespace
 {
+
+std::atomic<bool> g_spoolLoaded{ false };
+
+// Load what a previous run left in .interposer/Matches/, once, as soon as the
+// HTTP settings are complete -- from InitMatches when Config.yml has them, or
+// from the InterposerMatchConfigure call that completes them. reportWaiting
+// logs the unsent count when they are not complete yet (at startup only, so a
+// host configuring piecemeal does not repeat it).
+void LoadSpoolOnce(bool reportWaiting)
+{
+    if (g_spoolLoaded)
+        return;
+
+    bool configured;
+
+    {
+        std::lock_guard<std::mutex> lock(g_mutex);
+        configured = HttpConfigured();
+    }
+
     const std::wstring root = GetInterposerDataDirectory() + L"Matches" + platform::kPathSeparator;
 
     std::vector<platform::DirectoryEntry> entries;
@@ -1520,15 +1551,23 @@ void InitMatches()
             ++waiting;
 
     if (!waiting)
-        return;
-
-    if (!HttpConfigured())
     {
-        InterposerLog(L"MATCH ERROR", (std::to_wstring(waiting) +
-            L" unsent matches are waiting in " + root +
-            L"; MatchStatistics.ServerUrl, Token and GameId are needed to send them").c_str());
+        if (configured)
+            g_spoolLoaded = true;
         return;
     }
+
+    if (!configured)
+    {
+        if (reportWaiting)
+            InterposerLog(L"MATCH ERROR", (std::to_wstring(waiting) +
+                L" unsent matches are waiting in " + root +
+                L"; MatchStatistics.ServerUrl, Token and GameId are needed to send them").c_str());
+        return;
+    }
+
+    if (g_spoolLoaded.exchange(true))
+        return;   // another thread got here first
 
     for (const auto& entry : entries)
         if (entry.isDirectory)
@@ -1538,6 +1577,13 @@ void InitMatches()
 
     if (!g_matches.empty())
         StartWorkerLocked();
+}
+
+} // namespace
+
+void InitMatches()
+{
+    LoadSpoolOnce(true);
 }
 
 void ShutdownMatches(bool processTerminating)
@@ -1566,6 +1612,91 @@ void ShutdownMatches(bool processTerminating)
 // ---------------------------------------------------------------------------
 // Exports
 // ---------------------------------------------------------------------------
+
+extern "C" INTERPOSER_API BOOL INTERPOSER_CALL InterposerMatchConfigure(const InterposerMatchConfig* config)
+{
+    FORWARD_TO_PRIMARY(InterposerMatchConfigure, config);
+
+    if (!config || config->structSize < sizeof(InterposerMatchConfig))
+        return FALSE;
+
+    // Check everything before changing anything.
+    std::wstring url;
+    std::string  token, kind;
+
+    if (config->serverUrl && !NormalizeMatchServerUrl(Utf8ToWide(config->serverUrl), url))
+    {
+        InterposerLog(L"MATCH ERROR", (L"InterposerMatchConfigure: serverUrl is not an http:// or https:// URL: " + url).c_str());
+        return FALSE;
+    }
+
+    if (config->token)
+        token = WideToUtf8(ExpandEnvVars(Utf8ToWide(config->token)));
+
+    if (config->gameId && *config->gameId && !IsGuidText(config->gameId))
+    {
+        InterposerLog(L"MATCH ERROR", (L"InterposerMatchConfigure: gameId is not a GUID: " + Utf8ToWide(config->gameId)).c_str());
+        return FALSE;
+    }
+
+    if (config->serverId && *config->serverId && !IsGuidText(config->serverId))
+    {
+        InterposerLog(L"MATCH ERROR", (L"InterposerMatchConfigure: serverId is not a GUID: " + Utf8ToWide(config->serverId)).c_str());
+        return FALSE;
+    }
+
+    if (config->reporterKind && !NormalizeReporterKind(config->reporterKind, kind))
+    {
+        InterposerLog(L"MATCH ERROR", (L"InterposerMatchConfigure: reporterKind is not Server, Host or Client: " +
+            Utf8ToWide(config->reporterKind)).c_str());
+        return FALSE;
+    }
+
+    if (config->flushIntervalMs != 0 &&
+        (config->flushIntervalMs < kMinMatchFlushInterval || config->flushIntervalMs > kMaxMatchFlushInterval))
+    {
+        InterposerLog(L"MATCH ERROR", L"InterposerMatchConfigure: flushIntervalMs must be between 100 and 600000");
+        return FALSE;
+    }
+
+    bool configured;
+
+    {
+        std::lock_guard<std::mutex> lock(g_mutex);
+
+        if (config->enabled >= 0)     g_msEnabled       = config->enabled != 0;
+        if (config->serverUrl)        g_msServerUrl     = url;
+        if (config->token)            g_msToken         = token;
+        if (config->gameId)           g_msGameId        = config->gameId;
+        if (config->serverId)         g_msServerId      = config->serverId;
+        if (config->reporterKind)     g_msReporterKind  = kind;
+        if (config->reporterName)     g_msReporterName  = config->reporterName;
+        if (config->flushIntervalMs)  g_msFlushInterval = config->flushIntervalMs;
+
+        g_warnedGame = false;   // a new configuration earns a new warning
+        configured   = HttpConfigured();
+
+        // The token is never logged.
+        LogMatch(L"MATCH CONFIG", configured ? (L"sending to " + g_msServerUrl).c_str() : L"HTTP not configured",
+            g_msEnabled ? nullptr : L"disabled");
+
+        // A request backing off may have failed on the old settings (a wrong
+        // token, an unreachable URL): retry everything now.
+        for (auto& [h, m] : g_matches)
+        {
+            m->retryAt   = 0;
+            m->backoffMs = 0;
+        }
+
+        if (g_thread)
+            WakeWorkerLocked();
+    }
+
+    if (configured)
+        LoadSpoolOnce(false);
+
+    return TRUE;
+}
 
 extern "C" INTERPOSER_API DWORD INTERPOSER_CALL InterposerMatchStart(const InterposerMatchInfo* info)
 {

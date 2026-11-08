@@ -5669,6 +5669,7 @@ struct MatchApi
     BOOL  (__cdecl* flush)(DWORD, DWORD) = nullptr;
     BOOL  (__cdecl* status)(DWORD, InterposerMatchStatus*) = nullptr;
     void  (__cdecl* registerCb)(InterposerMatchCallback) = nullptr;
+    BOOL  (__cdecl* configure)(const InterposerMatchConfig*) = nullptr;
 
     bool Load(HMODULE dll)
     {
@@ -5680,6 +5681,7 @@ struct MatchApi
         };
 
         bool ok = true;
+        ok &= get(configure, "InterposerMatchConfigure");
         ok &= get(start, "InterposerMatchStart");
         ok &= get(joined, "InterposerMatchPlayerJoined");
         ok &= get(left, "InterposerMatchPlayerLeft");
@@ -6198,6 +6200,64 @@ static int RunMatchHttpChild(const wchar_t* dirArg, const wchar_t* phaseArg)
         for (int i = 0; i < 50 && !api.Status(match).delivered; ++i)
             Sleep(100);
     }
+    else if (phase == L"configure" || phase == L"configure-resume")
+    {
+        // Config.yml has no ServerUrl or Token here: the settings come from the API.
+        const std::string url = ReadOpenLog(dir + L"server-url.txt");
+
+        InterposerMatchConfig config{};
+        config.structSize   = sizeof(config);
+        config.enabled      = -1;
+        config.serverUrl    = url.c_str();
+        config.token        = "configured-token";
+        config.gameId       = "55555555-5555-5555-5555-555555555555";
+        config.reporterName = "configured-server";
+
+        if (phase == L"configure")
+        {
+            info.externalId = "ms-before-configure";
+            const DWORD before = api.start(&info);
+
+            ASSERT(api.Status(before).sink == INTERPOSER_MATCH_SINK_NONE,
+                L"MS-27: without settings in Config.yml or from the API a match is not sent");
+
+            InterposerMatchConfig bad = config;
+            bad.gameId = "not-a-guid";
+
+            InterposerMatchConfig badKind = config;
+            badKind.reporterKind = "Spectator";
+
+            InterposerMatchConfig badUrl = config;
+            badUrl.serverUrl = "ftp://example";
+
+            InterposerMatchConfig tooSmall = config;
+            tooSmall.structSize = sizeof(DWORD);
+
+            ASSERT(!api.configure(&bad) && !api.configure(&badKind) && !api.configure(&badUrl) &&
+                   !api.configure(&tooSmall) && !api.configure(nullptr),
+                L"MS-28: InterposerMatchConfigure refuses a bad GUID, kind, URL or struct size");
+
+            info.externalId = "ms-after-bad-configure";
+            ASSERT(api.Status(api.start(&info)).sink == INTERPOSER_MATCH_SINK_NONE,
+                L"MS-29: a refused configuration changes nothing");
+        }
+
+        ASSERT(api.configure(&config), L"MS-30: InterposerMatchConfigure accepts complete settings");
+
+        info.externalId = phase == L"configure" ? "ms-configured" : "ms-crash";
+        const DWORD match = api.start(&info);
+
+        ASSERT(api.Status(match).sink == INTERPOSER_MATCH_SINK_HTTP,
+            L"MS-31: a match started after InterposerMatchConfigure is sent over HTTP");
+
+        api.event(match, "tick", 6000, -1, nullptr, nullptr, nullptr);
+        api.end(match, "completed", FALSE);
+
+        ASSERT(api.flush(match, 15000), L"MS-32: the configured match is delivered");
+
+        for (int i = 0; i < 50 && !api.Status(match).delivered; ++i)
+            Sleep(100);
+    }
 
     FreeLibrary(dll);
     return g_fail;
@@ -6434,6 +6494,82 @@ static void RunMatchHttpTests(const std::wstring& exeDir, const std::wstring& te
 
         ASSERT(!AnySpoolLeft(spoolRoot), L"MS-26: the spool is removed once the resumed match is delivered");
     }
+
+    // ── configure: the same server, settings from InterposerMatchConfigure ───
+    const std::string httpConfig =
+        "Logging:\n"
+        "  Matches: true\n"
+        "MatchStatistics:\n"
+        "  ServerUrl: 'http://127.0.0.1:" + std::to_string(server.Port()) + "/'\n"
+        "  Token: test-token\n"
+        "  GameId: " + std::string(kFakeGameId) + "\n"
+        "  FlushInterval: 200\n";
+    const std::string apiConfig =
+        "Logging:\n"
+        "  Matches: true\n"
+        "MatchStatistics:\n"
+        "  FlushInterval: 200\n";
+
+    WriteTextFile(interposer + L"Config.yml", apiConfig);
+    WriteTextFile(childDir + L"server-url.txt", "http://127.0.0.1:" + std::to_string(server.Port()));
+
+    {
+        std::lock_guard<std::mutex> lock(phaseMutex);
+        phase = L"configure";
+        lastAccepted = 0;
+    }
+
+    server.Clear();
+
+    ASSERT(RunChildProcess(command(L"configure"), exePath) == 0,
+        L"MS-33: the configure child process reported no failures");
+
+    {
+        bool configured = false, onlyConfigured = true;
+
+        for (const FakeRequest& r : server.Requests())
+        {
+            onlyConfigured &= Contains(FakeMatchServer::Lower(r.headers), "authorization: bearer configured-token");
+
+            if (r.path == "/api/Matches")
+            {
+                configured |= Contains(r.body, "\"gameId\":\"55555555-5555-5555-5555-555555555555\"") &&
+                              Contains(r.body, "\"reporterName\":\"configured-server\"") &&
+                              Contains(r.body, "\"externalId\":\"ms-configured\"");
+                onlyConfigured &= !Contains(r.body, "ms-before-configure") && !Contains(r.body, "ms-after-bad-configure");
+            }
+        }
+
+        ASSERT(configured && onlyConfigured,
+            L"MS-34: the configured token, game and reporter are sent, and nothing started before configuring");
+    }
+
+    // ── configure-resume: a crash spooled under Config.yml's settings, picked
+    //    up by a run whose settings come from InterposerMatchConfigure ────────
+    WriteTextFile(interposer + L"Config.yml", httpConfig);
+
+    {
+        std::lock_guard<std::mutex> lock(phaseMutex);
+        phase = L"crash";
+        lastAccepted = 0;
+    }
+
+    server.Clear();
+    RunChildProcess(command(L"crash"), exePath);
+    WriteTextFile(interposer + L"Config.yml", apiConfig);
+
+    {
+        std::lock_guard<std::mutex> lock(phaseMutex);
+        phase = L"resume";
+        lastAccepted = 0;
+    }
+
+    server.Clear();
+
+    ASSERT(AnySpoolLeft(spoolRoot) && RunChildProcess(command(L"configure-resume"), exePath) == 0,
+        L"MS-35: the configure-resume child process reported no failures");
+    ASSERT(!AnySpoolLeft(spoolRoot),
+        L"MS-36: a spooled match is picked up once InterposerMatchConfigure completes the settings");
 
     server.Stop();
     RemoveTree(childDir);

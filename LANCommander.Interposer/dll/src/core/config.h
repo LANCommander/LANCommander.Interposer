@@ -243,6 +243,17 @@ extern std::string  g_msReporterName;   // empty = the computer name
 extern int          g_msFlushInterval;  // ms between batches
 extern bool         g_logMatches;       // Logging.Matches
 
+// MatchStatistics value checks, shared by LoadConfig and InterposerMatchConfigure
+// so a value is accepted or refused the same way from YAML and from the API.
+// NormalizeMatchServerUrl expands %VAR%, trims trailing slashes and spaces, and
+// accepts an empty URL or an http:// / https:// one. NormalizeReporterKind maps
+// any casing of server/host/client onto "Server"/"Host"/"Client".
+bool IsGuidText(const std::string& s);
+bool NormalizeMatchServerUrl(const std::wstring& input, std::wstring& url);
+bool NormalizeReporterKind(const std::string& input, std::string& kind);
+constexpr int kMinMatchFlushInterval = 100;
+constexpr int kMaxMatchFlushInterval = 600000;
+
 // Parse <base>\.interposer\Config.yml, merge the launcher's config overlay over it,
 // and open <base>\.interposer\Logs\<timestamp>.log. Call before MH_EnableHook.
 //

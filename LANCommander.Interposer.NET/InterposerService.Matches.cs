@@ -77,6 +77,30 @@ namespace LANCommander.Interposer.Matches
         public DateTimeOffset? StartedOn { get; init; }
     }
 
+    /// <summary>
+    /// MatchStatistics settings to apply at run time. Every null property keeps the current
+    /// value, which is Config.yml's until something replaces it; an empty string clears one.
+    /// </summary>
+    public sealed class MatchConfig
+    {
+        /// <summary>Turns reporting on or off.</summary>
+        public bool? Enabled { get; init; }
+        /// <summary>The LANCommander server, http:// or https://.</summary>
+        public string? ServerUrl { get; init; }
+        /// <summary>A personal access token with the matches:report scope.</summary>
+        public string? Token { get; init; }
+        /// <summary>The LANCommander game the matches are of.</summary>
+        public Guid? GameId { get; init; }
+        /// <summary>The LANCommander server the matches are played on.</summary>
+        public Guid? ServerId { get; init; }
+        /// <summary>Server, Host or Client.</summary>
+        public string? ReporterKind { get; init; }
+        /// <summary>The reporter's name; empty is the computer name.</summary>
+        public string? ReporterName { get; init; }
+        /// <summary>Time between batches, 100 ms to 10 minutes.</summary>
+        public TimeSpan? FlushInterval { get; init; }
+    }
+
     /// <summary>How delivery of a match is going.</summary>
     public sealed class MatchStatus
     {
@@ -140,6 +164,19 @@ namespace LANCommander.Interposer
             public int ended, delivered;
             [MarshalAs(UnmanagedType.ByValTStr, SizeConst = 256)] public string lastError;
         }
+
+        [StructLayout(LayoutKind.Sequential)]
+        private struct NativeMatchConfig
+        {
+            public uint structSize;
+            public int enabled;
+            public IntPtr serverUrl, token, gameId, serverId, reporterKind, reporterName;
+            public int flushIntervalMs;
+        }
+
+        [DllImport(DllName, CallingConvention = CallingConvention.Cdecl)]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        private static extern bool InterposerMatchConfigure(ref NativeMatchConfig config);
 
         [DllImport(DllName, CallingConvention = CallingConvention.Cdecl)]
         private static extern uint InterposerMatchStart(ref NativeMatchInfo info);
@@ -255,6 +292,48 @@ namespace LANCommander.Interposer
         // =================================================================
         // Match statistics (in-process only)
         // =================================================================
+
+        /// <summary>
+        /// Replaces MatchStatistics settings at run time; null properties keep their current value.
+        /// Applies to matches started afterwards. False, with nothing changed, when a value is invalid.
+        /// </summary>
+        public bool ConfigureMatches(MatchConfig config)
+        {
+            var strings = new[]
+            {
+                config.ServerUrl, config.Token, config.GameId?.ToString("D"), config.ServerId?.ToString("D"),
+                config.ReporterKind, config.ReporterName,
+            };
+
+            var pointers = new IntPtr[strings.Length];
+
+            try
+            {
+                for (var i = 0; i < strings.Length; i++)
+                    pointers[i] = strings[i] == null ? IntPtr.Zero : Marshal.StringToCoTaskMemUTF8(strings[i]);
+
+                var native = new NativeMatchConfig
+                {
+                    structSize      = (uint)Marshal.SizeOf<NativeMatchConfig>(),
+                    enabled         = config.Enabled is { } on ? (on ? 1 : 0) : -1,
+                    serverUrl       = pointers[0],
+                    token           = pointers[1],
+                    gameId          = pointers[2],
+                    serverId        = pointers[3],
+                    reporterKind    = pointers[4],
+                    reporterName    = pointers[5],
+                    flushIntervalMs = config.FlushInterval is { } interval ? (int)Math.Clamp(interval.TotalMilliseconds, 1, int.MaxValue) : 0,
+                };
+
+                return InterposerMatchConfigure(ref native);
+            }
+            finally
+            {
+                foreach (var pointer in pointers)
+                    if (pointer != IntPtr.Zero)
+                        Marshal.FreeCoTaskMem(pointer);
+            }
+        }
 
         /// <summary>Starts, or carries on with, a match. Returns its handle, 0 on bad arguments.</summary>
         public uint StartMatch(MatchInfo info)

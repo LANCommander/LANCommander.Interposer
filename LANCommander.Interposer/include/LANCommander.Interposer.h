@@ -421,6 +421,30 @@ typedef struct InterposerMatchStatus {
     wchar_t lastError[256];     /* the last delivery problem, empty when none */
 } InterposerMatchStatus;
 
+typedef struct InterposerMatchConfig {
+    DWORD       structSize;      /* sizeof(InterposerMatchConfig) -- version guard */
+    int         enabled;         /* 1 = on, 0 = off, negative = unchanged */
+    const char* serverUrl;       /* http:// or https://, %VAR%-expanded; "" clears it */
+    const char* token;           /* bearer token with matches:report, %VAR%-expanded; "" clears it */
+    const char* gameId;          /* LANCommander game id (GUID); "" clears it */
+    const char* serverId;        /* LANCommander server id (GUID); "" clears it */
+    const char* reporterKind;    /* "Server", "Host" or "Client" */
+    const char* reporterName;    /* "" = the computer name */
+    int         flushIntervalMs; /* 100..600000; 0 = unchanged */
+} InterposerMatchConfig;
+
+/* Set the MatchStatistics configuration at run time, for a host that keeps its
+ * settings somewhere other than Config.yml (a game server's own config files).
+ * Each NULL field (or negative/0 number, as noted) keeps the current value, so
+ * Config.yml still supplies whatever the caller leaves out. Every field is
+ * checked first and nothing changes if any is invalid: returns FALSE then, or
+ * for a NULL config or one whose structSize is too small. The new settings
+ * apply to matches started afterwards and to every request sent from now on;
+ * a match already open keeps its game, server and reporter. The first call
+ * that completes the HTTP settings also picks up matches a previous run left
+ * unsent in .interposer\Matches\. */
+INTERPOSER_API BOOL INTERPOSER_CALL InterposerMatchConfigure(const InterposerMatchConfig* config);
+
 /* Start (or carry on with) a match. Returns its handle, 0 on bad arguments. */
 INTERPOSER_API DWORD INTERPOSER_CALL InterposerMatchStart(const InterposerMatchInfo* info);
 

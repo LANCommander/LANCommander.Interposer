@@ -23,7 +23,17 @@
  * installed but change nothing. A Debug build of the library waits for a
  * debugger in InterposerEmbeddedAttach, exactly as the Debug DLL does.
  *
- * Windows only.
+ * Linux: the same arrangement for a host shared object -- a game server
+ * plugin -- linking LANCommander.Interposer.Static whole (the same CMake target
+ * does it, with -Wl,--whole-archive). There is no DllMain to call from: call
+ * InterposerEmbeddedAttach once the host is loaded (its init hook, after every
+ * static constructor has run) and InterposerEmbeddedDetach before it unloads.
+ * Attach brings up the config, the session log, the launcher's event channel,
+ * match statistics and plugins -- the API, not the hooks: the libc
+ * interposers are linked in but stay disabled. The host must export
+ * Interposer* from its dynamic symbol table (a version script naming them),
+ * for the same reason the Windows image must: a second copy and the plugins
+ * find the first by name.
  */
 #ifndef LANCOMMANDER_INTERPOSER_EMBEDDED_H
 #define LANCOMMANDER_INTERPOSER_EMBEDDED_H
@@ -34,6 +44,8 @@
 extern "C" {
 #endif
 
+#ifdef _WIN32
+
 /* From DllMain, DLL_PROCESS_ATTACH, before the patch's own hooks: what
  * LANCommander.Interposer.dll does in its DLL_PROCESS_ATTACH. module is the
  * patch's own HINSTANCE. Returns TRUE when this copy now owns the process and
@@ -42,10 +54,35 @@ extern "C" {
  * Either way the API is usable once this returns. Call it once. */
 BOOL INTERPOSER_CALL InterposerEmbeddedAttach(HMODULE module);
 
+/* Instead of InterposerEmbeddedAttach, for a host that only uses the API -- a
+ * game server plugin reporting matches -- and installs no hooks: the config,
+ * the session log, the launcher's event channel, match statistics and
+ * plugins, and no detour anywhere. With no detour pointing into it, the host
+ * may be unloaded while the process runs on. Need not be called from DllMain;
+ * call it once the host is loaded. Returns as InterposerEmbeddedAttach does,
+ * and is undone by the same InterposerEmbeddedDetach. What
+ * InterposerEmbeddedAttach always does on Linux. */
+BOOL INTERPOSER_CALL InterposerEmbeddedAttachApiOnly(HMODULE module);
+
 /* From DllMain, DLL_PROCESS_DETACH, after the patch has removed its own hooks.
  * processTerminating is (lpvReserved != NULL). Does nothing when attach
  * returned FALSE. */
 void INTERPOSER_CALL InterposerEmbeddedDetach(BOOL processTerminating);
+
+#else
+
+/* Once the host is loaded. Returns TRUE when this copy now owns the process;
+ * FALSE when another Interposer (a preloaded one) already does, in which case
+ * every Interposer* call forwards to that one. Either way the API is usable
+ * once this returns. Calling it again does nothing. */
+BOOL INTERPOSER_CALL InterposerEmbeddedAttach(void);
+
+/* Before the host unloads. processTerminating skips stopping the match
+ * statistics thread, as at process exit. Does nothing when attach returned
+ * FALSE. */
+void INTERPOSER_CALL InterposerEmbeddedDetach(BOOL processTerminating);
+
+#endif
 
 #ifdef __cplusplus
 }
