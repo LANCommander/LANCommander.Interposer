@@ -102,6 +102,16 @@ std::string g_rpDefaultButton1Url;
 std::string g_rpDefaultButton2Text;
 std::string g_rpDefaultButton2Url;
 
+bool         g_msEnabled        = true;
+std::wstring g_msServerUrl;
+std::string  g_msToken;
+std::string  g_msGameId;
+std::string  g_msServerId;
+std::string  g_msReporterKind   = "Server";
+std::string  g_msReporterName;
+int          g_msFlushInterval  = 2000;
+bool         g_logMatches       = false;
+
 static std::vector<FileRedirect> g_redirects;
 static platform::FileHandle      g_logHandle = platform::kInvalidFile;
 static std::mutex                g_logMutex;
@@ -850,6 +860,22 @@ void LogRelay(const wchar_t* verb, const wchar_t* info, const wchar_t* detail)
 void LogRelayDiag(const wchar_t* verb, const wchar_t* info, const wchar_t* detail)
 {
     if (!g_logRelay || g_logLevel < LogLevel::Debug)
+        return;
+
+    WriteLogLine(verb, info, detail);
+}
+
+void LogMatch(const wchar_t* verb, const wchar_t* info, const wchar_t* detail)
+{
+    if (!g_logMatches)
+        return;
+
+    WriteLogLine(verb, info, detail);
+}
+
+void LogMatchDiag(const wchar_t* verb, const wchar_t* info, const wchar_t* detail)
+{
+    if (!g_logMatches || g_logLevel < LogLevel::Debug)
         return;
 
     WriteLogLine(verb, info, detail);
@@ -2028,6 +2054,8 @@ void LoadConfig()
             g_logOsVersion = logging["OsVersion"].as<bool>(false);
         if (logging["Relay"])
             g_logRelay = logging["Relay"].as<bool>(false);
+        if (logging["Matches"])
+            g_logMatches = logging["Matches"].as<bool>(false);
 
         // Verbosity within whichever subsystems are enabled above. Unrecognized
         // values fall back to Info so a typo never silently suppresses output.
@@ -2566,6 +2594,118 @@ void LoadConfig()
             g_rpDefaultButton2Text = rp["Button2Text"].as<std::string>("");
         if (rp["Button2Url"])
             g_rpDefaultButton2Url = rp["Button2Url"].as<std::string>("");
+    }
+
+    // ── MatchStatistics ─────────────────────────────────────────────────────
+    // Where InterposerMatch* reports go (matches.cpp). ServerUrl and Token are
+    // %VAR%-expanded, so a token can be kept in the environment rather than
+    // the file.
+    if (YAML::Node ms = root["MatchStatistics"])
+    {
+        auto text = [&](const char* key) { return ms[key] ? ms[key].as<std::string>("") : std::string(); };
+
+        auto isGuid = [](const std::string& s)
+        {
+            if (s.size() != 36)
+                return false;
+
+            for (size_t i = 0; i < s.size(); ++i)
+            {
+                const bool dash = i == 8 || i == 13 || i == 18 || i == 23;
+
+                if (dash ? s[i] != '-' : !std::isxdigit(static_cast<unsigned char>(s[i])))
+                    return false;
+            }
+
+            return true;
+        };
+
+        try
+        {
+            if (ms["Enabled"])
+                g_msEnabled = ms["Enabled"].as<bool>(true);
+        }
+        catch (const YAML::Exception&)
+        {
+            configWarnings.push_back(L"MatchStatistics.Enabled is not true or false");
+        }
+
+        if (ms["ServerUrl"])
+        {
+            std::wstring url = ExpandEnvVars(Utf8ToWide(text("ServerUrl")));
+
+            while (!url.empty() && (url.back() == L'/' || url.back() == L' '))
+                url.pop_back();
+
+            std::wstring lower = url.substr(0, 8);
+            for (auto& c : lower)
+                c = static_cast<wchar_t>(std::towlower(c));
+
+            if (url.empty() || lower.rfind(L"http://", 0) == 0 || lower.rfind(L"https://", 0) == 0)
+                g_msServerUrl = url;
+            else
+                configWarnings.push_back(L"MatchStatistics.ServerUrl is not an http:// or https:// URL: " + url);
+        }
+
+        if (ms["Token"])
+            g_msToken = WideToUtf8(ExpandEnvVars(Utf8ToWide(text("Token"))));
+
+        if (ms["GameId"])
+        {
+            g_msGameId = text("GameId");
+
+            if (!g_msGameId.empty() && !isGuid(g_msGameId))
+            {
+                configWarnings.push_back(L"MatchStatistics.GameId is not a GUID: " + Utf8ToWide(g_msGameId));
+                g_msGameId.clear();
+            }
+        }
+
+        if (ms["ServerId"])
+        {
+            g_msServerId = text("ServerId");
+
+            if (!g_msServerId.empty() && !isGuid(g_msServerId))
+            {
+                configWarnings.push_back(L"MatchStatistics.ServerId is not a GUID: " + Utf8ToWide(g_msServerId));
+                g_msServerId.clear();
+            }
+        }
+
+        if (ms["ReporterKind"])
+        {
+            std::string kind = text("ReporterKind");
+            std::string lower = kind;
+
+            for (auto& c : lower)
+                c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+
+            if (lower == "server")      g_msReporterKind = "Server";
+            else if (lower == "host")   g_msReporterKind = "Host";
+            else if (lower == "client") g_msReporterKind = "Client";
+            else
+                configWarnings.push_back(L"MatchStatistics.ReporterKind is not Server, Host or Client: " + Utf8ToWide(kind));
+        }
+
+        if (ms["ReporterName"])
+            g_msReporterName = text("ReporterName");
+
+        try
+        {
+            if (ms["FlushInterval"])
+            {
+                const int interval = ms["FlushInterval"].as<int>();
+
+                if (interval >= 100 && interval <= 600000)
+                    g_msFlushInterval = interval;
+                else
+                    configWarnings.push_back(L"MatchStatistics.FlushInterval must be between 100 and 600000 ms");
+            }
+        }
+        catch (const YAML::Exception&)
+        {
+            configWarnings.push_back(L"MatchStatistics.FlushInterval is not a number");
+        }
     }
 
     // ── Open log at .interposer\Logs\<timestamp>.log ──────────────────────────

@@ -308,6 +308,9 @@ static bool DoGetDownload(const std::wstring& url, const std::wstring& localPath
 // ---------------------------------------------------------------------------
 // Public API
 // ---------------------------------------------------------------------------
+// InitFastDL opened the HTTP client, and ShutdownFastDL owes it a Shutdown.
+static bool g_fastdlHttpOpen = false;
+
 void InitFastDL()
 {
     if (!g_fastdlEnabled)
@@ -318,7 +321,7 @@ void InitFastDL()
     if (std::string url = platform::ReadLauncherValue(L"InterposerFastDL"); !url.empty())
         g_fastdlBaseUrl = platform::Utf8ToWide(url);
 
-    platform::http::Initialize();
+    g_fastdlHttpOpen = platform::http::Initialize();
 
     // The DLL's own path and directory (needed below)
     const std::wstring dllPath = platform::ModulePath();
@@ -389,7 +392,12 @@ void InitFastDL()
 
 void ShutdownFastDL()
 {
-    platform::http::Shutdown();
+    // The client is counted -- match reporting may hold it too -- so only the
+    // reference InitFastDL took is given back.
+    if (g_fastdlHttpOpen)
+        platform::http::Shutdown();
+
+    g_fastdlHttpOpen = false;
 }
 
 // Shared implementation for TryFastDLDownload and FastDLFileExists.
@@ -473,7 +481,9 @@ bool TryFastDLDownload(const std::wstring& localPath)
 
 void ProbeServerForFastDL(const std::wstring& host, int probePort, int gameServerPort)
 {
-    if (!platform::http::Ready())
+    // The client may be open for match reporting alone, so Ready() is not
+    // enough to say FastDL is on.
+    if (!g_fastdlEnabled || !platform::http::Ready())
         return;
 
     // Skip immediately if we already have a verified URL — nothing better exists.

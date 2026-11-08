@@ -27,6 +27,8 @@ set(INTERPOSER_CORE_SOURCES
     dll/src/core/config.cpp
     dll/src/core/fastdl.cpp
     dll/src/core/file_access.cpp
+    dll/src/core/json.cpp
+    dll/src/core/matches.cpp
     dll/src/core/network_filter.cpp
     dll/src/core/pipe_events.cpp
     dll/src/core/plugins.cpp

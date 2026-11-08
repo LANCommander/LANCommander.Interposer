@@ -10,6 +10,7 @@ enum PipeEventType : int
     PIPE_EVENT_IDENTITY = 5,
     PIPE_EVENT_RELAY    = 6, // field1 kind, field2 address, field3 detail, intField value
     PIPE_EVENT_PRESENCE = 7, // field1 kind ("UPDATE" | "CLEAR"), field2 JSON (UPDATE only)
+    PIPE_EVENT_MATCH    = 8, // field1 kind (START, PARTICIPANT, EVENT, END, ATTACH), field2 JSON, intField handle
 };
 
 // Try to connect to the host's named pipe (\\.\pipe\InterposerEvents_{pid}).
@@ -18,6 +19,9 @@ void ConnectEventPipe();
 
 // Disconnect and close the pipe handle.
 void DisconnectEventPipe();
+
+// True while a launcher is listening on the event channel.
+bool EventPipeConnected();
 
 // Send an event over the pipe. No-op if the pipe isn't connected.
 // All strings are nullable (sent as zero-length). intField is the port for

@@ -13,15 +13,26 @@
 #include "LANCommander.Interposer.h"
 #include "LANCommander.Interposer.Comms.Server.h"
 
+#include <atomic>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <cwchar>
 #include <filesystem>
 #include <fstream>
+#include <functional>
+#include <mutex>
+#include <set>
 #include <sstream>
 #include <string>
+#include <thread>
+#include <tuple>
 #include <vector>
+
+#include <arpa/inet.h>
+#include <netinet/in.h>
+#include <poll.h>
+#include <sys/socket.h>
 
 #include <dlfcn.h>
 #include <fcntl.h>
@@ -234,6 +245,10 @@ static const char* const kHeaderExports[] = {
     "InterposerSetPresenceSmallImage", "InterposerSetPresenceParty",
     "InterposerSetPresenceButton", "InterposerSetPresenceType",
     "InterposerSetPresenceName", "InterposerUpdatePresence", "InterposerClearPresence",
+    "InterposerMatchStart", "InterposerMatchPlayerJoined", "InterposerMatchPlayerLeft",
+    "InterposerMatchEvent", "InterposerMatchSetStatistic", "InterposerMatchAddStatistic",
+    "InterposerMatchSetResult", "InterposerMatchEnd", "InterposerMatchAttachFile",
+    "InterposerMatchFlush", "InterposerMatchGetStatus", "InterposerRegisterMatchCallback",
 };
 
 static void RunExportTests(void* so)
@@ -955,6 +970,569 @@ static void WriteFixture(const fs::path& dir)
     WriteText(plugins / "Nested" / "notaplugin.txt", "not a shared object\n");
 }
 
+// ── Match statistics (MS-) ────────────────────────────────────────────────────
+//
+// The Windows suite's MS- tests, on the same plan: in process the default
+// fixture has no MatchStatistics section, so a match only reaches the
+// callback; the HTTP sink runs in child processes (--match-http <dir> <phase>)
+// against a fake LANCommander server on loopback, run by a thread here.
+
+static std::vector<std::tuple<std::wstring, DWORD, std::wstring>> g_matchEvents;
+
+static void OnMatchEvent(const wchar_t* kind, DWORD match, const wchar_t* json)
+{
+    g_matchEvents.emplace_back(kind ? kind : L"", match, json ? json : L"<null>");
+}
+
+static bool WContains(const std::wstring& text, const wchar_t* needle)
+{
+    return text.find(needle) != std::wstring::npos;
+}
+
+struct MatchApi
+{
+    decltype(&InterposerMatchStart)            start = nullptr;
+    decltype(&InterposerMatchPlayerJoined)     joined = nullptr;
+    decltype(&InterposerMatchEvent)            event = nullptr;
+    decltype(&InterposerMatchAddStatistic)     addStat = nullptr;
+    decltype(&InterposerMatchSetStatistic)     setStat = nullptr;
+    decltype(&InterposerMatchSetResult)        setResult = nullptr;
+    decltype(&InterposerMatchEnd)              end = nullptr;
+    decltype(&InterposerMatchAttachFile)       attach = nullptr;
+    decltype(&InterposerMatchFlush)            flush = nullptr;
+    decltype(&InterposerMatchGetStatus)        status = nullptr;
+    decltype(&InterposerRegisterMatchCallback) registerCb = nullptr;
+
+    bool Load(void* so)
+    {
+        start      = Resolve<decltype(start)>(so, "InterposerMatchStart");
+        joined     = Resolve<decltype(joined)>(so, "InterposerMatchPlayerJoined");
+        event      = Resolve<decltype(event)>(so, "InterposerMatchEvent");
+        addStat    = Resolve<decltype(addStat)>(so, "InterposerMatchAddStatistic");
+        setStat    = Resolve<decltype(setStat)>(so, "InterposerMatchSetStatistic");
+        setResult  = Resolve<decltype(setResult)>(so, "InterposerMatchSetResult");
+        end        = Resolve<decltype(end)>(so, "InterposerMatchEnd");
+        attach     = Resolve<decltype(attach)>(so, "InterposerMatchAttachFile");
+        flush      = Resolve<decltype(flush)>(so, "InterposerMatchFlush");
+        status     = Resolve<decltype(status)>(so, "InterposerMatchGetStatus");
+        registerCb = Resolve<decltype(registerCb)>(so, "InterposerRegisterMatchCallback");
+
+        return start && joined && event && addStat && setStat && setResult && end && attach && flush &&
+               status && registerCb;
+    }
+
+    InterposerMatchStatus Status(DWORD match) const
+    {
+        InterposerMatchStatus st{};
+        st.size = sizeof(st);
+        status(match, &st);
+        return st;
+    }
+};
+
+static void RunMatchTests(void* so, const fs::path& dir)
+{
+    printf("\n--- Match Statistics Tests ---\n");
+
+    MatchApi api;
+
+    ASSERT(api.Load(so), "MS-01: every InterposerMatch* function is exported");
+
+    if (!api.start)
+        return;
+
+    api.registerCb(OnMatchEvent);
+
+    InterposerMatchInfo info{};
+    info.structSize   = sizeof(info);
+    info.externalId   = "round-7";
+    info.map          = "de_dust2";
+    info.settingsJson = "{\"timelimit\":20}";
+
+    const DWORD match = api.start(&info);
+
+    ASSERT(match != 0 && g_matchEvents.size() == 1 && std::get<0>(g_matchEvents[0]) == L"START",
+        "MS-02: InterposerMatchStart returns a handle and fires START");
+
+    if (!match || g_matchEvents.empty())
+        return;
+
+    ASSERT(WContains(std::get<2>(g_matchEvents[0]), L"\"settings\":{\"timelimit\":20}") &&
+           WContains(std::get<2>(g_matchEvents[0]), L"\"forward\":false"),
+        "MS-03: START carries the settings verbatim, and forward:false with no launcher");
+
+    ASSERT(api.start(&info) == match, "MS-04: starting the same external id again carries on with the open match");
+
+    api.joined(match, "name:Pat", "Pat caf\xC3\xA9", "red", 0);
+
+    const BOOL kill = api.event(match, "kill", 4200, 268, "name:Pat", "bot:3", "{\"weapon\":\"ak47\"}");
+
+    {
+        std::wstring killJson, participant;
+
+        for (const auto& [kind, handle, json] : g_matchEvents)
+        {
+            if (kind == L"EVENT")       killJson = json;
+            if (kind == L"PARTICIPANT") participant = json;
+        }
+
+        ASSERT(kill && WContains(killJson, L"\"sequence\":1") && WContains(killJson, L"\"tick\":268") &&
+               WContains(killJson, L"\"payload\":{\"weapon\":\"ak47\"}"),
+            "MS-05: EVENT carries a sequence, the tick and the payload");
+
+        ASSERT(WContains(participant, L"\"displayName\":\"Pat café\""),
+            "MS-06: PARTICIPANT names are decoded from UTF-8");
+    }
+
+    ASSERT(!api.event(match, "kill", 1, -1, nullptr, nullptr, "{\"a\":1,}") &&
+           !api.event(match + 1000, "kill", 1, -1, nullptr, nullptr, nullptr) &&
+           !api.setStat(match, nullptr, nullptr, "kills", 1),
+        "MS-07: malformed JSON, an unknown handle and an ownerless statistic are refused");
+
+    api.addStat(match, "name:Pat", nullptr, "kills", 1);
+    api.addStat(match, "name:Pat", nullptr, "kills", 2);
+    api.end(match, "completed", FALSE);
+
+    {
+        std::wstring endJson;
+
+        for (const auto& [kind, handle, json] : g_matchEvents)
+            if (kind == L"END")
+                endJson = json;
+
+        ASSERT(WContains(endJson, L"{\"playerKey\":\"name:Pat\",\"key\":\"kills\",\"value\":3}"),
+            "MS-08: END carries the summed statistics");
+    }
+
+    ASSERT(!api.event(match, "kill", 1, -1, nullptr, nullptr, nullptr) &&
+           api.Status(match).sink == INTERPOSER_MATCH_SINK_NONE && api.Status(match).ended == 1,
+        "MS-09: an ended match takes no more events");
+
+    (void)dir;
+    api.registerCb(nullptr);
+}
+
+// ── The fake LANCommander server ──────────────────────────────────────────────
+
+struct FakeRequest
+{
+    std::string method, path, headers, body;
+    int         status = 0;
+};
+
+class FakeMatchServer
+{
+public:
+    std::function<std::tuple<int, std::string, std::string>(const FakeRequest&)> handler;
+
+    bool Start()
+    {
+        listener_ = socket(AF_INET, SOCK_STREAM | SOCK_CLOEXEC, 0);
+
+        sockaddr_in addr{};
+        addr.sin_family      = AF_INET;
+        addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+
+        if (listener_ < 0 || bind(listener_, reinterpret_cast<sockaddr*>(&addr), sizeof(addr)) != 0 ||
+            listen(listener_, 16) != 0)
+            return false;
+
+        socklen_t length = sizeof(addr);
+        getsockname(listener_, reinterpret_cast<sockaddr*>(&addr), &length);
+        port_ = ntohs(addr.sin_port);
+
+        thread_ = std::thread([this] { Run(); });
+        return true;
+    }
+
+    void Stop()
+    {
+        stop_ = true;
+
+        if (thread_.joinable())
+            thread_.join();
+
+        if (listener_ >= 0)
+            close(listener_);
+
+        listener_ = -1;
+    }
+
+    int Port() const { return port_; }
+
+    std::vector<FakeRequest> Requests()
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        return requests_;
+    }
+
+    void Clear()
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        requests_.clear();
+    }
+
+private:
+    int                      listener_ = -1;
+    int                      port_     = 0;
+    std::thread              thread_;
+    std::atomic<bool>        stop_{ false };
+    std::mutex               mutex_;
+    std::vector<FakeRequest> requests_;
+
+    void Run()
+    {
+        while (!stop_)
+        {
+            pollfd p{ listener_, POLLIN, 0 };
+
+            if (poll(&p, 1, 100) <= 0)
+                continue;
+
+            const int client = accept4(listener_, nullptr, nullptr, SOCK_CLOEXEC);
+
+            if (client >= 0)
+                Serve(client);
+        }
+    }
+
+    void Serve(int client)
+    {
+        timeval tv{ 5, 0 };
+        setsockopt(client, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+
+        std::string data;
+        char        chunk[65536];
+        size_t      headerEnd;
+
+        while ((headerEnd = data.find("\r\n\r\n")) == std::string::npos)
+        {
+            const ssize_t n = recv(client, chunk, sizeof(chunk), 0);
+
+            if (n <= 0)
+            {
+                close(client);
+                return;
+            }
+
+            data.append(chunk, static_cast<size_t>(n));
+        }
+
+        FakeRequest request;
+        request.headers = data.substr(0, headerEnd);
+
+        const size_t space1 = request.headers.find(' ');
+        const size_t space2 = request.headers.find(' ', space1 + 1);
+        request.method = request.headers.substr(0, space1);
+        request.path   = request.headers.substr(space1 + 1, space2 - space1 - 1);
+
+        std::string lower = request.headers;
+        for (char& c : lower)
+            c = static_cast<char>(tolower(static_cast<unsigned char>(c)));
+
+        size_t contentLength = 0;
+        const size_t cl = lower.find("content-length:");
+
+        if (cl != std::string::npos)
+            contentLength = strtoul(lower.c_str() + cl + 15, nullptr, 10);
+
+        request.body = data.substr(headerEnd + 4);
+
+        while (request.body.size() < contentLength)
+        {
+            const ssize_t n = recv(client, chunk, sizeof(chunk), 0);
+
+            if (n <= 0)
+                break;
+
+            request.body.append(chunk, static_cast<size_t>(n));
+        }
+
+        const auto [status, body, extra] = handler(request);
+        request.status = status;
+
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            requests_.push_back(request);
+        }
+
+        const std::string response = "HTTP/1.1 " + std::to_string(status) + " X\r\n" +
+            "Content-Type: application/json\r\n" +
+            "Content-Length: " + std::to_string(body.size()) + "\r\n" +
+            "Connection: close\r\n" + extra + "\r\n" + body;
+
+        send(client, response.data(), response.size(), MSG_NOSIGNAL);
+        shutdown(client, SHUT_WR);
+        close(client);
+    }
+};
+
+static const char* kFakeMatchId    = "11111111-1111-1111-1111-111111111111";
+static const char* kFakeAttachment = "33333333-3333-3333-3333-333333333333";
+
+static std::vector<long long> SequencesIn(const std::string& body)
+{
+    std::vector<long long> out;
+    size_t at = 0;
+
+    while ((at = body.find("\"sequence\":", at)) != std::string::npos)
+    {
+        at += 11;
+        out.push_back(strtoll(body.c_str() + at, nullptr, 10));
+    }
+
+    return out;
+}
+
+static std::tuple<int, std::string, std::string> AnswerMatchRequest(const FakeRequest& r, const std::string& phase,
+                                                                   long long& lastAccepted)
+{
+    const bool post = r.method == "POST";
+
+    if (post && r.path == "/api/Matches")
+        return { 201, std::string("{\"matchId\":\"") + kFakeMatchId +
+            "\",\"reporterId\":\"22222222-2222-2222-2222-222222222222\",\"lastSequence\":" +
+            std::to_string(lastAccepted) + "}", "" };
+
+    if (phase == "crash")
+        return { 503, "", "" };
+
+    if (post && Contains(r.path, "/Events"))
+    {
+        for (long long sequence : SequencesIn(r.body))
+            lastAccepted = std::max(lastAccepted, sequence);
+
+        return { 202, "{\"queued\":1,\"rejected\":[]}", "" };
+    }
+
+    if (post && (Contains(r.path, "/Participants") || Contains(r.path, "/End")))
+        return { 204, "", "" };
+
+    if (post && Contains(r.path, "/Complete"))
+        return { 200, std::string("{\"id\":\"") + kFakeAttachment + "\"}", "" };
+
+    if (post && Contains(r.path, "/Attachments"))
+        return { 201, std::string("{\"id\":\"") + kFakeAttachment + "\"}", "" };
+
+    if (r.method == "PUT")
+        return { 204, "", "" };
+
+    return { 404, "", "" };
+}
+
+static const char kDemoContent[] = "DEMO-CONTENT-0123456789";
+
+static int RunMatchHttpChild(const fs::path& dir, const std::string& phase)
+{
+    printf("\n--- Match Statistics HTTP Tests (child, %s) ---\n", phase.c_str());
+
+    void* so = dlopen((dir / kSo).c_str(), RTLD_NOW | RTLD_LOCAL);
+    MatchApi api;
+
+    if (!so || !api.Load(so))
+    {
+        printf("FAIL  MS-20: child could not load the shared object\n");
+        return 1;
+    }
+
+    InterposerMatchInfo info{};
+    info.structSize = sizeof(info);
+    info.map        = "de_test";
+
+    if (phase == "basic")
+    {
+        info.externalId = "ms-basic";
+        const DWORD match = api.start(&info);
+
+        ASSERT(api.Status(match).sink == INTERPOSER_MATCH_SINK_HTTP,
+            "MS-20: with ServerUrl, Token and GameId the match is sent over HTTP");
+
+        api.joined(match, "name:Alice", "Alice", "red", 0);
+        api.event(match, "kill", 1000, -1, "name:Alice", nullptr, "{\"weapon\":\"rocket\"}");
+        api.event(match, "kill", 2000, -1, "name:Alice", nullptr, nullptr);
+        api.addStat(match, "name:Alice", nullptr, "kills", 2);
+        api.attach(match, (dir / "demo.dem").wstring().c_str(), INTERPOSER_MATCH_ATTACHMENT_DEMO, -1, -1);
+        api.end(match, "completed", FALSE);
+
+        ASSERT(api.flush(match, 15000), "MS-21: InterposerMatchFlush returns once the server has everything");
+
+        for (int i = 0; i < 50 && !api.Status(match).delivered; ++i)
+            usleep(100 * 1000);
+
+        ASSERT(api.Status(match).delivered == 1 && strcmp(api.Status(match).matchId, kFakeMatchId) == 0,
+            "MS-22: the status reports the match delivered with LANCommander's id");
+    }
+    else if (phase == "crash")
+    {
+        info.externalId = "ms-crash";
+        const DWORD match = api.start(&info);
+
+        for (int i = 1; i <= 4; ++i)
+            api.event(match, "tick", i * 1000, -1, nullptr, nullptr, nullptr);
+
+        bool spooled = false;
+
+        for (int i = 0; i < 100 && !spooled; ++i)
+        {
+            usleep(100 * 1000);
+
+            if (!fs::exists(dir / ".interposer" / "Matches"))
+                continue;
+
+            for (const auto& entry : fs::directory_iterator(dir / ".interposer" / "Matches"))
+                spooled |= SequencesIn(ReadText(entry.path() / "events.jsonl")).size() == 4 &&
+                           Contains(ReadText(entry.path() / "match.json"), "\"sequencesFinal\":true") &&
+                           api.Status(match).lastError[0] != 0;
+        }
+
+        ASSERT(spooled, "MS-23: events the server will not take are kept in .interposer/Matches");
+
+        // A crash: no dlclose, no destructors.
+        fflush(stdout);
+        _exit(g_fail);
+    }
+    else if (phase == "resume")
+    {
+        info.externalId = "ms-crash";
+        const DWORD match = api.start(&info);
+
+        api.event(match, "tick", 5000, -1, nullptr, nullptr, nullptr);
+        api.end(match, "completed", FALSE);
+
+        ASSERT(api.flush(match, 15000), "MS-24: the match left by the crashed run is carried on and finished");
+
+        for (int i = 0; i < 50 && !api.Status(match).delivered; ++i)
+            usleep(100 * 1000);
+    }
+
+    dlclose(so);
+    return g_fail;
+}
+
+static bool AnySpoolLeft(const fs::path& root)
+{
+    if (!fs::exists(root))
+        return false;
+
+    for (const auto& entry : fs::directory_iterator(root))
+        if (entry.is_directory())
+            return true;
+
+    return false;
+}
+
+static void RunMatchHttpTests(const fs::path& tmp)
+{
+    printf("\n--- Match Statistics HTTP Tests ---\n");
+
+    FakeMatchServer server;
+    std::string     phase = "basic";
+    long long       lastAccepted = 0;
+    std::mutex      phaseMutex;
+
+    server.handler = [&](const FakeRequest& r)
+    {
+        std::lock_guard<std::mutex> lock(phaseMutex);
+        return AnswerMatchRequest(r, phase, lastAccepted);
+    };
+
+    if (!server.Start())
+    {
+        ASSERT(false, "MS-10: starting the fake LANCommander server");
+        return;
+    }
+
+    const fs::path dir       = tmp / "Matches";
+    const fs::path spoolRoot = dir / ".interposer" / "Matches";
+
+    StageCopy(dir);
+    WriteText(dir / ".interposer" / "Config.yml",
+        "Logging:\n"
+        "  Matches: true\n"
+        "MatchStatistics:\n"
+        "  ServerUrl: 'http://127.0.0.1:" + std::to_string(server.Port()) + "/'\n"
+        "  Token: test-token\n"
+        "  GameId: 44444444-4444-4444-4444-444444444444\n"
+        "  ReporterName: test-server\n"
+        "  FlushInterval: 200\n");
+    WriteText(dir / "demo.dem", kDemoContent);
+
+    ASSERT(RunChild({ "--match-http", dir.string(), "basic" }, {}) == 0,
+        "MS-10: the basic child process reported no failures");
+
+    {
+        bool authorised = false, participants = false, ended = false, uploaded = false;
+        std::vector<long long> sequences;
+
+        for (const FakeRequest& r : server.Requests())
+        {
+            std::string lower = r.headers;
+            for (char& c : lower)
+                c = static_cast<char>(tolower(static_cast<unsigned char>(c)));
+
+            if (r.path == "/api/Matches")
+                authorised = Contains(lower, "authorization: bearer test-token") &&
+                             Contains(r.body, "\"gameId\":\"44444444-4444-4444-4444-444444444444\"") &&
+                             Contains(r.body, "\"reporterName\":\"test-server\"");
+
+            participants |= Contains(r.path, "/Participants") && Contains(r.body, "\"playerKey\":\"name:Alice\"");
+            ended        |= Contains(r.path, "/End") && Contains(r.body, "\"key\":\"kills\",\"value\":2");
+            uploaded     |= r.method == "PUT" && Contains(r.path, "Content?offset=0") && r.body == kDemoContent;
+
+            if (Contains(r.path, "/Events"))
+                for (long long s : SequencesIn(r.body))
+                    sequences.push_back(s);
+        }
+
+        const std::vector<long long> expected{ 1, 2 };
+
+        ASSERT(authorised, "MS-11: the match is registered with the token, the game id and the reporter");
+        ASSERT(participants && sequences == expected && ended,
+            "MS-12: participants, events in sequence, and the end with its statistics are sent");
+        ASSERT(uploaded, "MS-15: the attachment is uploaded over plain HTTP");
+        ASSERT(!AnySpoolLeft(spoolRoot), "MS-16: a delivered match leaves nothing in .interposer/Matches");
+    }
+
+    {
+        std::lock_guard<std::mutex> lock(phaseMutex);
+        phase = "crash";
+        lastAccepted = 0;
+    }
+
+    server.Clear();
+
+    ASSERT(RunChild({ "--match-http", dir.string(), "crash" }, {}) == 0,
+        "MS-17: the crashing child spooled its events before it died");
+    ASSERT(AnySpoolLeft(spoolRoot), "MS-18: the spool survives the crash");
+
+    {
+        std::lock_guard<std::mutex> lock(phaseMutex);
+        phase = "resume";
+        lastAccepted = 2;
+    }
+
+    server.Clear();
+
+    ASSERT(RunChild({ "--match-http", dir.string(), "resume" }, {}) == 0,
+        "MS-19: the resuming child process reported no failures");
+
+    {
+        std::multiset<long long> sent;
+
+        for (const FakeRequest& r : server.Requests())
+            if (Contains(r.path, "/Events") && r.status == 202)
+                for (long long s : SequencesIn(r.body))
+                    sent.insert(s);
+
+        const std::multiset<long long> expected{ 3, 4, 5 };
+
+        ASSERT(sent == expected, "MS-25: only the events after the server's last are resent, the new one follows them");
+        ASSERT(!AnySpoolLeft(spoolRoot), "MS-26: the spool is removed once the resumed match is delivered");
+    }
+
+    server.Stop();
+}
+
 int main(int argc, char** argv)
 {
     if (argc >= 5 && strcmp(argv[1], "--launcher-config") == 0)
@@ -971,6 +1549,9 @@ int main(int argc, char** argv)
 
     if (argc >= 2 && strcmp(argv[1], "--net-child") == 0)
         return RunNetChild();
+
+    if (argc >= 4 && strcmp(argv[1], "--match-http") == 0)
+        return RunMatchHttpChild(argv[2], argv[3]);
 
     char tmpTemplate[] = "/tmp/InterposerTest.XXXXXX";
 
@@ -1008,6 +1589,7 @@ int main(int argc, char** argv)
     RunPluginTests(mainDir);
     RunAdapterEnumTests(so);
     RunCommsTests(so);
+    RunMatchTests(so, mainDir);
 
     dlclose(so);
 
@@ -1042,6 +1624,7 @@ int main(int argc, char** argv)
     RunPreloadTests(tmp);
     RunFileHookTests(tmp);
     RunNetTests(tmp);
+    RunMatchHttpTests(tmp);
 
     printf("\n=== Results: %d passed, %d failed ===\n", g_pass, g_fail);
 

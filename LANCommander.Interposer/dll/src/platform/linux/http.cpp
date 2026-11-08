@@ -17,17 +17,18 @@
 #include <unistd.h>
 
 // A deliberately small HTTP/1.1 client: one request per connection
-// ("Connection: close"), HEAD and GET, bodies sized by Content-Length, chunked,
-// or the end of the connection. http:// only -- a TLS stack is not worth
-// carrying into every game process for FastDL, whose servers are plain HTTP in
-// practice. An https:// URL fails, and says so once in the log.
+// ("Connection: close"), request bodies sized by Content-Length, response
+// bodies sized by Content-Length, chunked, or the end of the connection.
+// http:// only -- a TLS stack is not worth carrying into every game process for
+// FastDL, whose servers are plain HTTP in practice, and LAN LANCommander
+// servers usually are too. An https:// URL fails, and says so once in the log.
 
 namespace platform::http
 {
 
 namespace
 {
-    std::atomic<bool> g_ready{ false };
+    std::atomic<int>  g_users{ 0 };   // Initialize calls not yet matched by Shutdown
     std::atomic<bool> g_warnedHttps{ false };
 
     // WinHTTP's default send/receive timeout, for requests that name none.
@@ -54,7 +55,7 @@ namespace
         if (lower.rfind("https://", 0) == 0)
         {
             if (!g_warnedHttps.exchange(true))
-                InterposerLog(L"FASTDL", (L"https is not supported on this platform: " + wideUrl).c_str());
+                InterposerLog(L"HTTP", (L"https is not supported on this platform: " + wideUrl).c_str());
 
             return url;
         }
@@ -219,13 +220,13 @@ namespace
         }
     };
 
-    struct Response
+    struct ResponseHead
     {
         int                                status = 0;
         std::map<std::string, std::string> headers;   // names lower case
     };
 
-    bool ReadHead(Reader& reader, Response& response)
+    bool ReadHead(Reader& reader, ResponseHead& response)
     {
         std::string line;
 
@@ -274,7 +275,8 @@ namespace
 
     // Connect, send the request, read the status line and headers. -1 on failure.
     int Request(const Url& url, const char* method, const std::wstring& headers,
-                int timeoutMs, Reader*& reader, Response& response)
+                int timeoutMs, Reader*& reader, ResponseHead& response,
+                const void* body = nullptr, size_t bodyBytes = 0)
     {
         const int fd = Connect(url, timeoutMs);
 
@@ -290,8 +292,15 @@ namespace
             request += "User-Agent: LANCommander.Interposer/1.0\r\n";
 
         request += "Connection: close\r\n";
+
+        if (bodyBytes || strcmp(method, "POST") == 0 || strcmp(method, "PUT") == 0)
+            request += "Content-Length: " + std::to_string(bodyBytes) + "\r\n";
+
         request += WideToUtf8(headers);
         request += "\r\n";
+
+        if (bodyBytes)
+            request.append(static_cast<const char*>(body), bodyBytes);
 
         reader = new Reader{ fd, std::string(), false };
 
@@ -306,11 +315,10 @@ namespace
         return fd;
     }
 
-    // Write the body to `out`, by Content-Length, chunks, or to end of stream.
-    bool CopyBody(Reader& reader, const Response& response, int out)
+    // Hand the body to `write`, by Content-Length, chunks, or to end of stream.
+    template <typename Write>
+    bool CopyBody(Reader& reader, const ResponseHead& response, Write write)
     {
-        auto write = [&](const char* data, size_t bytes) { return WriteToFile(out, data, bytes); };
-
         auto te = response.headers.find("transfer-encoding");
         if (te != response.headers.end() && te->second.find("chunked") != std::string::npos)
         {
@@ -368,18 +376,21 @@ namespace
 
 bool Initialize()
 {
-    g_ready = true;
+    ++g_users;
     return true;
 }
 
 void Shutdown()
 {
-    g_ready = false;
+    int users = g_users.load();
+
+    while (users > 0 && !g_users.compare_exchange_weak(users, users - 1))
+        ;
 }
 
 bool Ready()
 {
-    return g_ready;
+    return g_users.load() > 0;
 }
 
 HeadResult Head(const std::wstring& url, const std::wstring& requestHeaders,
@@ -388,11 +399,11 @@ HeadResult Head(const std::wstring& url, const std::wstring& requestHeaders,
     HeadResult result;
     const Url parsed = Parse(url);
 
-    if (!g_ready || !parsed.valid)
+    if (!Ready() || !parsed.valid)
         return result;
 
     Reader*  reader = nullptr;
-    Response response;
+    ResponseHead response;
 
     const int fd = Request(parsed, "HEAD", requestHeaders,
         timeoutMs > 0 ? timeoutMs : kDefaultTimeoutMs, reader, response);
@@ -424,11 +435,11 @@ bool GetToFile(const std::wstring& url, const std::wstring& path)
 {
     const Url parsed = Parse(url);
 
-    if (!g_ready || !parsed.valid)
+    if (!Ready() || !parsed.valid)
         return false;
 
     Reader*  reader = nullptr;
-    Response response;
+    ResponseHead response;
 
     const int fd = Request(parsed, "GET", L"", kDefaultTimeoutMs, reader, response);
 
@@ -447,7 +458,8 @@ bool GetToFile(const std::wstring& url, const std::wstring& path)
 
         if (out >= 0)
         {
-            ok = CopyBody(*reader, response, out);
+            ok = CopyBody(*reader, response,
+                [&](const char* data, size_t bytes) { return WriteToFile(out, data, bytes); });
             close(out);
 
             if (!ok)
@@ -458,6 +470,43 @@ bool GetToFile(const std::wstring& url, const std::wstring& path)
     close(fd);
     delete reader;
     return ok;
+}
+
+Response Send(const wchar_t* method, const std::wstring& url, const std::wstring& requestHeaders,
+              const void* body, size_t bodyBytes, int timeoutMs, size_t maxResponseBytes)
+{
+    Response result;
+    const Url parsed = Parse(url);
+
+    if (!Ready() || !parsed.valid)
+        return result;
+
+    Reader*           reader = nullptr;
+    ResponseHead      head;
+    const std::string verb = WideToUtf8(method);
+
+    const int fd = Request(parsed, verb.c_str(), requestHeaders,
+        timeoutMs > 0 ? timeoutMs : kDefaultTimeoutMs, reader, head, body, bodyBytes);
+
+    if (fd < 0)
+        return result;
+
+    result.status = head.status;
+
+    if (auto it = head.headers.find("retry-after"); it != head.headers.end() &&
+        !it->second.empty() && std::isdigit(static_cast<unsigned char>(it->second[0])))
+        result.retryAfterSeconds = atoi(it->second.c_str());
+
+    CopyBody(*reader, head, [&](const char* data, size_t bytes)
+    {
+        const size_t room = maxResponseBytes - std::min(maxResponseBytes, result.body.size());
+        result.body.append(data, std::min(room, bytes));
+        return true;
+    });
+
+    close(fd);
+    delete reader;
+    return result;
 }
 
 } // namespace platform::http

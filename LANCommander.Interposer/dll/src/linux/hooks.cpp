@@ -4,6 +4,7 @@
 #include "files.h"
 #include "hooking.h"
 #include "identity.h"
+#include "matches.h"
 #include "network.h"
 #include "pipe_events.h"
 #include "plugins.h"
@@ -25,6 +26,8 @@ void InstallHooks()
 
     ConnectEventPipe();
 
+    InitMatches();
+
     LoadPlugins();
 }
 
@@ -32,6 +35,7 @@ void RemoveHooks()
 {
     DisconnectEventPipe();
     UnloadPlugins();
+    ShutdownMatches(false);
     hooking::DisableAll();
     ShutdownFastDL();
     hooking::Uninitialize();

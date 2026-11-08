@@ -97,6 +97,17 @@ namespace platform
 
     void RemoveFile(const std::wstring& path);
 
+    // Remove `path` if it is an empty directory.
+    void RemoveEmptyDirectory(const std::wstring& path);
+
+    // The size of a file in bytes, or -1 when it cannot be opened.
+    long long FileSize(const std::wstring& path);
+
+    // Up to maxBytes of a file, starting at `offset`. False when it cannot be
+    // read; `out` is empty at the end of the file.
+    bool ReadFileRange(const std::wstring& path, long long offset, size_t maxBytes,
+                       std::vector<unsigned char>& out);
+
     // ── Environment ───────────────────────────────────────────────────────────
 
     // An environment variable. False when it is not set.
@@ -131,6 +142,22 @@ namespace platform
     // ── Process and launcher ──────────────────────────────────────────────────
 
     unsigned long ProcessId();
+
+    // ── Threads ───────────────────────────────────────────────────────────────
+
+    // A background thread this module can stop from its unload path.
+    using Thread = void*;
+
+    // Run body(arg) on a new thread. Null on failure.
+    Thread StartThread(void (*body)(void*), void* arg);
+
+    // Wait up to waitMs for body to return, then release the thread. On
+    // Windows a returning body parks rather than exits -- thread exit needs the
+    // loader lock DLL_PROCESS_DETACH holds -- and is terminated here; one that
+    // has not returned in time is terminated anyway, since it would fault once
+    // the module is unmapped. True when body had returned. Never call it while
+    // the process is terminating: the OS has already ended the thread.
+    bool StopThread(Thread thread, int waitMs);
 
     // A UTF-8 value the launcher handed this process before the Interposer
     // loaded, by name (L"InterposerConfig", L"InterposerBaseDirectory", ...).

@@ -334,6 +334,150 @@ INTERPOSER_API void INTERPOSER_CALL InterposerSetPresenceName(const char* name);
 INTERPOSER_API void INTERPOSER_CALL InterposerUpdatePresence(void);
 INTERPOSER_API void INTERPOSER_CALL InterposerClearPresence(void);
 
+/* ===========================================================================
+ * Match statistics -- all strings UTF-8
+ *
+ * Report a multiplayer match to LANCommander: who played, what happened, and
+ * how it ended. A dedicated server and a client patch call the same functions;
+ * where the reports go is decided by configuration, not by the caller:
+ *
+ *   - MatchStatistics.ServerUrl and .Token set (a dedicated server, with a
+ *     token carrying the matches:report scope): the Interposer sends them to
+ *     the LANCommander server itself, batching events, retrying when the
+ *     server is unreachable, and keeping unsent reports on disk
+ *     (.interposer\Matches\) so a crash or restart loses nothing.
+ *   - Otherwise, when LANCommander's launcher started the game: the launcher
+ *     sends them, as the signed-in player.
+ *   - Otherwise they are only logged, and passed to the callback below.
+ *
+ * A match is identified by the handle InterposerMatchStart returns. Several
+ * may be open at once. Calls return FALSE only for a mistake by the caller --
+ * an unknown handle, a missing key, a payload that is not a JSON object, a
+ * change after InterposerMatchEnd -- never because LANCommander cannot be
+ * reached; InterposerMatchGetStatus says how delivery is going.
+ *
+ * Player keys name a player throughout, prefixed by the kind of id:
+ * "steam:STEAM_0:1:123", "name:Pat", "bot:3". Event types and statistic keys
+ * are lowercase with underscores: "kill", "lap_completed", "best_lap_ms".
+ * Game time is milliseconds since the match started by the game's own clock,
+ * so pauses do not count.
+ * ======================================================================== */
+
+/* InterposerMatchResult.status */
+#define INTERPOSER_MATCH_RESULT_FINISHED      0
+#define INTERPOSER_MATCH_RESULT_DID_NOT_FINISH 1
+#define INTERPOSER_MATCH_RESULT_DISQUALIFIED  2
+#define INTERPOSER_MATCH_RESULT_DEFEATED      3
+#define INTERPOSER_MATCH_RESULT_FORFEITED     4
+
+/* InterposerMatchAttachFile kind */
+#define INTERPOSER_MATCH_ATTACHMENT_DEMO       0
+#define INTERPOSER_MATCH_ATTACHMENT_REPLAY     1
+#define INTERPOSER_MATCH_ATTACHMENT_LOG        2
+#define INTERPOSER_MATCH_ATTACHMENT_SCREENSHOT 3
+#define INTERPOSER_MATCH_ATTACHMENT_OTHER      4
+
+/* InterposerMatchStatus.sink */
+#define INTERPOSER_MATCH_SINK_NONE     0   /* logged and passed to the callback only */
+#define INTERPOSER_MATCH_SINK_HTTP     1   /* sent to the LANCommander server by the Interposer */
+#define INTERPOSER_MATCH_SINK_LAUNCHER 2   /* sent by LANCommander's launcher */
+
+typedef struct InterposerMatchInfo {
+    DWORD       structSize;     /* sizeof(InterposerMatchInfo) -- version guard */
+    const char* externalId;     /* the game's own id for the match (a round or session id), or
+                                   NULL for a generated one. Starting a match again under the same
+                                   id carries on with it -- after a restart, too. */
+    const char* map;
+    const char* mode;
+    const char* gameVersion;
+    const char* serverName;     /* for a server LANCommander does not manage, else NULL */
+    const char* serverAddress;  /* likewise: the address players connect to */
+    const char* settingsJson;   /* the rules played with (time limit, cvars), a JSON object, or NULL */
+    const char* metadataJson;   /* anything else to keep, a JSON object, or NULL */
+    long long   startedOn;      /* Unix milliseconds UTC, 0 = now */
+} InterposerMatchInfo;
+
+typedef struct InterposerMatchResult {
+    DWORD       structSize;     /* sizeof(InterposerMatchResult) */
+    const char* playerKey;      /* a player key, a team, or both */
+    const char* team;
+    int         rank;           /* 1 for the winner; tied entries share a rank */
+    int         status;         /* INTERPOSER_MATCH_RESULT_* */
+    int         hasScore;       /* 0 = no score */
+    double      score;
+    long long   timeMs;         /* a finishing time, for races; negative = none */
+    const char* payloadJson;    /* anything else for the entry, a JSON object, or NULL */
+} InterposerMatchResult;
+
+typedef struct InterposerMatchStatus {
+    DWORD   size;               /* caller sets to sizeof(InterposerMatchStatus) */
+    int     sink;               /* INTERPOSER_MATCH_SINK_* */
+    char    matchId[40];        /* LANCommander's id for the match, empty until it is known */
+    DWORD   pendingEvents;      /* recorded and not yet accepted by the server */
+    DWORD   rejectedEvents;     /* refused by the server; never retried */
+    DWORD   pendingAttachments; /* attached and not yet uploaded */
+    int     ended;              /* InterposerMatchEnd was called */
+    int     delivered;          /* everything, the end and attachments included, has been accepted */
+    wchar_t lastError[256];     /* the last delivery problem, empty when none */
+} InterposerMatchStatus;
+
+/* Start (or carry on with) a match. Returns its handle, 0 on bad arguments. */
+INTERPOSER_API DWORD INTERPOSER_CALL InterposerMatchStart(const InterposerMatchInfo* info);
+
+/* A player joined, or changed name or team. gameTimeMs negative = unknown. */
+INTERPOSER_API BOOL INTERPOSER_CALL InterposerMatchPlayerJoined(DWORD match, const char* playerKey,
+    const char* displayName, const char* team, long long gameTimeMs);
+
+/* A player left. gameTimeMs negative = unknown. */
+INTERPOSER_API BOOL INTERPOSER_CALL InterposerMatchPlayerLeft(DWORD match, const char* playerKey, long long gameTimeMs);
+
+/* Something happened. actorKey is who caused it, subjectKey who it happened
+ * to (a kill's victim); either may be NULL. payloadJson is the detail as a JSON
+ * object, or NULL: refer to players by key, give durations in whole
+ * milliseconds with an _ms suffix, and leave out derived values such as rates.
+ * tick is the game's simulation tick, negative when it has none. */
+INTERPOSER_API BOOL INTERPOSER_CALL InterposerMatchEvent(DWORD match, const char* type, long long gameTimeMs,
+    long long tick, const char* actorKey, const char* subjectKey, const char* payloadJson);
+
+/* An end-of-match total for a player (playerKey) or a team (team, playerKey
+ * NULL). Set replaces the value; Add adds to the running total the Interposer
+ * keeps, so a patch can count kills as they happen. Sent with the end. */
+INTERPOSER_API BOOL INTERPOSER_CALL InterposerMatchSetStatistic(DWORD match, const char* playerKey,
+    const char* team, const char* key, double value);
+INTERPOSER_API BOOL INTERPOSER_CALL InterposerMatchAddStatistic(DWORD match, const char* playerKey,
+    const char* team, const char* key, double delta);
+
+/* A player's or team's place in the final standings. Setting the same player
+ * or team again replaces it. Sent with the end. */
+INTERPOSER_API BOOL INTERPOSER_CALL InterposerMatchSetResult(DWORD match, const InterposerMatchResult* result);
+
+/* End the match. reason is e.g. "completed", "time_limit" or "aborted" (may be
+ * NULL); abandoned means it was cut short and its results should not count. */
+INTERPOSER_API BOOL INTERPOSER_CALL InterposerMatchEnd(DWORD match, const char* reason, BOOL abandoned);
+
+/* Attach a file -- a demo, a log -- to the match, uploaded in the background.
+ * Allowed before or after the end. startMs/endMs are the game time the file
+ * covers, negative when unknown. The file must stay in place until
+ * InterposerMatchGetStatus reports it uploaded. Needs the HTTP sink (or the
+ * launcher's): with neither it is only logged. */
+INTERPOSER_API BOOL INTERPOSER_CALL InterposerMatchAttachFile(DWORD match, const wchar_t* path, int kind,
+    long long startMs, long long endMs);
+
+/* Send everything recorded so far, and wait up to timeoutMs for the server to
+ * take it -- for a server about to shut down. TRUE when nothing is left
+ * waiting. Returns at once for a match that is not sent over HTTP. */
+INTERPOSER_API BOOL INTERPOSER_CALL InterposerMatchFlush(DWORD match, DWORD timeoutMs);
+
+/* Returns FALSE for an unknown handle, or if status->size is too small. */
+INTERPOSER_API BOOL INTERPOSER_CALL InterposerMatchGetStatus(DWORD match, InterposerMatchStatus* status);
+
+/* Every step of every match, whatever the sink: kind is "START",
+ * "PARTICIPANT", "EVENT", "END" or "ATTACH", and json describes it (see
+ * MatchStatistics.md). Fired on the calling thread, outside any lock. */
+typedef void (INTERPOSER_CALL* InterposerMatchCallback)(const wchar_t* kind, DWORD match, const wchar_t* json);
+
+INTERPOSER_API void INTERPOSER_CALL InterposerRegisterMatchCallback(InterposerMatchCallback cb);
+
 #ifdef __cplusplus
 }
 #endif

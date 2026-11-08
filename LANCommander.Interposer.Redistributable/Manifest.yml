@@ -178,6 +178,11 @@ OptionSchema: |
           DisplayName: Network Relay
           Description: Log the network relay - connecting, the virtual address assigned, peers joining and leaving, and tunnelled TCP connections. Debug adds portals and IPX binds; Trace adds every datagram relayed.
           Default: "false"
+        Matches:
+          Type: bool
+          DisplayName: Match Statistics
+          Description: Log matches started, ended and delivered to LANCommander. Debug adds every event, player and batch sent. Delivery errors are logged regardless.
+          Default: "false"
         Level:
           Type: choice
           DisplayName: Level
@@ -487,6 +492,49 @@ OptionSchema: |
               Type: string
               DisplayName: Remote
               Description: Sub-path appended to the base URL before the relative file path. Leave blank to map directly under the base URL.
+
+    MatchStatistics:
+      DisplayName: Match Statistics
+      Description: Where the matches a game patch or dedicated server reports go. With a server URL, token and game id the Interposer sends them to LANCommander itself, keeping anything undelivered on disk until it is; without them the launcher reports them as the signed-in player. Nothing here makes a game report matches - only a patch that calls the match API does.
+      Options:
+        Enabled:
+          Type: bool
+          DisplayName: Enabled
+          Description: Report matches at all.
+          Default: "true"
+        ServerUrl:
+          Type: string
+          DisplayName: Server URL
+          Description: The LANCommander server to send matches to, for a dedicated server. https works on Windows; on Linux only http does.
+        Token:
+          Type: string
+          DisplayName: Token
+          Description: A personal access token with the matches:report scope. Reports are trusted as far as its owner is. %VARIABLE% is expanded, so an environment variable can hold it instead.
+        GameId:
+          Type: string
+          DisplayName: Game ID
+          Description: The game's id in LANCommander. Required to send matches directly.
+        ServerId:
+          Type: string
+          DisplayName: Server ID
+          Description: The game server's id in LANCommander, when it manages this server.
+        ReporterKind:
+          Type: choice
+          DisplayName: Reporter Kind
+          Default: "Server"
+          Choices:
+            - { Value: "Server", DisplayName: "Dedicated server" }
+            - { Value: "Host", DisplayName: "Player hosting the match" }
+            - { Value: "Client", DisplayName: "Player's client" }
+        ReporterName:
+          Type: string
+          DisplayName: Reporter Name
+          Description: Tells this reporter apart from others reporting the same match. Defaults to the computer name; keep it stable so a restarted server resumes its matches.
+        FlushInterval:
+          Type: int
+          DisplayName: Flush Interval
+          Description: Milliseconds between batches of events.
+          Default: "2000"
 
     RichPresence:
       DisplayName: Rich Presence

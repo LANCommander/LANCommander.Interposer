@@ -225,6 +225,28 @@ An Interposer that LANCommander deployed as `version.dll` would otherwise detour
 the `DirectInputCreateA` of whatever module is named `dinput.dll`. That is your
 patch, and for a game it bridges, the call would never reach your wrapper.
 
+## Reporting matches
+
+A patch can report the matches it sees to LANCommander, for its leaderboards and match
+history: who joined, kills, laps, the final standings, a demo. Call the `InterposerMatch*`
+functions as the game reports them. The Interposer batches, retries and keeps what it
+has not delivered on disk:
+
+```c
+InterposerMatchInfo info = { sizeof(info) };
+info.externalId = roundId;
+info.map        = mapName;
+
+DWORD match = InterposerMatchStart(&info);
+InterposerMatchEvent(match, "kill", gameTimeMs, -1, "steam:STEAM_0:1:1", "bot:3", "{\"weapon\":\"rocket\"}");
+InterposerMatchAddStatistic(match, "steam:STEAM_0:1:1", NULL, "kills", 1);
+InterposerMatchEnd(match, "completed", FALSE);
+```
+
+Where the reports go is configuration, not code. A dedicated server sends them itself
+with a token. A client's go through LANCommander's launcher. See
+[Match Statistics](./MatchStatistics.md).
+
 ## Alongside LANCommander's own deployment
 
 A game you have patched may also have the Interposer deployed to it by

@@ -151,6 +151,20 @@ interposer.PresenceChanged += (s, e) =>
 
 `RichPresence` has every field the game can set (see [Rich Presence](https://github.com/LANCommander/LANCommander.Interposer/blob/main/LANCommander.Interposer.Documentation/RichPresence.md)); unset strings are empty and unset numbers 0. `LargeImage` and `SmallImage` hold what the game set, which is usually a Discord asset key: only `https://` URLs can be shown outside Discord. In-process, `EnableEvents` delivers the same event.
 
+Matches a game patch reports through the `InterposerMatch*` API arrive the same way, one event per step (start, player, event, end, attachment):
+
+```csharp
+interposer.MatchReported += (s, e) =>
+{
+    if (e.Kind == MatchReportKind.Start && e.Start is { Forward: true } start)
+        Console.WriteLine($"Match {start.ExternalId} on {start.Map}: the launcher should report it");
+    else if (e.Event is { } ev)
+        Console.WriteLine($"#{ev.Sequence} {ev.Type} at {ev.GameTimeMilliseconds} ms");
+};
+```
+
+The JSON behind each step is shaped like LANCommander's own match request models. `Start.Forward` is true only when the game has no LANCommander server configured to send the match itself: report the match only then, or it is reported twice. See [Match Statistics](https://github.com/LANCommander/LANCommander.Interposer/blob/main/LANCommander.Interposer.Documentation/MatchStatistics.md).
+
 The server side is the separate `LANCommander.Interposer.Relay` library. See the [Network Relay](https://github.com/LANCommander/LANCommander.Interposer/blob/main/LANCommander.Interposer.Documentation/NetworkRelay.md) docs.
 
 ## One DLL, Many Games

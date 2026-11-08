@@ -353,6 +353,7 @@ $loggingDefaults = [ordered]@{
     Audio        = $false
     OsVersion    = $false
     Relay        = $false
+    Matches      = $false
 }
 
 $lines.Add('Logging:')
@@ -513,6 +514,17 @@ $lines.Add('')
 $lines.Add('  Discord:')
 $lines.Add("    Enabled: $(Format-YamlBool (Get-BoolOption $Options 'RichPresence.Discord.Enabled' $false))")
 $lines.Add("    ApplicationId: $(Format-YamlString (Get-StringOption $Options 'RichPresence.Discord.ApplicationId'))")
+$lines.Add('')
+
+$lines.Add('MatchStatistics:')
+$lines.Add("  Enabled: $(Format-YamlBool (Get-BoolOption $Options 'MatchStatistics.Enabled' $true))")
+$lines.Add("  ServerUrl: $(Format-YamlString (Get-StringOption $Options 'MatchStatistics.ServerUrl'))")
+$lines.Add("  Token: $(Format-YamlString (Get-StringOption $Options 'MatchStatistics.Token'))")
+$lines.Add("  GameId: $(Format-YamlString (Get-StringOption $Options 'MatchStatistics.GameId'))")
+$lines.Add("  ServerId: $(Format-YamlString (Get-StringOption $Options 'MatchStatistics.ServerId'))")
+$lines.Add("  ReporterKind: $(Format-YamlString (Get-StringOption $Options 'MatchStatistics.ReporterKind' 'Server'))")
+$lines.Add("  ReporterName: $(Format-YamlString (Get-StringOption $Options 'MatchStatistics.ReporterName'))")
+$lines.Add("  FlushInterval: $(Get-IntOption $Options 'MatchStatistics.FlushInterval' 2000)")
 $lines.Add('')
 
 # Plugins register their own defaults under this key at runtime.

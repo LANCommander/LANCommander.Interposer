@@ -15,6 +15,7 @@ static std::atomic<InterposerNetworkCallback>  g_networkCallback{nullptr};
 static std::atomic<InterposerIdentityCallback> g_identityCallback{nullptr};
 static std::atomic<InterposerRelayCallback>    g_relayCallback{nullptr};
 static std::atomic<InterposerPresenceCallback> g_presenceCallback{nullptr};
+static std::atomic<InterposerMatchCallback>    g_matchCallback{nullptr};
 
 // ---------------------------------------------------------------------------
 // Registration exports
@@ -68,6 +69,13 @@ extern "C" INTERPOSER_API void InterposerRegisterPresenceCallback(InterposerPres
     g_presenceCallback.store(cb, std::memory_order_release);
 }
 
+extern "C" INTERPOSER_API void InterposerRegisterMatchCallback(InterposerMatchCallback cb)
+{
+    FORWARD_TO_PRIMARY(InterposerRegisterMatchCallback, cb);
+
+    g_matchCallback.store(cb, std::memory_order_release);
+}
+
 // ---------------------------------------------------------------------------
 // Fire helpers
 // ---------------------------------------------------------------------------
@@ -118,4 +126,11 @@ void FirePresenceCallback(const wchar_t* kind, const wchar_t* json)
     auto cb = g_presenceCallback.load(std::memory_order_acquire);
     if (cb) cb(kind, json);
     SendPipeEvent(PIPE_EVENT_PRESENCE, kind, json);
+}
+
+void FireMatchCallback(const wchar_t* kind, DWORD match, const wchar_t* json)
+{
+    auto cb = g_matchCallback.load(std::memory_order_acquire);
+    if (cb) cb(kind, match, json);
+    SendPipeEvent(PIPE_EVENT_MATCH, kind, json, nullptr, static_cast<int>(match));
 }

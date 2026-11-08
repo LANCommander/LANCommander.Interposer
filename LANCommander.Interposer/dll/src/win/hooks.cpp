@@ -6,6 +6,7 @@
 #include "fastdl.h"
 #include "files.h"
 #include "identity.h"
+#include "matches.h"
 #include "network.h"
 #include "osversion.h"
 #include "pipe_events.h"
@@ -49,6 +50,9 @@ void InstallHooks()
 
     InitRichPresence();
 
+    // After the event pipe: a match's sink depends on whether it connected.
+    InitMatches();
+
     LoadPlugins();
 }
 
@@ -73,6 +77,7 @@ void RemoveHooks(bool processTerminating)
     ShutdownRelay(processTerminating);
     DisconnectEventPipe();
     UnloadPlugins();
+    ShutdownMatches(processTerminating);   // before ShutdownFastDL: both hold the HTTP client
     ShutdownRichPresence();
     RemoveRegistryHooks();
     RemoveNetworkHooks();

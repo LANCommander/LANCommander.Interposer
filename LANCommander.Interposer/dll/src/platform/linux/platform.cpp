@@ -12,6 +12,7 @@
 #include <map>
 
 #include <dirent.h>
+#include <pthread.h>
 #include <dlfcn.h>
 #include <fcntl.h>
 #include <pwd.h>
@@ -415,6 +416,60 @@ void RemoveFile(const std::wstring& path)
     unlink(Narrow(path).c_str());
 }
 
+void RemoveEmptyDirectory(const std::wstring& path)
+{
+    rmdir(Narrow(path).c_str());
+}
+
+long long FileSize(const std::wstring& path)
+{
+    struct stat st{};
+
+    if (::stat(Narrow(path).c_str(), &st) != 0 || !S_ISREG(st.st_mode))
+        return -1;
+
+    return static_cast<long long>(st.st_size);
+}
+
+bool ReadFileRange(const std::wstring& path, long long offset, size_t maxBytes,
+                   std::vector<unsigned char>& out)
+{
+    out.clear();
+
+    const int fd = open(Narrow(path).c_str(), O_RDONLY | O_CLOEXEC);
+
+    if (fd < 0)
+        return false;
+
+    out.resize(maxBytes);
+    size_t total = 0;
+    bool   ok    = true;
+
+    while (total < maxBytes)
+    {
+        const ssize_t got = pread(fd, out.data() + total, maxBytes - total,
+            static_cast<off_t>(offset + static_cast<long long>(total)));
+
+        if (got < 0 && errno == EINTR)
+            continue;
+
+        if (got < 0)
+        {
+            ok = false;
+            break;
+        }
+
+        if (got == 0)
+            break;
+
+        total += static_cast<size_t>(got);
+    }
+
+    close(fd);
+    out.resize(ok ? total : 0);
+    return ok;
+}
+
 // ── Environment ───────────────────────────────────────────────────────────────
 
 bool GetEnvironmentValue(const std::wstring& name, std::wstring& out)
@@ -617,6 +672,72 @@ LocalTime Now()
 unsigned long ProcessId()
 {
     return static_cast<unsigned long>(getpid());
+}
+
+// ── Threads ───────────────────────────────────────────────────────────────────
+
+namespace
+{
+    struct ThreadState
+    {
+        pthread_t thread{};
+        void (*body)(void*) = nullptr;
+        void*     arg = nullptr;
+    };
+
+    void* ThreadMain(void* param)
+    {
+        auto* state = static_cast<ThreadState*>(param);
+        state->body(state->arg);
+        return nullptr;
+    }
+}
+
+Thread StartThread(void (*body)(void*), void* arg)
+{
+    auto* state = new ThreadState;
+    state->body = body;
+    state->arg  = arg;
+
+    if (pthread_create(&state->thread, nullptr, ThreadMain, state) != 0)
+    {
+        delete state;
+        return nullptr;
+    }
+
+    return state;
+}
+
+// No loader lock to work around here, so the thread is joined -- but only for
+// waitMs. The destructors run at exit too, and a thread in the middle of a
+// network request would otherwise hold the process open until it times out;
+// one that does not finish in time is detached and its state leaked.
+bool StopThread(Thread thread, int waitMs)
+{
+    auto* state = static_cast<ThreadState*>(thread);
+
+    if (!state)
+        return true;
+
+    timespec deadline{};
+    clock_gettime(CLOCK_REALTIME, &deadline);
+    deadline.tv_sec  += waitMs / 1000;
+    deadline.tv_nsec += static_cast<long>(waitMs % 1000) * 1000000L;
+
+    if (deadline.tv_nsec >= 1000000000L)
+    {
+        deadline.tv_sec  += 1;
+        deadline.tv_nsec -= 1000000000L;
+    }
+
+    if (pthread_timedjoin_np(state->thread, nullptr, &deadline) != 0)
+    {
+        pthread_detach(state->thread);
+        return false;
+    }
+
+    delete state;
+    return true;
 }
 
 // The launcher cannot know the PID before the process exists, so a value comes

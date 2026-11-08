@@ -50,6 +50,12 @@ void DisconnectEventPipe()
 }
 
 // ---------------------------------------------------------------------------
+bool EventPipeConnected()
+{
+    return g_eventChannel.load() != platform::kInvalidFile;
+}
+
+// ---------------------------------------------------------------------------
 static void WriteInt32(std::vector<unsigned char>& buf, int value)
 {
     const auto v = static_cast<uint32_t>(value);

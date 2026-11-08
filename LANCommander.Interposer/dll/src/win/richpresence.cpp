@@ -3,6 +3,7 @@
 #include "config.h"
 #include "discord_ipc.h"
 #include "callbacks.h"
+#include "json.h"
 
 #include <cstdio>
 
@@ -62,41 +63,12 @@ static void FlushToBackends()
 
 static void AppendJsonString(std::string& out, const char* key, const std::string& value)
 {
-    out += '"';
-    out += key;
-    out += "\":\"";
-
-    for (char c : value)
-    {
-        switch (c)
-        {
-            case '"':  out += "\\\""; break;
-            case '\\': out += "\\\\"; break;
-            case '\n': out += "\\n";  break;
-            case '\r': out += "\\r";  break;
-            case '\t': out += "\\t";  break;
-            default:
-                if (static_cast<unsigned char>(c) < 0x20)
-                {
-                    char buf[8];
-                    std::snprintf(buf, sizeof(buf), "\\u%04x", static_cast<unsigned char>(c));
-                    out += buf;
-                }
-                else
-                {
-                    out += c;
-                }
-        }
-    }
-
-    out += "\",";
+    json::AppendKeyString(out, key, value);
 }
 
 static void AppendJsonNumber(std::string& out, const char* key, long long value)
 {
-    char buf[64];
-    std::snprintf(buf, sizeof(buf), "\"%s\":%lld,", key, value);
-    out += buf;
+    json::AppendKeyNumber(out, key, value);
 }
 
 // The presence as the JSON the launcher reads (PIPE_EVENT_PRESENCE "UPDATE").
@@ -126,7 +98,7 @@ static std::wstring PresenceToJson(const PresenceData& data)
     AppendJsonString(json, "button2Text",    data.button2Text);
     AppendJsonString(json, "button2Url",     data.button2Url);
 
-    json.back() = '}'; // replaces the trailing comma
+    json::CloseObject(json);
 
     return ToWide(json);
 }

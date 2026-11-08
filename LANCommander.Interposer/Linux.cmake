@@ -58,7 +58,7 @@ set_property(TARGET LANCommander.Interposer APPEND PROPERTY
 
 add_executable(LANCommander.Interposer.Tests tests/linux/main.cpp)
 target_include_directories(LANCommander.Interposer.Tests PRIVATE include)
-target_link_libraries(LANCommander.Interposer.Tests PRIVATE ${CMAKE_DL_LIBS})
+target_link_libraries(LANCommander.Interposer.Tests PRIVATE ${CMAKE_DL_LIBS} Threads::Threads)
 
 # A stand-in for a game patch: C, linked against the .so by its soname.
 add_library(LANCommander.Interposer.SdkProbe SHARED tests/linux/sdk_probe.c)

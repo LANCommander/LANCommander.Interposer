@@ -2,6 +2,7 @@
 #include "platform.h"
 
 #include <winhttp.h>
+#include <mutex>
 #include <vector>
 
 namespace platform::http
@@ -9,7 +10,9 @@ namespace platform::http
 
 namespace
 {
-    HINTERNET g_session = nullptr;
+    HINTERNET  g_session = nullptr;
+    int        g_sessionUsers = 0;    // Initialize calls not yet matched by Shutdown
+    std::mutex g_sessionMutex;
 
     // One request's connection: the URL cracked, the server connected.
     struct Connection
@@ -43,8 +46,9 @@ namespace
         Connection(const Connection&) = delete;
         Connection& operator=(const Connection&) = delete;
 
-        // Send `verb` and wait for the response. Null on failure.
-        HINTERNET Send(const wchar_t* verb, const std::wstring& headers, int timeoutMs)
+        // Send `verb` (with `body`, if any) and wait for the response. Null on failure.
+        HINTERNET Send(const wchar_t* verb, const std::wstring& headers, int timeoutMs,
+                       const void* body = nullptr, size_t bodyBytes = 0)
         {
             if (!connect)
                 return nullptr;
@@ -62,7 +66,10 @@ namespace
                 WinHttpAddRequestHeaders(request, headers.c_str(), static_cast<DWORD>(-1),
                     WINHTTP_ADDREQ_FLAG_ADD | WINHTTP_ADDREQ_FLAG_REPLACE);
 
-            if (!WinHttpSendRequest(request, WINHTTP_NO_ADDITIONAL_HEADERS, 0, nullptr, 0, 0, 0) ||
+            const DWORD length = static_cast<DWORD>(bodyBytes);
+
+            if (!WinHttpSendRequest(request, WINHTTP_NO_ADDITIONAL_HEADERS, 0,
+                    bodyBytes ? const_cast<void*>(body) : WINHTTP_NO_REQUEST_DATA, length, length, 0) ||
                 !WinHttpReceiveResponse(request, nullptr))
             {
                 WinHttpCloseHandle(request);
@@ -106,6 +113,8 @@ namespace
 
 bool Initialize()
 {
+    std::lock_guard<std::mutex> lock(g_sessionMutex);
+
     if (!g_session)
     {
         g_session = WinHttpOpen(
@@ -116,11 +125,20 @@ bool Initialize()
             0);
     }
 
-    return g_session != nullptr;
+    if (!g_session)
+        return false;
+
+    ++g_sessionUsers;
+    return true;
 }
 
 void Shutdown()
 {
+    std::lock_guard<std::mutex> lock(g_sessionMutex);
+
+    if (g_sessionUsers > 0 && --g_sessionUsers > 0)
+        return;
+
     if (g_session)
     {
         WinHttpCloseHandle(g_session);
@@ -156,6 +174,53 @@ HeadResult Head(const std::wstring& url, const std::wstring& requestHeaders,
 
         if (result.headerPresent)
             result.headerValue = value;
+    }
+
+    WinHttpCloseHandle(request);
+    return result;
+}
+
+Response Send(const wchar_t* method, const std::wstring& url, const std::wstring& requestHeaders,
+              const void* body, size_t bodyBytes, int timeoutMs, size_t maxResponseBytes)
+{
+    Response   result;
+    Connection connection(url);
+
+    HINTERNET request = connection.Send(method, requestHeaders, timeoutMs, body, bodyBytes);
+
+    if (!request)
+        return result;
+
+    result.status = StatusOf(request);
+
+    // Retry-After is either seconds or an HTTP date; only the seconds form is
+    // used by the servers this talks to.
+    {
+        wchar_t value[64]{};
+        DWORD   size = sizeof(value);
+
+        if (WinHttpQueryHeaders(request, WINHTTP_QUERY_RETRY_AFTER, WINHTTP_HEADER_NAME_BY_INDEX,
+                value, &size, WINHTTP_NO_HEADER_INDEX) && value[0] >= L'0' && value[0] <= L'9')
+            result.retryAfterSeconds = _wtoi(value);
+    }
+
+    DWORD available = 0;
+
+    while (WinHttpQueryDataAvailable(request, &available) && available > 0)
+    {
+        std::vector<char> buf(available);
+        DWORD read = 0;
+
+        if (!WinHttpReadData(request, buf.data(), available, &read) || read == 0)
+            break;
+
+        if (result.body.size() + read > maxResponseBytes)
+        {
+            result.body.append(buf.data(), maxResponseBytes - result.body.size());
+            break;
+        }
+
+        result.body.append(buf.data(), read);
     }
 
     WinHttpCloseHandle(request);

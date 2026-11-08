@@ -34,7 +34,7 @@ namespace LANCommander.Interposer
     /// event callbacks, then use the plugin API methods and subscribe to events.
     /// </para>
     /// </summary>
-    public class InterposerService : IDisposable
+    public partial class InterposerService : IDisposable
     {
         private const string DllName = "LANCommander.Interposer.dll";
 
@@ -773,6 +773,8 @@ namespace LANCommander.Interposer
                 _presenceDelegate = null;
             }
 
+            RegisterMatchCallback();
+
             _eventsEnabled = true;
         }
 
@@ -796,6 +798,8 @@ namespace LANCommander.Interposer
 
             if (_presenceDelegate != null)
                 InterposerRegisterPresenceCallback(IntPtr.Zero);
+
+            UnregisterMatchCallback();
 
             _relayDelegate = null;
             _presenceDelegate = null;
@@ -1729,6 +1733,9 @@ namespace LANCommander.Interposer
                     break;
                 case 7: // PRESENCE
                     DispatchPresenceEvent(field1, field2);
+                    break;
+                case 8: // MATCH
+                    DispatchMatchEvent(field1, unchecked((uint)intField), field2);
                     break;
             }
         }

@@ -64,6 +64,11 @@ Player:
 #               logs each loopback portal created and each emulated IPX bind;
 #               at Trace, every datagram relayed in either direction.
 #
+#   Matches   - true to log match statistics: matches started, ended and
+#               delivered to LANCommander, false to disable (default). At
+#               Level Debug it also logs every event, player and batch sent.
+#               Delivery errors are logged whatever this is set to.
+#
 #   Level     - Verbosity within whichever subsystems are enabled above.
 #               Unrecognized values fall back to Info.
 #
@@ -99,6 +104,7 @@ Logging:
   Audio: false
   OsVersion: false
   Relay: false
+  Matches: false
   Level: Info
 
 # ---------------------------------------------------------------------------
@@ -731,6 +737,57 @@ RichPresence:
   Discord:
     Enabled: false
     ApplicationId: ''
+
+# ---------------------------------------------------------------------------
+# MatchStatistics
+#
+# Where the matches a game patch or dedicated server reports through the
+# InterposerMatch* API go. Nothing here makes a game report anything: it only
+# decides the destination of what the patch reports.
+#
+#   With ServerUrl, Token and GameId set, the Interposer sends the matches to
+#   that LANCommander server itself, in batches, retrying while the server is
+#   unreachable. What it has not yet delivered is kept in
+#   .interposer\Matches\ and sent by the next run, so a crash or a restart
+#   loses nothing. This is the setting for a dedicated server.
+#
+#   Without them, when LANCommander's launcher started the game, the launcher
+#   reports the matches as the signed-in player. Otherwise they are only
+#   logged (Logging.Matches).
+#
+#   Enabled       - false to report nothing anywhere (default true).
+#
+#   ServerUrl     - The LANCommander server, e.g. 'http://lancommander.lan:1337'.
+#                   https:// works on Windows; on Linux only http:// does.
+#
+#   Token         - A personal access token with the matches:report scope.
+#                   Reports are trusted as far as its owner is: an
+#                   administrator's are authoritative. %VARIABLE% is expanded,
+#                   so '%LANCOMMANDER_MATCH_TOKEN%' keeps it out of this file.
+#
+#   GameId        - The game's id in LANCommander (a GUID). Required.
+#
+#   ServerId      - The game server's id in LANCommander (a GUID), when it
+#                   manages this server. Leave blank otherwise.
+#
+#   ReporterKind  - Server (default), Host (a player hosting the match) or
+#                   Client.
+#
+#   ReporterName  - Tells this reporter apart from others reporting the same
+#                   match. Defaults to the computer name. Keep it stable: a
+#                   restarted server resumes its matches under it.
+#
+#   FlushInterval - Milliseconds between batches of events (default 2000).
+# ---------------------------------------------------------------------------
+MatchStatistics:
+  Enabled: true
+  ServerUrl: ''
+  Token: ''
+  GameId: ''
+  ServerId: ''
+  ReporterKind: Server
+  ReporterName: ''
+  FlushInterval: 2000
 
 # ---------------------------------------------------------------------------
 # Plugins

@@ -230,6 +230,19 @@ extern std::string g_rpDefaultButton1Url;
 extern std::string g_rpDefaultButton2Text;
 extern std::string g_rpDefaultButton2Url;
 
+// MatchStatistics -- where the InterposerMatch* reports go (matches.cpp). With
+// a ServerUrl and Token the Interposer sends them to LANCommander itself; the
+// token is never logged.
+extern bool         g_msEnabled;        // MatchStatistics.Enabled (default true)
+extern std::wstring g_msServerUrl;      // no trailing slash; empty = not configured
+extern std::string  g_msToken;          // bearer token, matches:report scope
+extern std::string  g_msGameId;         // LANCommander game id (GUID); required to report over HTTP
+extern std::string  g_msServerId;       // LANCommander server id (GUID), or empty
+extern std::string  g_msReporterKind;   // "Server" | "Host" | "Client"
+extern std::string  g_msReporterName;   // empty = the computer name
+extern int          g_msFlushInterval;  // ms between batches
+extern bool         g_logMatches;       // Logging.Matches
+
 // Parse <base>\.interposer\Config.yml, merge the launcher's config overlay over it,
 // and open <base>\.interposer\Logs\<timestamp>.log. Call before MH_EnableHook.
 //
@@ -320,6 +333,13 @@ void LogRelayDiag(const wchar_t* verb, const wchar_t* info, const wchar_t* detai
 // sets the threshold with interposer_comms_set_session_logging, and
 // voice/common/log.cpp applies it before calling. Log-only.
 void LogVoice(const wchar_t* verb, const wchar_t* message);
+
+// Log match statistics: matches started and ended, batches sent. Gated by the
+// Logging.Matches flag (default false). Log-only: the steps themselves reach
+// .NET and plugins through the match callback. The Diag form needs Debug and
+// logs every event.
+void LogMatch(const wchar_t* verb, const wchar_t* info, const wchar_t* detail = nullptr);
+void LogMatchDiag(const wchar_t* verb, const wchar_t* info, const wchar_t* detail = nullptr);
 
 // Redirect diagnostics. No-op below Debug level or when the subsystem flag is false.
 // Unlike LogFileAccess/LogRegistryAccess these deliberately do NOT fire plugin or

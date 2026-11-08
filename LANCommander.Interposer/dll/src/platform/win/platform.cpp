@@ -1,5 +1,6 @@
 #include "platform.h"
 
+#include <algorithm>
 #include <cwctype>
 #include <iterator>
 
@@ -254,6 +255,68 @@ void RemoveFile(const std::wstring& path)
     DeleteFileW(path.c_str());
 }
 
+void RemoveEmptyDirectory(const std::wstring& path)
+{
+    RemoveDirectoryW(path.c_str());
+}
+
+long long FileSize(const std::wstring& path)
+{
+    WIN32_FILE_ATTRIBUTE_DATA data{};
+
+    if (!GetFileAttributesExW(path.c_str(), GetFileExInfoStandard, &data) ||
+        (data.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY))
+        return -1;
+
+    return (static_cast<long long>(data.nFileSizeHigh) << 32) | data.nFileSizeLow;
+}
+
+bool ReadFileRange(const std::wstring& path, long long offset, size_t maxBytes,
+                   std::vector<unsigned char>& out)
+{
+    out.clear();
+
+    // FILE_SHARE_WRITE: a demo the game is still flushing may be attached.
+    HANDLE file = CreateFileW(path.c_str(), GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE,
+        nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+
+    if (file == INVALID_HANDLE_VALUE)
+        return false;
+
+    LARGE_INTEGER position{};
+    position.QuadPart = offset;
+
+    bool ok = SetFilePointerEx(file, position, nullptr, FILE_BEGIN) != FALSE;
+
+    if (ok)
+    {
+        out.resize(maxBytes);
+        size_t total = 0;
+
+        while (total < maxBytes)
+        {
+            DWORD read = 0;
+            const DWORD want = static_cast<DWORD>(std::min<size_t>(maxBytes - total, 1u << 30));
+
+            if (!ReadFile(file, out.data() + total, want, &read, nullptr))
+            {
+                ok = false;
+                break;
+            }
+
+            if (read == 0)
+                break;
+
+            total += read;
+        }
+
+        out.resize(ok ? total : 0);
+    }
+
+    CloseHandle(file);
+    return ok;
+}
+
 // ── Environment ───────────────────────────────────────────────────────────────
 
 bool GetEnvironmentValue(const std::wstring& name, std::wstring& out)
@@ -438,6 +501,71 @@ LocalTime Now()
 unsigned long ProcessId()
 {
     return GetCurrentProcessId();
+}
+
+// ── Threads ───────────────────────────────────────────────────────────────────
+
+namespace
+{
+    struct ThreadState
+    {
+        HANDLE thread = nullptr;
+        HANDLE parked = nullptr;    // set once body has returned
+        void (*body)(void*) = nullptr;
+        void*  arg = nullptr;
+    };
+
+    DWORD WINAPI ThreadMain(void* param)
+    {
+        auto* state = static_cast<ThreadState*>(param);
+
+        state->body(state->arg);
+
+        // Park rather than return: a thread that exits needs the loader lock,
+        // and one returning normally may still be running this module's code
+        // when FreeLibrary unmaps it. StopThread terminates it from here.
+        SetEvent(state->parked);
+        Sleep(INFINITE);
+        return 0;
+    }
+}
+
+Thread StartThread(void (*body)(void*), void* arg)
+{
+    auto* state = new ThreadState;
+    state->body   = body;
+    state->arg    = arg;
+    state->parked = CreateEventW(nullptr, TRUE, FALSE, nullptr);
+
+    if (state->parked)
+        state->thread = CreateThread(nullptr, 0, ThreadMain, state, 0, nullptr);
+
+    if (!state->thread)
+    {
+        if (state->parked)
+            CloseHandle(state->parked);
+
+        delete state;
+        return nullptr;
+    }
+
+    return state;
+}
+
+bool StopThread(Thread thread, int waitMs)
+{
+    auto* state = static_cast<ThreadState*>(thread);
+
+    if (!state)
+        return true;
+
+    const bool parked = WaitForSingleObject(state->parked, static_cast<DWORD>(waitMs)) == WAIT_OBJECT_0;
+
+    TerminateThread(state->thread, 0);
+    CloseHandle(state->thread);
+    CloseHandle(state->parked);
+    delete state;
+    return parked;
 }
 
 // Read Local\<name>_<pid>, a UTF-8 string the launcher wrote before injecting.
