@@ -18,6 +18,7 @@
 // the emergency exception pool, which is not touched while malloc succeeds.
 // Re-check with objdump after a toolchain upgrade.
 
+#include "interposer_features.h"
 #include "hooks.h"
 #include "instance.h"
 
@@ -85,7 +86,13 @@ static void InterposerLoad()
     // Another copy already owns this process. Install nothing; the exports
     // forward to it (see instance.h).
     if (!ClaimPrimaryInstance(platform::SelfModule()))
+    {
+        ReportFeaturesMissingFromPrimary([](const wchar_t* message)
+        {
+            fprintf(stderr, "LANCommander.Interposer: %ls\n", message);
+        });
         return;
+    }
 
     g_installed = true;
 

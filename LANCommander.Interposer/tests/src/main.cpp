@@ -4748,6 +4748,207 @@ static void RunEmbeddedTests(const std::wstring& exeDir, const std::wstring& tes
 }
 
 // ============================================================
+// Trimmed embedded tests  (separate process)
+// ============================================================
+// LANCommander.Interposer.Tests.PatchTrimmed.dll is the same stand-in patch,
+// linked against an embeddable library built with nothing but the file hooks
+// (interposer_add_embedded_library ... FEATURES FILES). Every other feature is
+// its stubs: the exports are there and answer "off". Staged as dinput.dll and
+// loaded first, then LANCommander.Interposer.dll after it -- which carries
+// everything, defers anyway, and has to say what that cost.
+
+using FnGetFeatures       = DWORD (*)();
+using FnRelayGetStatus    = BOOL (*)(InterposerRelayStatus*);
+using FnMatchStart        = DWORD (*)(const InterposerMatchInfo*);
+using FnEnumAudio         = DWORD (*)(void*, DWORD, DWORD*);
+using FnSetRegBySuffix    = DWORD (*)(const wchar_t*, const wchar_t*, const wchar_t*);
+using FnCommsServerCreate = interposer_comms_result (*)(const interposer_comms_server_config*, interposer_comms_server**);
+using FnCommsConfigInit   = void (*)(interposer_comms_server_config*);
+
+// Runs in the child process. Returns the number of failed assertions.
+static int RunTrimmedChild(const wchar_t* patchDirArg, const wchar_t* dllDirArg)
+{
+    const std::wstring patchDir = WithSeparator(patchDirArg);
+    const std::wstring dllDir   = WithSeparator(dllDirArg);
+
+    wprintf(L"\n--- Trimmed Embedded Tests (child process) ---\n");
+
+    const std::wstring probe     = patchDir + L"embedded_probe.txt";
+    const std::wstring fromPatch = patchDir + L"from_patch.txt";
+    const std::wstring fromDll   = patchDir + L"from_dll.txt";
+    const std::wstring logsDir   = patchDir + L".interposer\\Logs\\";
+
+    HMODULE patch = LoadLibraryW((patchDir + L"dinput.dll").c_str());
+
+    if (!patch)
+    {
+        wprintf(L"  FAIL  EM-00: child could not load the trimmed patch (GLE=%lu)\n", GetLastError());
+        return 1;
+    }
+
+    auto isPrimary   = ExportOf<FnPatchIsPrimary>(patch, "PatchProbeIsPrimary");
+    auto getFeatures = ExportOf<FnGetFeatures>(patch, "InterposerGetFeatures");
+
+    ASSERT(isPrimary && isPrimary() && getFeatures && getFeatures() == INTERPOSER_FEATURE_FLAG_FILES,
+        L"EM-12: a trimmed embedded Interposer owns the process and reports only the features it was built with");
+
+    TouchFile(probe);
+
+    ASSERT(PathExists(fromPatch) && !PathExists(fromDll),
+        L"EM-13: the trimmed Interposer's file hooks run");
+
+    {
+        auto relayStatus = ExportOf<FnRelayGetStatus>(patch, "InterposerRelayGetStatus");
+        auto matchStart  = ExportOf<FnMatchStart>(patch, "InterposerMatchStart");
+        auto enumAudio   = ExportOf<FnEnumAudio>(patch, "InterposerEnumAudioDevices");
+        auto setRegistry = ExportOf<FnSetRegBySuffix>(patch, "InterposerSetRegistryValueBySuffix");
+        auto configInit  = ExportOf<FnCommsConfigInit>(patch, "interposer_comms_server_config_init");
+        auto createVoice = ExportOf<FnCommsServerCreate>(patch, "interposer_comms_server_create");
+
+        InterposerRelayStatus status{};
+        status.size = sizeof(status);
+
+        InterposerMatchInfo info{};
+        info.structSize = sizeof(info);
+
+        interposer_comms_server_config voiceConfig{};
+        interposer_comms_server* server = nullptr;
+
+        DWORD audioCount = 99;
+
+        const bool relayOff = relayStatus && relayStatus(&status) && status.state == 0;
+        const bool matchOff = matchStart && matchStart(&info) == 0;
+        const bool audioOff = enumAudio && enumAudio(nullptr, 0, &audioCount) == 0 && audioCount == 0;
+        const bool regOff   = setRegistry && setRegistry(L"Software\\Probe", L"Value", L"1") == 0;
+
+        if (configInit)
+            configInit(&voiceConfig);
+
+        const bool voiceOff = createVoice && voiceConfig.struct_size == sizeof(voiceConfig) &&
+            createVoice(&voiceConfig, &server) == INTERPOSER_COMMS_ERR_NOT_IMPLEMENTED && !server;
+
+        ASSERT(relayOff && matchOff && audioOff && regOff && voiceOff,
+            L"EM-14: a compiled-out feature's exports are still there and answer as though it were switched off");
+    }
+
+    ASSERT(CreateDirectInputThrough(patch),
+        L"EM-15: without the DirectInput feature, InterposerDirectInputCreateA passes through to the system dinput.dll");
+
+    ASSERT(ReadOpenLog(FindFirstLogFile(logsDir)).find("Registry is ignored") != std::string::npos,
+        L"EM-16: a Config.yml section for a compiled-out feature is reported as ignored");
+
+    HMODULE dll = LoadLibraryW((dllDir + L"LANCommander.Interposer.dll").c_str());
+
+    if (!dll)
+    {
+        wprintf(L"  FAIL  EM-00: child could not load LANCommander.Interposer.dll (GLE=%lu)\n", GetLastError());
+        return g_fail + 1;
+    }
+
+    auto dllFeatures = ExportOf<FnGetFeatures>(dll, "InterposerGetFeatures");
+
+    ASSERT(dllFeatures && dllFeatures() == INTERPOSER_FEATURE_FLAG_FILES,
+        L"EM-17: the full DLL, deferring to the trimmed copy, reports the trimmed copy's features");
+
+    const std::string log = ReadOpenLog(FindFirstLogFile(logsDir));
+
+    ASSERT(CountLinesContaining(log, "[INSTANCE]", "built without features this copy carries") == 1 &&
+           CountLinesContaining(log, "[INSTANCE]", "Registry, FastDL") == 1,
+        L"EM-18: the deferring DLL names the features it carries and the owner lacks, in the owner's session log");
+
+    DeleteFileW(fromPatch.c_str());
+    TouchFile(probe);
+
+    ASSERT(PathExists(fromPatch) && !PathExists(fromDll) && !PathExists(dllDir + L".interposer\\Logs"),
+        L"EM-19: only the trimmed copy's hooks run once the full DLL has deferred to it");
+
+    return g_fail;
+}
+
+static void RunTrimmedEmbeddedTests(const std::wstring& exeDir, const std::wstring& testTmpDir)
+{
+    wprintf(L"\n--- Trimmed Embedded Tests ---\n");
+
+    wchar_t exePathBuf[MAX_PATH]{};
+    GetModuleFileNameW(nullptr, exePathBuf, MAX_PATH);
+    const std::wstring exePath = exePathBuf;
+
+    const std::wstring root     = testTmpDir + L"EmbeddedTrimmed\\";
+    const std::wstring patchDir = root + L"Patch\\";
+    const std::wstring dllDir   = root + L"Dll\\";
+
+    const std::string fromPatch = WideToUtf8(patchDir) + "from_patch.txt";
+    const std::string fromDll   = WideToUtf8(patchDir) + "from_dll.txt";
+
+    CreateDirs(patchDir + L".interposer\\");
+    CreateDirs(dllDir + L".interposer\\");
+
+    if (!CopyFileW((exeDir + L"LANCommander.Interposer.Tests.PatchTrimmed.dll").c_str(),
+            (patchDir + L"dinput.dll").c_str(), FALSE) ||
+        !CopyFileW((exeDir + L"LANCommander.Interposer.dll").c_str(),
+            (dllDir + L"LANCommander.Interposer.dll").c_str(), FALSE))
+    {
+        ASSERT(false, L"EM-00: staging the trimmed patch and the DLL");
+        return;
+    }
+
+    // The patch's Registry section is there to be reported as ignored (EM-16).
+    WriteTextFile(patchDir + L".interposer\\Config.yml",
+        "FileRedirects:\n"
+        "  - Pattern: '.*\\\\embedded_probe\\.txt$'\n"
+        "    Replacement: '" + fromPatch + "'\n"
+        "\n"
+        "Registry:\n"
+        "  Isolated: false\n");
+
+    // As in RunEmbeddedTests, the image loaded second also redirects the first
+    // one's output, which would catch its hooks running after all.
+    WriteTextFile(dllDir + L".interposer\\Config.yml",
+        "FileRedirects:\n"
+        "  - Pattern: '.*\\\\embedded_probe\\.txt$'\n"
+        "    Replacement: '" + fromDll + "'\n"
+        "  - Pattern: '.*\\\\from_patch\\.txt$'\n"
+        "    Replacement: '" + fromDll + "'\n");
+
+    // Trailing separators come off for the command line; see RunIsolatedTests.
+    std::wstring command = L"\"" + exePath + L"\" --embedded-trimmed \"" +
+        patchDir.substr(0, patchDir.size() - 1) + L"\" \"" +
+        dllDir.substr(0, dllDir.size() - 1) + L"\"";
+
+    STARTUPINFOW si{};
+    si.cb = sizeof(si);
+    PROCESS_INFORMATION pi{};
+
+    if (!CreateProcessW(exePath.c_str(), command.data(), nullptr, nullptr, TRUE, 0, nullptr, nullptr, &si, &pi))
+    {
+        ASSERT(false, L"EM-00: launching the trimmed embedded child process");
+        return;
+    }
+
+    WaitForSingleObject(pi.hProcess, 120 * 1000);
+
+    DWORD exitCode = 1;
+    GetExitCodeProcess(pi.hProcess, &exitCode);
+    CloseHandle(pi.hThread);
+    CloseHandle(pi.hProcess);
+
+    ASSERT(exitCode == 0, L"EM-00c: the trimmed child reported no failures");
+
+    // How much leaving features out saves, for whoever reads the output.
+    WIN32_FILE_ATTRIBUTE_DATA full{}, trimmed{};
+
+    if (GetFileAttributesExW((exeDir + L"LANCommander.Interposer.Tests.Patch.dll").c_str(), GetFileExInfoStandard, &full) &&
+        GetFileAttributesExW((exeDir + L"LANCommander.Interposer.Tests.PatchTrimmed.dll").c_str(), GetFileExInfoStandard, &trimmed))
+    {
+        wprintf(L"  INFO  embedded test patch: %lu KB with every feature, %lu KB with only Files\n",
+            full.nFileSizeLow / 1024, trimmed.nFileSizeLow / 1024);
+    }
+
+    std::error_code ignored;
+    std::filesystem::remove_all(root, ignored);
+}
+
+// ============================================================
 // Network relay tests  (two peer processes + a relay server)
 // ============================================================
 // The relay needs a server and two members to be worth testing, so the parent
@@ -6609,6 +6810,11 @@ int wmain(int argc, wchar_t** argv)
     if (argc >= 5 && wcscmp(argv[1], L"--embedded") == 0)
         return RunEmbeddedChild(argv[2], argv[3], argv[4]);
 
+    // Re-entry from RunTrimmedEmbeddedTests: a patch embedding an Interposer
+    // built with only the file hooks, then LANCommander.Interposer.dll.
+    if (argc >= 4 && wcscmp(argv[1], L"--embedded-trimmed") == 0)
+        return RunTrimmedChild(argv[2], argv[3]);
+
     std::wstring exeDir        = GetExeDir();
     std::wstring testTmpDir    = GetTestTempDir();
     std::wstring interposerDir = exeDir + L".interposer\\";
@@ -6740,6 +6946,9 @@ int wmain(int argc, wchar_t** argv)
 
     // Likewise: a patch that embeds the Interposer, beside the DLL.
     RunEmbeddedTests(exeDir, testTmpDir);
+
+    // Likewise: the same patch, built with most of the Interposer left out.
+    RunTrimmedEmbeddedTests(exeDir, testTmpDir);
 
     // Likewise separate processes: two relay peers, each with its own DLL.
     RunRelayTests(exeDir, testTmpDir);

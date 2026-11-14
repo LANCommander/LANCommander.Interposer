@@ -6,6 +6,7 @@
 #include <cstdint>
 #include <string>
 
+#include "interposer_features.h"
 #include "relay_settings.h"
 
 // ---------------------------------------------------------------------------
@@ -32,6 +33,8 @@ enum class RelayState : int
     Reconnecting = 3, // lost the server; retrying with the previous address
     Failed       = 4, // rejected by the server -- not retried until reconfigured
 };
+
+#if INTERPOSER_FEATURE_RELAY
 
 // Startup, from InstallHooks after LoadConfig and before InstallNetworkHooks.
 // Overlays the launcher's override mapping onto the Config.yml settings and
@@ -134,6 +137,50 @@ void RelayDisconnect();
 
 // A JSON snapshot of the state, for the control pipe.
 std::wstring RelayStatusJson();
+
+#else // !INTERPOSER_FEATURE_RELAY
+
+// An embedded build without the relay (core/interposer_features.h). network.cpp and
+// control.cpp call these unconditionally; answering as a relay that was never
+// wanted lets the compiler drop every relay branch in them. RelayHooksWanted
+// being false is what keeps the socket-lifecycle hooks from being installed.
+inline void     InitRelay() {}
+inline void     ShutdownRelay(bool) {}
+inline bool     RelayHooksWanted() { return false; }
+inline bool     RelayActive() { return false; }
+inline uint32_t RelayVirtualIp() { return 0; }
+inline uint32_t RelayNetmask() { return 0; }
+inline uint32_t RelayIpxNetwork() { return 0; }
+inline bool     RelayUdpEnabled() { return false; }
+inline bool     RelayTcpEnabled() { return false; }
+inline bool     RelayIpxEnabled() { return false; }
+inline bool     RelayWaitForAddress() { return false; }
+inline bool     RelayIsVirtualAddress(uint32_t) { return false; }
+inline bool     RelayPortalAddress(uint8_t, uint32_t, uint16_t, sockaddr_in&) { return false; }
+inline bool     RelayPortalPeer(const sockaddr_in&, uint8_t&, uint32_t&, uint16_t&) { return false; }
+inline bool     RelayMapDatagramDestination(const sockaddr*, int, sockaddr_in&) { return false; }
+inline bool     RelayMapDatagramSource(sockaddr*, int) { return false; }
+inline bool     RelayPrepareStreamConnect(SOCKET, const sockaddr*, int, sockaddr_in&) { return false; }
+inline bool     RelayMapStreamPeer(SOCKET, sockaddr*, int) { return false; }
+inline bool     RelayMapBind(SOCKET, const sockaddr*, int, sockaddr_in&) { return false; }
+inline bool     RelayMapLocalName(SOCKET, sockaddr*, int) { return false; }
+inline void     RelayOnSocketClosed(SOCKET) {}
+inline bool     RelayNameForAddress(uint32_t, std::wstring&) { return false; }
+inline bool     RelayAddressReachable(uint32_t) { return false; }
+inline DWORD    RelayRoundTripMs() { return 0; }
+inline bool     RelayConnect(const std::wstring&) { return false; }
+inline void     RelayDisconnect() {}
+
+// The control pipe's status answer, in RelayStatusJson's shape: Disabled.
+inline std::wstring RelayStatusJson()
+{
+    return L"{\"state\":0,\"stateName\":\"Disabled\",\"clientId\":0,\"virtualAddress\":\"\","
+           L"\"netmask\":\"\",\"udpActive\":false,\"bytesSent\":0,\"bytesReceived\":0,"
+           L"\"datagramsSent\":0,\"datagramsReceived\":0,\"streamsOpen\":0,\"network\":\"\","
+           L"\"server\":\"\",\"lastError\":\"the relay is not built into this Interposer\",\"peers\":[]}";
+}
+
+#endif // INTERPOSER_FEATURE_RELAY
 
 // The in-process control exports (InterposerRelayGetStatus, ...EnumPeers,
 // ...Connect, ...Disconnect) and their structs are declared in the public header.

@@ -5,6 +5,8 @@
 #include <windows.h>
 #include <cstdint>
 
+#include "interposer_features.h"
+
 // ---------------------------------------------------------------------------
 // IPX emulation over the network relay. See ipx.cpp.
 //
@@ -17,6 +19,8 @@
 // Every function returns what the Winsock call it replaces would, and sets
 // WSAGetLastError on failure.
 // ---------------------------------------------------------------------------
+
+#if INTERPOSER_FEATURE_RELAY
 
 // True when IPX emulation is configured. Decided once, at hook installation.
 bool IpxWanted();
@@ -73,3 +77,66 @@ using FnEnumProtocolsA    = int (WSAAPI*)(LPINT, LPVOID, LPDWORD);
 int IpxEnumProtocolsW(FnWSAEnumProtocolsW orig, LPINT protocols, LPWSAPROTOCOL_INFOW buffer, LPDWORD length);
 int IpxEnumProtocolsA(FnWSAEnumProtocolsA orig, LPINT protocols, LPWSAPROTOCOL_INFOA buffer, LPDWORD length);
 int IpxLegacyEnumProtocols(void* orig, bool wide, LPINT protocols, LPVOID buffer, LPDWORD length);
+
+#else // !INTERPOSER_FEATURE_RELAY
+
+// An embedded build without the relay, and so without IPX (core/interposer_features.h).
+// No socket is ever an IPX one, so network.cpp's hooks pass everything through.
+using FnWSAEnumProtocolsW = int (WSAAPI*)(LPINT, LPWSAPROTOCOL_INFOW, LPDWORD);
+using FnWSAEnumProtocolsA = int (WSAAPI*)(LPINT, LPWSAPROTOCOL_INFOA, LPDWORD);
+using FnEnumProtocolsW    = int (WSAAPI*)(LPINT, LPVOID, LPDWORD);
+using FnEnumProtocolsA    = int (WSAAPI*)(LPINT, LPVOID, LPDWORD);
+
+inline bool IpxWanted() { return false; }
+inline bool IpxIsSocket(SOCKET) { return false; }
+
+inline SOCKET IpxSocket(int, int, int, const WSAPROTOCOL_INFOW*, DWORD, bool, bool& handled)
+{
+    handled = false;
+    return INVALID_SOCKET;
+}
+
+inline int IpxBind(SOCKET, const sockaddr*, int) { WSASetLastError(WSAENOTSOCK); return SOCKET_ERROR; }
+inline int IpxConnect(SOCKET, const sockaddr*, int) { WSASetLastError(WSAENOTSOCK); return SOCKET_ERROR; }
+inline int IpxGetSockName(SOCKET, sockaddr*, int*) { WSASetLastError(WSAENOTSOCK); return SOCKET_ERROR; }
+inline int IpxGetPeerName(SOCKET, sockaddr*, int*) { WSASetLastError(WSAENOTSOCK); return SOCKET_ERROR; }
+inline int IpxSendTo(SOCKET, const char*, int, int, const sockaddr*, int) { WSASetLastError(WSAENOTSOCK); return SOCKET_ERROR; }
+inline int IpxRecvFrom(SOCKET, char*, int, int, sockaddr*, int*) { WSASetLastError(WSAENOTSOCK); return SOCKET_ERROR; }
+
+inline int IpxWSASendTo(SOCKET, LPWSABUF, DWORD, LPDWORD, DWORD, const sockaddr*, int, LPWSAOVERLAPPED,
+                        LPWSAOVERLAPPED_COMPLETION_ROUTINE)
+{
+    WSASetLastError(WSAENOTSOCK);
+    return SOCKET_ERROR;
+}
+
+inline int IpxWSARecvFrom(SOCKET, LPWSABUF, DWORD, LPDWORD, LPDWORD, sockaddr*, LPINT, LPWSAOVERLAPPED,
+                          LPWSAOVERLAPPED_COMPLETION_ROUTINE)
+{
+    WSASetLastError(WSAENOTSOCK);
+    return SOCKET_ERROR;
+}
+
+inline int IpxGetSockOpt(SOCKET, int, int, char*, int*, bool& handled) { handled = false; return 0; }
+inline int IpxSetSockOpt(SOCKET, int, int, const char*, int, bool& handled) { handled = false; return 0; }
+inline void IpxAdjustReadable(SOCKET, long, u_long*) {}
+inline void IpxOnSocketClosed(SOCKET) {}
+inline uint16_t IpxSocketNumberForUdpPort(uint16_t) { return 0; }
+inline uint16_t IpxUdpPortForSocketNumber(uint16_t) { return 0; }
+
+inline int IpxEnumProtocolsW(FnWSAEnumProtocolsW orig, LPINT protocols, LPWSAPROTOCOL_INFOW buffer, LPDWORD length)
+{
+    return orig(protocols, buffer, length);
+}
+
+inline int IpxEnumProtocolsA(FnWSAEnumProtocolsA orig, LPINT protocols, LPWSAPROTOCOL_INFOA buffer, LPDWORD length)
+{
+    return orig(protocols, buffer, length);
+}
+
+inline int IpxLegacyEnumProtocols(void* orig, bool, LPINT protocols, LPVOID buffer, LPDWORD length)
+{
+    return reinterpret_cast<FnEnumProtocolsW>(orig)(protocols, buffer, length);
+}
+
+#endif // INTERPOSER_FEATURE_RELAY

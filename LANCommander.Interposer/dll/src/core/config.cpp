@@ -1,4 +1,5 @@
 #include "config.h"
+#include "interposer_features.h"
 #include "instance.h"
 #include "callbacks.h"
 
@@ -2720,6 +2721,38 @@ void LoadConfig()
         catch (const YAML::Exception&)
         {
             configWarnings.push_back(L"MatchStatistics.FlushInterval is not a number");
+        }
+    }
+
+    // A section for a feature this build was compiled without (an embedded
+    // build, core/interposer_features.h) is parsed like any other, but nothing reads it.
+    // Say so once, rather than leave the user wondering why it does nothing.
+    {
+        struct SectionFeature { const char* section; DWORD flag; };
+
+        static constexpr SectionFeature kSectionFeatures[] = {
+            { "Registry",        INTERPOSER_FEATURE_FLAG_REGISTRY },
+            { "FileRedirects",   INTERPOSER_FEATURE_FLAG_FILES },
+            { "Redirects",       INTERPOSER_FEATURE_FLAG_FILES },
+            { "FastDL",          INTERPOSER_FEATURE_FLAG_FASTDL },
+            { "DirectInput",     INTERPOSER_FEATURE_FLAG_DIRECTINPUT },
+            { "AudioDevices",    INTERPOSER_FEATURE_FLAG_AUDIO },
+            { "OsVersion",       INTERPOSER_FEATURE_FLAG_OSVERSION },
+            { "DnsRedirects",    INTERPOSER_FEATURE_FLAG_NETWORK },
+            { "NetworkAdapters", INTERPOSER_FEATURE_FLAG_NETWORK },
+            { "NetworkRelay",    INTERPOSER_FEATURE_FLAG_RELAY },
+            { "RichPresence",    INTERPOSER_FEATURE_FLAG_RICH_PRESENCE },
+            { "MatchStatistics", INTERPOSER_FEATURE_FLAG_MATCHES },
+        };
+
+        const DWORD       missing   = kPlatformFeatures & ~kCompiledFeatures;
+        const YAML::Node& constRoot = root; // the non-const operator[] would insert the key
+
+        for (const SectionFeature& entry : kSectionFeatures)
+        {
+            if ((missing & entry.flag) && constRoot[entry.section])
+                configWarnings.push_back(Utf8ToWide(entry.section) +
+                    L" is ignored: this build of the Interposer was compiled without " + FeatureNames(entry.flag));
         }
     }
 

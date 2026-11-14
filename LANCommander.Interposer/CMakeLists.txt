@@ -1,55 +1,39 @@
+# Feature switches for the embeddable library, and the per-feature source lists
+# every target here is built from (Features.cmake).
+include(${CMAKE_CURRENT_SOURCE_DIR}/Features.cmake)
+
 find_package(yaml-cpp CONFIG REQUIRED)
 
 # Voice (core/voice/, the interposer_comms_* API): Opus, ENet and miniaudio from
 # vcpkg. miniaudio and opus ship no CMake config, so they are located directly.
-find_package(unofficial-enet CONFIG REQUIRED)
+# Not looked for at all by a build that only makes an embeddable library and
+# has not turned voice on, so such a consumer need not install them.
+if(INTERPOSER_EMBEDDED_ONLY AND NOT INTERPOSER_FEATURE_VOICE)
+    set(INTERPOSER_VOICE_LIBRARIES)
+else()
+    find_package(unofficial-enet CONFIG REQUIRED)
 
-find_path(OPUS_INCLUDE_DIR opus.h PATH_SUFFIXES opus REQUIRED)
-set(INTERPOSER_VCPKG_PREFIX ${VCPKG_INSTALLED_DIR}/${VCPKG_TARGET_TRIPLET})
-find_library(OPUS_LIBRARY_RELEASE opus PATHS ${INTERPOSER_VCPKG_PREFIX}/lib NO_DEFAULT_PATH REQUIRED)
-find_library(OPUS_LIBRARY_DEBUG   opus PATHS ${INTERPOSER_VCPKG_PREFIX}/debug/lib NO_DEFAULT_PATH REQUIRED)
-add_library(interposer_opus INTERFACE)
-target_include_directories(interposer_opus INTERFACE ${OPUS_INCLUDE_DIR})
-target_link_libraries(interposer_opus INTERFACE optimized ${OPUS_LIBRARY_RELEASE} debug ${OPUS_LIBRARY_DEBUG})
+    find_path(OPUS_INCLUDE_DIR opus.h PATH_SUFFIXES opus REQUIRED)
+    set(INTERPOSER_VCPKG_PREFIX ${VCPKG_INSTALLED_DIR}/${VCPKG_TARGET_TRIPLET})
+    find_library(OPUS_LIBRARY_RELEASE opus PATHS ${INTERPOSER_VCPKG_PREFIX}/lib NO_DEFAULT_PATH REQUIRED)
+    find_library(OPUS_LIBRARY_DEBUG   opus PATHS ${INTERPOSER_VCPKG_PREFIX}/debug/lib NO_DEFAULT_PATH REQUIRED)
+    add_library(interposer_opus INTERFACE)
+    target_include_directories(interposer_opus INTERFACE ${OPUS_INCLUDE_DIR})
+    target_link_libraries(interposer_opus INTERFACE optimized ${OPUS_LIBRARY_RELEASE} debug ${OPUS_LIBRARY_DEBUG})
 
-find_path(MINIAUDIO_INCLUDE_DIR miniaudio.h REQUIRED)
-add_library(interposer_miniaudio INTERFACE)
-target_include_directories(interposer_miniaudio INTERFACE ${MINIAUDIO_INCLUDE_DIR})
+    find_path(MINIAUDIO_INCLUDE_DIR miniaudio.h REQUIRED)
+    add_library(interposer_miniaudio INTERFACE)
+    target_include_directories(interposer_miniaudio INTERFACE ${MINIAUDIO_INCLUDE_DIR})
 
-set(INTERPOSER_VOICE_LIBRARIES interposer_opus unofficial::enet::enet interposer_miniaudio)
+    set(INTERPOSER_VOICE_LIBRARIES interposer_opus unofficial::enet::enet interposer_miniaudio)
+endif()
 
-# core/ is portable: it reaches the OS only through platform/platform.h. win/ is
-# everything Windows-only -- the hook subsystems, DllMain, the init sequence --
-# and platform/win/ implements the platform layer; linux/ and platform/linux/
-# are the same for Linux (Linux.cmake).
-set(INTERPOSER_CORE_SOURCES
-    dll/src/core/callbacks.cpp
-    dll/src/core/config.cpp
-    dll/src/core/fastdl.cpp
-    dll/src/core/file_access.cpp
-    dll/src/core/json.cpp
-    dll/src/core/matches.cpp
-    dll/src/core/network_filter.cpp
-    dll/src/core/pipe_events.cpp
-    dll/src/core/plugins.cpp
-    # Voice chat. Portable like the rest of core/, but through ENet and
-    # miniaudio rather than platform.h: those are its platform layer.
-    dll/src/core/voice/common/log.cpp
-    dll/src/core/voice/common/miniaudio_impl.cpp
-    dll/src/core/voice/common/version.cpp
-    dll/src/core/voice/server/server_admin.cpp
-    dll/src/core/voice/server/server_api.cpp
-    dll/src/core/voice/server/server_groups.cpp
-    dll/src/core/voice/server/server_limits.cpp
-    dll/src/core/voice/server/server_network.cpp
-    dll/src/core/voice/server/spatial_grid.cpp
-    dll/src/core/voice/client/audio_devices.cpp
-    dll/src/core/voice/client/client_api.cpp
-    dll/src/core/voice/client/client_audio.cpp
-    dll/src/core/voice/client/client_groups.cpp
-    dll/src/core/voice/client/client_network.cpp
-    dll/src/core/voice/client/client_voice.cpp
-)
+# Every source a full build carries (INTERPOSER_ALL_SOURCES) splits into core/,
+# which is portable and reaches the OS only through platform/platform.h, and the
+# platform's own: win/ and platform/win/ here, linux/ and platform/linux/ in
+# Linux.cmake.
+set(INTERPOSER_CORE_SOURCES ${INTERPOSER_ALL_SOURCES})
+list(FILTER INTERPOSER_CORE_SOURCES INCLUDE REGEX "/dll/src/core/")
 
 if(NOT WIN32)
     include(Linux.cmake)
@@ -58,34 +42,37 @@ endif()
 
 find_package(minhook CONFIG REQUIRED)
 
+# ── The embeddable library ────────────────────────────────────────────────────
+#
+# The same Interposer, for a patch that ships as one file with it inside (see
+# include/LANCommander.Interposer.Embedded.h). No DllMain -- the patch calls
+# InterposerEmbeddedAttach/Detach from its own -- and no proxy exports, which
+# would collide with the patch's. The INTERPOSER_FEATURE_<NAME> options decide
+# what it carries (Features.cmake): each is off unless the consumer turns it on.
+#
+# Link LANCommander::Interposer::Embedded, not this: it links the archive whole,
+# without which every object the patch does not call into would be dropped and
+# its exports with it.
+
+interposer_add_embedded_library(LANCommander.Interposer.Static)
+
+add_library(LANCommander.Interposer.Embedded INTERFACE)
+add_library(LANCommander::Interposer::Embedded ALIAS LANCommander.Interposer.Embedded)
+target_link_libraries(LANCommander.Interposer.Embedded INTERFACE
+    "$<LINK_LIBRARY:WHOLE_ARCHIVE,LANCommander.Interposer.Static>")
+target_compile_definitions(LANCommander.Interposer.Embedded INTERFACE INTERPOSER_STATIC)
+
+# A consumer that only embeds (INTERPOSER_EMBEDDED_ONLY, see the root
+# CMakeLists.txt) needs nothing below.
+if(INTERPOSER_EMBEDDED_ONLY)
+    return()
+endif()
+
 # ── The hook DLL ──────────────────────────────────────────────────────────────
 
-# Everything but the entry point and the proxy exports, shared by the DLL and by
-# the static library a patch embeds.
-set(INTERPOSER_WIN_SOURCES
-    dll/src/platform/win/hooking.cpp
-    dll/src/platform/win/http.cpp
-    dll/src/platform/win/platform.cpp
-    dll/src/win/attach.cpp
-    dll/src/win/audio.cpp
-    dll/src/win/control.cpp
-    dll/src/win/dinput.cpp
-    dll/src/win/discord_ipc.cpp
-    dll/src/win/files.cpp
-    dll/src/win/hooks.cpp
-    dll/src/win/identity.cpp
-    dll/src/win/instance.cpp
-    dll/src/win/ipx.cpp
-    dll/src/win/network.cpp
-    dll/src/win/osversion.cpp
-    dll/src/win/registry.cpp
-    dll/src/win/relay.cpp
-    dll/src/win/richpresence.cpp
-)
-
+# Every feature, plus the entry point and the proxy exports.
 add_library(LANCommander.Interposer SHARED
-    ${INTERPOSER_CORE_SOURCES}
-    ${INTERPOSER_WIN_SOURCES}
+    ${INTERPOSER_ALL_SOURCES}
     dll/src/win/dllmain.cpp
     dll/src/win/proxy.cpp
     # The union of version.dll, dinput8.dll and dinput.dll's exports; also what
@@ -109,41 +96,6 @@ target_link_libraries(LANCommander.Interposer PRIVATE
 
 interposer_ship_target(LANCommander.Interposer)
 interposer_version_resource(LANCommander.Interposer)
-
-# ── The embeddable library ────────────────────────────────────────────────────
-#
-# The same Interposer, for a patch that ships as one file with it inside (see
-# include/LANCommander.Interposer.Embedded.h). No DllMain -- the patch calls
-# InterposerEmbeddedAttach/Detach from its own -- and no proxy exports, which
-# would collide with the patch's. Still built with INTERPOSER_BUILDING_DLL, so
-# the Interposer* exports leave through the patch's image; and without /GL, so
-# its objects are not tied to the exact compiler that built them.
-#
-# Link LANCommander::Interposer::Embedded, not this: it links the archive whole,
-# without which every object the patch does not call into would be dropped and
-# its exports with it.
-
-add_library(LANCommander.Interposer.Static STATIC
-    ${INTERPOSER_CORE_SOURCES}
-    ${INTERPOSER_WIN_SOURCES}
-)
-
-set_target_properties(LANCommander.Interposer.Static PROPERTIES INTERPOSER_NO_LTCG ON)
-target_compile_definitions(LANCommander.Interposer.Static PRIVATE INTERPOSER_BUILDING_DLL)
-target_include_directories(LANCommander.Interposer.Static
-    PRIVATE dll/src/core dll/src/platform dll/src/win
-    PUBLIC  include)
-target_link_libraries(LANCommander.Interposer.Static PRIVATE
-    minhook::minhook yaml-cpp::yaml-cpp winhttp ws2_32 version winmm
-    ${INTERPOSER_VOICE_LIBRARIES})
-
-interposer_version_resource(LANCommander.Interposer.Static)
-
-add_library(LANCommander.Interposer.Embedded INTERFACE)
-add_library(LANCommander::Interposer::Embedded ALIAS LANCommander.Interposer.Embedded)
-target_link_libraries(LANCommander.Interposer.Embedded INTERFACE
-    "$<LINK_LIBRARY:WHOLE_ARCHIVE,LANCommander.Interposer.Static>")
-target_compile_definitions(LANCommander.Interposer.Embedded INTERFACE INTERPOSER_STATIC)
 
 # ── The injector ──────────────────────────────────────────────────────────────
 
@@ -181,13 +133,76 @@ target_link_options(LANCommander.Interposer.Tests PRIVATE
 
 # A stand-in game patch with the Interposer embedded (the EM- tests). Built as a
 # shipping patch would be -- C, /MT, the XP settings -- because that is the
-# configuration the embeddable library has to link into.
+# configuration the embeddable library has to link into. It embeds every
+# feature, named explicitly rather than through the INTERPOSER_FEATURE_<NAME>
+# options, which are all off unless a consumer turns them on; and it is linked
+# the way LANCommander::Interposer::Embedded links the library those options
+# make.
+interposer_add_embedded_library(LANCommander.Interposer.Static.Full FEATURES ${INTERPOSER_FEATURES})
+
 add_library(LANCommander.Interposer.Tests.Patch SHARED
     tests/embedded/patch.c
     tests/embedded/patch.def
 )
 
-target_link_libraries(LANCommander.Interposer.Tests.Patch PRIVATE LANCommander::Interposer::Embedded)
+target_compile_definitions(LANCommander.Interposer.Tests.Patch PRIVATE INTERPOSER_STATIC)
+target_link_libraries(LANCommander.Interposer.Tests.Patch PRIVATE
+    "$<LINK_LIBRARY:WHOLE_ARCHIVE,LANCommander.Interposer.Static.Full>")
 interposer_ship_target(LANCommander.Interposer.Tests.Patch)
 
 add_dependencies(LANCommander.Interposer.Tests LANCommander.Interposer.Tests.Patch)
+
+# The same patch, embedding an Interposer built with nothing but the file hooks
+# (the trimmed EM- tests): every other feature is its stubs.
+interposer_add_embedded_library(LANCommander.Interposer.Static.Trimmed FEATURES FILES)
+
+add_library(LANCommander.Interposer.Tests.PatchTrimmed SHARED
+    tests/embedded/patch.c
+    tests/embedded/patch.def
+)
+
+target_compile_definitions(LANCommander.Interposer.Tests.PatchTrimmed PRIVATE INTERPOSER_STATIC)
+target_link_libraries(LANCommander.Interposer.Tests.PatchTrimmed PRIVATE
+    "$<LINK_LIBRARY:WHOLE_ARCHIVE,LANCommander.Interposer.Static.Trimmed>")
+interposer_ship_target(LANCommander.Interposer.Tests.PatchTrimmed)
+
+add_dependencies(LANCommander.Interposer.Tests LANCommander.Interposer.Tests.PatchTrimmed)
+
+# Optionally, the test patch once per feature left out (and once with none at
+# all), so a missing guard or stub shows up as a compile or link error rather
+# than in a patch author's build. Not run by default: it builds the library
+# fifteen more times. A feature's dependents go with it.
+option(INTERPOSER_FEATURE_MATRIX "Also build the test patch without each feature in turn" OFF)
+
+if(INTERPOSER_FEATURE_MATRIX)
+    set(matrix ${INTERPOSER_FEATURES} NONE)
+
+    foreach(left_out IN LISTS matrix)
+        if(left_out STREQUAL "NONE")
+            set(features)
+            set(variant NoFeatures)
+        else()
+            set(variant Without${left_out})
+            set(features ${INTERPOSER_FEATURES})
+            list(REMOVE_ITEM features ${left_out})
+
+            foreach(feature IN LISTS INTERPOSER_FEATURES)
+                if(left_out IN_LIST INTERPOSER_FEATURE_${feature}_DEPENDS)
+                    list(REMOVE_ITEM features ${feature})
+                endif()
+            endforeach()
+        endif()
+
+        interposer_add_embedded_library(LANCommander.Interposer.Static.${variant} FEATURES ${features})
+
+        add_library(LANCommander.Interposer.Tests.Patch${variant} SHARED
+            tests/embedded/patch.c
+            tests/embedded/patch.def)
+        target_compile_definitions(LANCommander.Interposer.Tests.Patch${variant} PRIVATE INTERPOSER_STATIC)
+        target_link_libraries(LANCommander.Interposer.Tests.Patch${variant} PRIVATE
+            "$<LINK_LIBRARY:WHOLE_ARCHIVE,LANCommander.Interposer.Static.${variant}>")
+        interposer_ship_target(LANCommander.Interposer.Tests.Patch${variant})
+        set_target_properties(LANCommander.Interposer.Tests.Patch${variant} PROPERTIES
+            RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/feature-matrix/$<CONFIG>")
+    endforeach()
+endif()

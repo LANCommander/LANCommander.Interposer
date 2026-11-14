@@ -1,6 +1,7 @@
 #include "attach.h"
 
 #include "config.h"
+#include "interposer_features.h"
 #include "hooks.h"
 #include "instance.h"
 #include "matches.h"
@@ -43,6 +44,7 @@ bool AttachInterposer(HMODULE self)
     if (!ClaimPrimaryInstance(self))
     {
         WriteLog(L"DLL_PROCESS_ATTACH: another Interposer is already loaded; deferring to it");
+        ReportFeaturesMissingFromPrimary(WriteLog);
         return false;
     }
 
@@ -91,14 +93,22 @@ extern "C" BOOL InterposerEmbeddedAttach(HMODULE module)
 extern "C" BOOL InterposerEmbeddedAttachApiOnly(HMODULE module)
 {
     if (!ClaimPrimaryInstance(module))
+    {
+        ReportFeaturesMissingFromPrimary(WriteLog);
         return FALSE;
+    }
 
     g_apiOnly = true;
 
     LoadConfig();
+    LogCompiledFeatures();
     ConnectEventPipe();
+#if INTERPOSER_FEATURE_MATCHES
     InitMatches();
+#endif
+#if INTERPOSER_FEATURE_PLUGINS
     LoadPlugins();
+#endif
     return TRUE;
 }
 
@@ -114,8 +124,12 @@ extern "C" void InterposerEmbeddedDetach(BOOL processTerminating)
         return;
 
     DisconnectEventPipe();
+#if INTERPOSER_FEATURE_PLUGINS
     UnloadPlugins();
+#endif
+#if INTERPOSER_FEATURE_MATCHES
     ShutdownMatches(processTerminating != FALSE);
+#endif
     CloseLog();
     ReleasePrimaryInstance();
     g_apiOnly = false;

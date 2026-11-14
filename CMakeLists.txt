@@ -9,6 +9,14 @@ endif()
 # The pushed tag in CI; empty means "ask git" (see build/GenerateVersion.cmake).
 set(INTERPOSER_VERSION "" CACHE STRING "Version tag to stamp into resources, e.g. v1.2.3")
 
+# For a game patch or server plugin that pulls this repository in only to embed
+# the Interposer: define LANCommander.Interposer.Static and
+# LANCommander::Interposer::Embedded and nothing else -- no DLL, injector, tests
+# or plugins -- so unless INTERPOSER_FEATURE_VOICE is turned on the voice
+# libraries need not be installed either. The feature switches, all opt-in, are
+# in LANCommander.Interposer/Features.cmake.
+option(INTERPOSER_EMBEDDED_ONLY "Only define the embeddable library" OFF)
+
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
@@ -72,6 +80,9 @@ add_link_options(/DEBUG "$<$<CONFIG:Release>:/LTCG:incremental;/OPT:REF;/OPT:ICF
 include(build/Compatibility.cmake)
 
 add_subdirectory(LANCommander.Interposer)
-add_subdirectory(LANCommander.Interposer.Plugin.CDKey)
-add_subdirectory(LANCommander.Interposer.Plugin.Example)
-add_subdirectory(LANCommander.Interposer.Plugin.Mouse)
+
+if(NOT INTERPOSER_EMBEDDED_ONLY)
+    add_subdirectory(LANCommander.Interposer.Plugin.CDKey)
+    add_subdirectory(LANCommander.Interposer.Plugin.Example)
+    add_subdirectory(LANCommander.Interposer.Plugin.Mouse)
+endif()

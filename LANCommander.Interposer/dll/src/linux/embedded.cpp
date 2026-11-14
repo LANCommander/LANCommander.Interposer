@@ -20,6 +20,7 @@
 // code is linked into by address, so .interposer/ is looked for beside it.
 
 #include "config.h"
+#include "interposer_features.h"
 #include "instance.h"
 #include "matches.h"
 #include "pipe_events.h"
@@ -33,6 +34,11 @@
 namespace
 {
     bool g_attached = false;
+
+    void ReportToStderr(const wchar_t* message)
+    {
+        fprintf(stderr, "LANCommander.Interposer: %ls\n", message);
+    }
 }
 
 extern "C" BOOL InterposerEmbeddedAttach(void)
@@ -43,16 +49,24 @@ extern "C" BOOL InterposerEmbeddedAttach(void)
     // Another copy already owns this process. Install nothing; the exports
     // forward to it (see instance.h).
     if (!ClaimPrimaryInstance(platform::SelfModule()))
+    {
+        ReportFeaturesMissingFromPrimary(ReportToStderr);
         return FALSE;
+    }
 
     g_attached = true;
 
     try
     {
         LoadConfig();
+        LogCompiledFeatures();
         ConnectEventPipe();
+#if INTERPOSER_FEATURE_MATCHES
         InitMatches();
+#endif
+#if INTERPOSER_FEATURE_PLUGINS
         LoadPlugins();
+#endif
     }
     catch (const std::exception& e)
     {
@@ -72,8 +86,12 @@ extern "C" void InterposerEmbeddedDetach(BOOL processTerminating)
         return;
 
     DisconnectEventPipe();
+#if INTERPOSER_FEATURE_PLUGINS
     UnloadPlugins();
+#endif
+#if INTERPOSER_FEATURE_MATCHES
     ShutdownMatches(processTerminating != FALSE);
+#endif
     CloseLog();
     ReleasePrimaryInstance();
 

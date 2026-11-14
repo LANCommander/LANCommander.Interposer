@@ -205,7 +205,8 @@ BOOL WINAPI DllMain(HINSTANCE instance, DWORD reason, LPVOID reserved)
 ```
 
 From then on the embedded Interposer behaves like the DLL deployed under your
-patch's file name. Its `.interposer\` folder is the one beside your patch. Its
+patch's file name, with the features you built it with (see "Choosing
+features" below). Its `.interposer\` folder is the one beside your patch. Its
 hooks are installed even without a `Config.yml`, and they change nothing until
 one turns a feature on. It also takes part in the coordination described below:
 if another Interposer is already loaded, `InterposerEmbeddedAttach` returns
@@ -218,12 +219,99 @@ Your patch serves the game's `DirectInputCreateA`, `DirectInputCreateEx` or
 `InterposerDirectInputCreateEx` or `InterposerDirectInput8Create` from that
 export, and wrap the object it returns. That keeps
 `DirectInput.FixLegacyDeviceEnumeration` and `DirectInput.DeviceFilter` in
-effect. With neither configured, these functions call the real DLL in System32.
+effect, provided the library carries `DIRECTINPUT` (see "Choosing features").
+With neither configured, or without that feature, these functions call the real
+DLL in System32.
 
 Exporting these functions is also how another Interposer recognises your patch.
 An Interposer that LANCommander deployed as `version.dll` would otherwise detour
 the `DirectInputCreateA` of whatever module is named `dinput.dll`. That is your
 patch, and for a game it bridges, the call would never reach your wrapper.
+
+### Choosing features
+
+Whatever the static library carries ends up in your patch, so every feature is
+opt-in. Out of the box the library carries only its core: `Config.yml`, the
+session log, the plugin config functions and the launcher's event channel. Each
+feature has a CMake option, off by default. Turn on the ones your patch uses
+before your `add_subdirectory` of this repository:
+
+```cmake
+set(INTERPOSER_FEATURE_FILES   ON CACHE BOOL "" FORCE)
+set(INTERPOSER_FEATURE_FASTDL  ON CACHE BOOL "" FORCE)
+set(INTERPOSER_FEATURE_MATCHES ON CACHE BOOL "" FORCE)
+add_subdirectory(${LANCOMMANDER_INTERPOSER_DIR} interposer EXCLUDE_FROM_ALL)
+```
+
+A feature in the **Needs** column must be turned on too. Configure stops with an
+error naming both otherwise.
+
+| Option (`INTERPOSER_FEATURE_...`) | What it carries | Needs |
+|---|---|---|
+| `REGISTRY` | the virtual registry (`Registry`) | |
+| `FILES` | the file hooks and `FileRedirects` | |
+| `FASTDL` | FastDL downloads (`FastDL`) | `FILES` |
+| `DIRECTINPUT` | the DirectInput bridge, `DeviceFilter`, the mouse transform | |
+| `AUDIO` | the audio device filter (`AudioDevices`) | |
+| `OSVERSION` | the reported Windows version (`OsVersion`) | |
+| `IDENTITY` | the user and computer name overrides (`Player`) | |
+| `NETWORK` | `DnsRedirects`, `NetworkAdapters`, the adapter enumeration | |
+| `RELAY` | the network relay and IPX (`NetworkRelay`) | `NETWORK` |
+| `RICH_PRESENCE` | rich presence and Discord (`RichPresence`) | |
+| `MATCHES` | match statistics (`MatchStatistics`) | |
+| `VOICE` | voice chat, the `interposer_comms_*` API, with ENet, Opus and miniaudio | |
+| `PLUGINS` | loading `.interposer\Plugins\` | |
+
+A feature you do not turn on is left out of the code, not out of the API. Each
+of its functions is still exported, and it answers the way it would with the
+feature switched off:
+
+- `InterposerRelayGetStatus` reports `Disabled`.
+- `InterposerMatchStart` returns 0.
+- Every voice call returns `INTERPOSER_COMMS_ERR_NOT_IMPLEMENTED`, except the
+  `*_init` helpers, the version functions and the log settings.
+- `InterposerDirectInputCreateA` and its siblings call the real DLL in System32.
+
+Your patch therefore links and runs unchanged, and so do plugins and other
+copies of the Interposer that look the functions up by name. To ask at run time
+what is really there, call `InterposerGetFeatures`, which returns an
+`INTERPOSER_FEATURE_FLAG_*` bit for each feature this build carries.
+
+A `Config.yml` section for a feature that was not built in has no effect. The
+session log says so with a `[CONFIG]` line when the section is there.
+
+Some features matter beyond their own section:
+
+- Without `FILES` the Interposer does not see libraries load. It cannot hook a
+  library the game loads later (`ws2_32`, `dinput8`, `dsound`) for `NETWORK`,
+  `DIRECTINPUT` and `AUDIO`.
+- Without `NETWORK`, FastDL cannot probe the servers the game connects to.
+  It downloads only from a `FastDL.BaseUrl` or `InterposerSetFastDLBaseUrl`.
+
+To build nothing but the library, set `INTERPOSER_EMBEDDED_ONLY` as well. Then
+none of the DLL, the injector, the tests or the plugins is defined. Unless you
+turn `VOICE` on, ENet, Opus and miniaudio are then not looked for, so your
+`vcpkg.json` can leave them out. MinHook and yaml-cpp are always needed.
+
+On Linux the switches work the same way. Link your host with
+`-ffunction-sections -fdata-sections` and `-Wl,--gc-sections` to discard what
+no export reaches, as MSVC's `/OPT:REF` does on Windows.
+
+#### When your patch loads first
+
+The first Interposer to load owns the process, even if it was built with less
+than a later copy (see [below](#alongside-lancommanders-own-deployment)). If
+your patch loads before the Interposer LANCommander deployed, the features you
+did not turn on are off for the whole process, whatever LANCommander
+configured. The later copy says so in your patch's session log:
+
+```
+[INSTANCE]  the Interposer that owns this process was built without features this copy carries, so they are off: Registry, Relay
+```
+
+So turn on more than your patch calls when players may run it beside
+LANCommander's deployment: in particular, any feature LANCommander's
+redistributable may configure for the game.
 
 ## Reporting matches
 

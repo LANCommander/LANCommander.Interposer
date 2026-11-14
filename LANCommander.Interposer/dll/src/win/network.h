@@ -35,10 +35,9 @@ void LateInstallNetworkHooks(const wchar_t* moduleName);
 // Clear internal state. Call from RemoveHooks() before MH_DisableHook.
 void RemoveNetworkHooks();
 
-// Probe any server addresses collected since the last call that have not yet
-// been probed. Stops as soon as a FastDL endpoint is confirmed. Blocking —
-// call from the file-load hook just before a FastDL download is attempted.
-void ProbeAllDiscoveredAddresses();
+// ProbeAllDiscoveredAddresses, which the network hooks define for FastDL, is
+// declared in fastdl.h.
+#include "fastdl.h"
 
 // InterposerNetworkAdapter and InterposerEnumNetworkAdapters -- the unified
 // adapter enumeration plugins and managed hosts share -- are declared in the

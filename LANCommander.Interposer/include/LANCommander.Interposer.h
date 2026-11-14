@@ -94,6 +94,34 @@ INTERPOSER_API BOOL INTERPOSER_CALL InterposerRegisterPluginConfig(const wchar_t
 INTERPOSER_API BOOL INTERPOSER_CALL InterposerSetConfigString(const wchar_t* dotPath, const wchar_t* value);
 
 /* ===========================================================================
+ * Features
+ *
+ * A patch that embeds the Interposer may build it with features left out
+ * (GamePatches.md, "Trimming the embedded Interposer"). Their functions are
+ * still exported and answer as though the feature were switched off. Ask
+ * which ones are really there with InterposerGetFeatures: an
+ * INTERPOSER_FEATURE_FLAG_* bit for each, set only for a feature this build
+ * carries and this platform implements. The shipped DLL carries them all.
+ * A copy that defers to another reports the other's.
+ * ======================================================================== */
+
+#define INTERPOSER_FEATURE_FLAG_REGISTRY      0x00000001u
+#define INTERPOSER_FEATURE_FLAG_FILES         0x00000002u
+#define INTERPOSER_FEATURE_FLAG_FASTDL        0x00000004u
+#define INTERPOSER_FEATURE_FLAG_DIRECTINPUT   0x00000008u
+#define INTERPOSER_FEATURE_FLAG_AUDIO         0x00000010u
+#define INTERPOSER_FEATURE_FLAG_OSVERSION     0x00000020u
+#define INTERPOSER_FEATURE_FLAG_IDENTITY      0x00000040u
+#define INTERPOSER_FEATURE_FLAG_NETWORK       0x00000080u
+#define INTERPOSER_FEATURE_FLAG_RELAY         0x00000100u
+#define INTERPOSER_FEATURE_FLAG_RICH_PRESENCE 0x00000200u
+#define INTERPOSER_FEATURE_FLAG_MATCHES       0x00000400u
+#define INTERPOSER_FEATURE_FLAG_VOICE         0x00000800u
+#define INTERPOSER_FEATURE_FLAG_PLUGINS       0x00001000u
+
+INTERPOSER_API DWORD INTERPOSER_CALL InterposerGetFeatures(void);
+
+/* ===========================================================================
  * FastDL
  * ======================================================================== */
 

@@ -16,6 +16,13 @@
  * plugins in .interposer\Plugins\. An object the linker dropped because the
  * patch never called into it would take its exports with it.
  *
+ * Because the whole archive is linked, what the library carries is decided
+ * when it is built, and every feature is opt-in: the INTERPOSER_FEATURE_<NAME>
+ * CMake options (LANCommander.Interposer/Features.cmake) are off by default,
+ * and the patch turns on the ones it uses. A feature not built in keeps its
+ * exports, which answer as though it were switched off; InterposerGetFeatures
+ * says which are really there. See GamePatches.md, "Choosing features".
+ *
  * The embedded Interposer behaves as though it were the DLL deployed under the
  * patch's file name. Its base directory is the patch's directory, so its
  * configuration is the .interposer\Config.yml beside the patch, its plugins

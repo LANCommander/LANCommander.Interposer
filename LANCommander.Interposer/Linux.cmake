@@ -3,25 +3,37 @@
 
 find_package(Threads REQUIRED)
 
-# Everything but the entry point, shared by the .so and the static library a
-# host embeds.
-set(INTERPOSER_LINUX_SOURCES
-    dll/src/platform/linux/hooking.cpp
-    dll/src/platform/linux/http.cpp
-    dll/src/platform/linux/platform.cpp
-    dll/src/linux/files.cpp
-    dll/src/linux/hooks.cpp
-    dll/src/linux/identity.cpp
-    dll/src/linux/instance.cpp
-    dll/src/linux/network.cpp
-    dll/src/linux/unsupported.cpp
-)
+# ── The embeddable library ────────────────────────────────────────────────────
+#
+# The same Interposer for a host shared object that carries it inside (a game
+# server plugin): see include/LANCommander.Interposer.Embedded.h. No main.cpp --
+# nothing runs at load; the host calls InterposerEmbeddedAttach/Detach
+# (linux/embedded.cpp). The INTERPOSER_FEATURE_<NAME> options decide what it
+# carries (Features.cmake): each is off unless the consumer turns it on.
+#
+# Link LANCommander::Interposer::Embedded, not this: it links the archive whole,
+# and passes yaml-cpp, the voice libraries and the system libraries on. The host
+# should link -static-libstdc++ -static-libgcc and export only its own entry
+# points plus Interposer* (a version script), as the .so does with exports.map.
+
+interposer_add_embedded_library(LANCommander.Interposer.Static)
+
+add_library(LANCommander.Interposer.Embedded INTERFACE)
+add_library(LANCommander::Interposer::Embedded ALIAS LANCommander.Interposer.Embedded)
+target_link_libraries(LANCommander.Interposer.Embedded INTERFACE
+    "$<LINK_LIBRARY:WHOLE_ARCHIVE,LANCommander.Interposer.Static>")
+target_compile_definitions(LANCommander.Interposer.Embedded INTERFACE INTERPOSER_STATIC)
+
+# A consumer that only embeds (INTERPOSER_EMBEDDED_ONLY, see the root
+# CMakeLists.txt) needs nothing below.
+if(INTERPOSER_EMBEDDED_ONLY)
+    return()
+endif()
 
 # ── The shared object ─────────────────────────────────────────────────────────
 
 add_library(LANCommander.Interposer SHARED
-    ${INTERPOSER_CORE_SOURCES}
-    ${INTERPOSER_LINUX_SOURCES}
+    ${INTERPOSER_ALL_SOURCES}
     # Last, always: its constructor must run after every other file's static
     # initialisers, and .init_array runs in link order. See the top of main.cpp.
     dll/src/linux/main.cpp
@@ -57,44 +69,6 @@ target_link_options(LANCommander.Interposer PRIVATE
 set_property(TARGET LANCommander.Interposer APPEND PROPERTY
     LINK_DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/dll/src/linux/exports.map")
 
-# ── The embeddable library ────────────────────────────────────────────────────
-#
-# The same Interposer for a host shared object that carries it inside (a game
-# server plugin): see include/LANCommander.Interposer.Embedded.h. No main.cpp --
-# nothing runs at load; the host calls InterposerEmbeddedAttach/Detach
-# (linux/embedded.cpp). Position-independent, since it ends up in a .so.
-#
-# Link LANCommander::Interposer::Embedded, not this: it links the archive whole,
-# and passes yaml-cpp, the voice libraries and the system libraries on. The host
-# should link -static-libstdc++ -static-libgcc and export only its own entry
-# points plus Interposer* (a version script), as the .so does with exports.map.
-
-add_library(LANCommander.Interposer.Static STATIC
-    ${INTERPOSER_CORE_SOURCES}
-    ${INTERPOSER_LINUX_SOURCES}
-    dll/src/linux/embedded.cpp
-)
-
-set_target_properties(LANCommander.Interposer.Static PROPERTIES
-    POSITION_INDEPENDENT_CODE ON
-    C_VISIBILITY_PRESET       hidden
-    CXX_VISIBILITY_PRESET     hidden
-    VISIBILITY_INLINES_HIDDEN ON)
-target_compile_definitions(LANCommander.Interposer.Static PRIVATE INTERPOSER_BUILDING_DLL)
-target_include_directories(LANCommander.Interposer.Static
-    PRIVATE dll/src/core dll/src/platform dll/src/linux
-    PUBLIC  include)
-target_link_libraries(LANCommander.Interposer.Static PUBLIC
-    yaml-cpp::yaml-cpp Threads::Threads ${CMAKE_DL_LIBS} m
-    ${INTERPOSER_VOICE_LIBRARIES})
-interposer_version_resource(LANCommander.Interposer.Static)
-
-add_library(LANCommander.Interposer.Embedded INTERFACE)
-add_library(LANCommander::Interposer::Embedded ALIAS LANCommander.Interposer.Embedded)
-target_link_libraries(LANCommander.Interposer.Embedded INTERFACE
-    "$<LINK_LIBRARY:WHOLE_ARCHIVE,LANCommander.Interposer.Static>")
-target_compile_definitions(LANCommander.Interposer.Embedded INTERFACE INTERPOSER_STATIC)
-
 # ── The test harness ──────────────────────────────────────────────────────────
 #
 # The Windows test EXE is Win32 through and through, so Linux has its own, built
@@ -114,3 +88,40 @@ target_include_directories(LANCommander.Interposer.TestPlugin PRIVATE include)
 
 add_dependencies(LANCommander.Interposer.Tests
     LANCommander.Interposer LANCommander.Interposer.SdkProbe LANCommander.Interposer.TestPlugin)
+
+# Optionally, an embedding host once per feature left out (and once with none at
+# all), linked with --no-undefined, so a missing guard or stub fails the build
+# rather than a host's. The Windows counterpart is in CMakeLists.txt.
+option(INTERPOSER_FEATURE_MATRIX "Also build an embedding host without each feature in turn" OFF)
+
+if(INTERPOSER_FEATURE_MATRIX)
+    set(matrix ${INTERPOSER_FEATURES} NONE)
+
+    foreach(left_out IN LISTS matrix)
+        if(left_out STREQUAL "NONE")
+            set(features)
+            set(variant NoFeatures)
+        else()
+            set(variant Without${left_out})
+            set(features ${INTERPOSER_FEATURES})
+            list(REMOVE_ITEM features ${left_out})
+
+            foreach(feature IN LISTS INTERPOSER_FEATURES)
+                if(left_out IN_LIST INTERPOSER_FEATURE_${feature}_DEPENDS)
+                    list(REMOVE_ITEM features ${feature})
+                endif()
+            endforeach()
+        endif()
+
+        interposer_add_embedded_library(LANCommander.Interposer.Static.${variant} FEATURES ${features})
+
+        add_library(LANCommander.Interposer.EmbeddedProbe${variant} SHARED tests/linux/embedded_probe.c)
+        target_compile_definitions(LANCommander.Interposer.EmbeddedProbe${variant} PRIVATE INTERPOSER_STATIC)
+        target_link_libraries(LANCommander.Interposer.EmbeddedProbe${variant} PRIVATE
+            "$<LINK_LIBRARY:WHOLE_ARCHIVE,LANCommander.Interposer.Static.${variant}>")
+        target_link_options(LANCommander.Interposer.EmbeddedProbe${variant} PRIVATE
+            -static-libstdc++ -static-libgcc "LINKER:--no-undefined")
+        set_target_properties(LANCommander.Interposer.EmbeddedProbe${variant} PROPERTIES
+            LIBRARY_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/feature-matrix/$<CONFIG>")
+    endforeach()
+endif()
