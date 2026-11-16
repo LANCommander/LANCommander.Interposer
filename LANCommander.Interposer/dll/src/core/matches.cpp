@@ -1516,13 +1516,16 @@ Match* OpenLocked(DWORD handle)
 namespace
 {
 
-std::atomic<bool> g_spoolLoaded{ false };
+std::atomic<bool>   g_spoolLoaded{ false };
+std::atomic<size_t> g_spoolWaiting{ 0 };   // left unloaded at startup for want of settings
 
 // Load what a previous run left in .interposer/Matches/, once, as soon as the
 // HTTP settings are complete -- from InitMatches when Config.yml has them, or
 // from the InterposerMatchConfigure call that completes them. reportWaiting
-// logs the unsent count when they are not complete yet (at startup only, so a
-// host configuring piecemeal does not repeat it).
+// notes the unsent count when they are not complete yet (at startup only, so a
+// host configuring piecemeal does not repeat it). That is not an error yet:
+// plugins load after InitMatches and usually configure the sink themselves;
+// ShutdownMatches reports it if none ever did.
 void LoadSpoolOnce(bool reportWaiting)
 {
     if (g_spoolLoaded)
@@ -1559,10 +1562,11 @@ void LoadSpoolOnce(bool reportWaiting)
 
     if (!configured)
     {
+        g_spoolWaiting = waiting;
+
         if (reportWaiting)
-            InterposerLog(L"MATCH ERROR", (std::to_wstring(waiting) +
-                L" unsent matches are waiting in " + root +
-                L"; MatchStatistics.ServerUrl, Token and GameId are needed to send them").c_str());
+            LogMatch(L"MATCH", (std::to_wstring(waiting) + L" unsent matches are waiting in " + root).c_str(),
+                L"they are sent once MatchStatistics.ServerUrl, Token and GameId are configured");
         return;
     }
 
@@ -1588,6 +1592,12 @@ void InitMatches()
 
 void ShutdownMatches(bool processTerminating)
 {
+    if (!g_spoolLoaded && g_spoolWaiting > 0)
+        InterposerLog(L"MATCH ERROR", (std::to_wstring(g_spoolWaiting.load()) +
+            L" unsent matches were left in " + GetInterposerDataDirectory() + L"Matches" +
+            platform::kPathSeparator + L"; nothing configured MatchStatistics.ServerUrl, Token and GameId"
+            L" (Config.yml or InterposerMatchConfigure), so they were not sent").c_str());
+
     if (processTerminating || !g_thread)
         return;
 

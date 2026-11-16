@@ -14,6 +14,15 @@ namespace
     int        g_sessionUsers = 0;    // Initialize calls not yet matched by Shutdown
     std::mutex g_sessionMutex;
 
+    using CloseHandleFn = BOOL (WINAPI*)(HINTERNET);
+    CloseHandleFn g_closeHandle = nullptr;
+
+    void CloseInternetHandle(HINTERNET handle)
+    {
+        if (handle && g_closeHandle)
+            g_closeHandle(handle);
+    }
+
     // One request's connection: the URL cracked, the server connected.
     struct Connection
     {
@@ -40,7 +49,7 @@ namespace
         ~Connection()
         {
             if (connect)
-                WinHttpCloseHandle(connect);
+                CloseInternetHandle(connect);
         }
 
         Connection(const Connection&) = delete;
@@ -72,7 +81,7 @@ namespace
                     bodyBytes ? const_cast<void*>(body) : WINHTTP_NO_REQUEST_DATA, length, length, 0) ||
                 !WinHttpReceiveResponse(request, nullptr))
             {
-                WinHttpCloseHandle(request);
+                CloseInternetHandle(request);
                 return nullptr;
             }
 
@@ -115,6 +124,16 @@ bool Initialize()
 {
     std::lock_guard<std::mutex> lock(g_sessionMutex);
 
+    if (!g_closeHandle)
+    {
+        if (HMODULE winhttp = GetModuleHandleW(L"winhttp.dll"))
+            g_closeHandle = reinterpret_cast<CloseHandleFn>(GetProcAddress(winhttp, "WinHttpCloseHandle"));
+
+        // Without it every handle would leak, so there is no HTTP at all.
+        if (!g_closeHandle)
+            return false;
+    }
+
     if (!g_session)
     {
         g_session = WinHttpOpen(
@@ -141,7 +160,7 @@ void Shutdown()
 
     if (g_session)
     {
-        WinHttpCloseHandle(g_session);
+        CloseInternetHandle(g_session);
         g_session = nullptr;
     }
 }
@@ -176,7 +195,7 @@ HeadResult Head(const std::wstring& url, const std::wstring& requestHeaders,
             result.headerValue = value;
     }
 
-    WinHttpCloseHandle(request);
+    CloseInternetHandle(request);
     return result;
 }
 
@@ -223,7 +242,7 @@ Response Send(const wchar_t* method, const std::wstring& url, const std::wstring
         result.body.append(buf.data(), read);
     }
 
-    WinHttpCloseHandle(request);
+    CloseInternetHandle(request);
     return result;
 }
 
@@ -238,7 +257,7 @@ bool GetToFile(const std::wstring& url, const std::wstring& path)
 
     if (StatusOf(request) != 200)
     {
-        WinHttpCloseHandle(request);
+        CloseInternetHandle(request);
         return false;
     }
 
@@ -249,7 +268,7 @@ bool GetToFile(const std::wstring& url, const std::wstring& path)
 
     if (file == INVALID_HANDLE_VALUE)
     {
-        WinHttpCloseHandle(request);
+        CloseInternetHandle(request);
         return false;
     }
 
@@ -279,7 +298,7 @@ bool GetToFile(const std::wstring& url, const std::wstring& path)
     }
 
     CloseHandle(file);
-    WinHttpCloseHandle(request);
+    CloseInternetHandle(request);
 
     if (!writeOk)
         DeleteFileW(path.c_str());
