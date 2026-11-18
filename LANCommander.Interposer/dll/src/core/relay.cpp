@@ -1,24 +1,33 @@
+#ifdef _WIN32
 // Must precede every Winsock include in this translation unit: the relay thread
 // selects over one socket per remote endpoint the game talks to, and the
-// default of 64 would cap a game at a handful of peers.
+// default of 64 would cap a game at a handful of peers. (Elsewhere the thread
+// polls, which has no such limit.)
 #define FD_SETSIZE 1024
+#endif
 
-#define WIN32_LEAN_AND_MEAN
-#define NOMINMAX
-#include <winsock2.h>
-#include <ws2tcpip.h>
+#include "sockets.h"
+
+#ifdef _WIN32
 #include <mstcpip.h>
-#include <windows.h>
 
 // mstcpip.h only declares this for a Vista+ _WIN32_WINNT, but XP SP2 already
 // honours it.
 #ifndef SIO_UDP_CONNRESET
 #define SIO_UDP_CONNRESET _WSAIOW(IOC_VENDOR, 12)
 #endif
+#else
+#include <ctime>
+#endif
 
 #include <algorithm>
 #include <atomic>
+#include <chrono>
+#include <condition_variable>
 #include <cstdio>
+#include <cstdlib>
+#include <cwchar>
+#include <iterator>
 #include <map>
 #include <mutex>
 #include <string>
@@ -31,8 +40,17 @@
 #include "relay_protocol.h"
 #include "callbacks.h"
 #include "config.h"
+#include "net_hook.h"
+#include "platform.h"
+
+#ifdef _WIN32
 #include "ipx.h"
-#include "network.h"
+#else
+// IPX is emulated on Windows only: Linux dropped AF_IPX in 4.18, and no native
+// Linux game speaks it. An IPX datagram from a Windows player is not delivered.
+static uint16_t IpxUdpPortForSocketNumber(uint16_t) { return 0; }
+static uint16_t IpxSocketNumberForUdpPort(uint16_t) { return 0; }
+#endif
 
 // ---------------------------------------------------------------------------
 // Network relay client.
@@ -77,7 +95,7 @@ namespace
 std::mutex    g_settingsMutex;
 RelaySettings g_settings;              // guarded by g_settingsMutex
 bool          g_overridePresent = false; // the launcher passed Local\InterposerRelay_<pid>
-bool          g_hooksWanted     = false;
+std::atomic<bool> g_hooksWanted{false};  // read by every socket hook; false again once shut down
 
 std::atomic<int>      g_state{static_cast<int>(RelayState::Disabled)};
 std::atomic<uint32_t> g_vip{0};
@@ -93,7 +111,9 @@ std::atomic<int>      g_addressTimeout{5000};
 
 // Set the first time an address is assigned and never reset: a reconnect asks
 // for the same address, and sockets the game holds keep their meaning.
-HANDLE g_addressReady = nullptr;
+std::mutex              g_addressMutex;
+std::condition_variable g_addressCv;
+bool                    g_addressAssigned = false; // guarded by g_addressMutex
 
 std::atomic<uint64_t> g_bytesSent{0};
 std::atomic<uint64_t> g_bytesReceived{0};
@@ -101,6 +121,19 @@ std::atomic<uint64_t> g_datagramsSent{0};
 std::atomic<uint64_t> g_datagramsReceived{0};
 std::atomic<uint32_t> g_streamsOpen{0};
 std::atomic<DWORD>    g_serverRtt{1};   // ms, from the control connection's pings
+
+// Milliseconds on a monotonic clock, wrapping like GetTickCount, which it is
+// on Windows. Every interval below is a difference of two of these.
+DWORD Ticks()
+{
+#ifdef _WIN32
+    return GetTickCount();
+#else
+    timespec now{};
+    clock_gettime(CLOCK_MONOTONIC, &now);
+    return static_cast<DWORD>(static_cast<uint64_t>(now.tv_sec) * 1000u + static_cast<uint64_t>(now.tv_nsec) / 1000000u);
+#endif
+}
 
 struct PeerInfo
 {
@@ -118,8 +151,7 @@ std::vector<PeerInfo> g_peers;
 
 // ---- thread control -----------------------------------------------------------
 
-HANDLE              g_thread = nullptr;
-HANDLE              g_parked = nullptr;   // set by the thread once it is safe to terminate
+platform::Thread    g_thread = nullptr;
 std::atomic<bool>   g_stop{false};
 std::mutex          g_commandMutex;
 bool                g_commandReconnect  = false;
@@ -172,30 +204,22 @@ std::unordered_set<SOCKET>                   g_virtualLocal;    // report the vi
 
 // ---- helpers --------------------------------------------------------------------
 
-std::string WideToUtf8(const std::wstring& s)
-{
-    if (s.empty()) return {};
-    int n = WideCharToMultiByte(CP_UTF8, 0, s.c_str(), static_cast<int>(s.size()), nullptr, 0, nullptr, nullptr);
-    std::string out(static_cast<size_t>(n > 0 ? n : 0), '\0');
-    if (n > 0)
-        WideCharToMultiByte(CP_UTF8, 0, s.c_str(), static_cast<int>(s.size()), out.data(), n, nullptr, nullptr);
-    return out;
-}
+std::string WideToUtf8(const std::wstring& s)  { return platform::WideToUtf8(s); }
+std::wstring Utf8ToWide(const std::string& s)  { return platform::Utf8ToWide(s); }
 
-std::wstring Utf8ToWide(const std::string& s)
+// Copy into a fixed wchar_t field, truncating, always terminated.
+template <size_t N>
+void CopyText(wchar_t (&field)[N], const std::wstring& value)
 {
-    if (s.empty()) return {};
-    int n = MultiByteToWideChar(CP_UTF8, 0, s.c_str(), static_cast<int>(s.size()), nullptr, 0);
-    std::wstring out(static_cast<size_t>(n > 0 ? n : 0), L'\0');
-    if (n > 0)
-        MultiByteToWideChar(CP_UTF8, 0, s.c_str(), static_cast<int>(s.size()), out.data(), n);
-    return out;
+    const size_t count = value.size() < N - 1 ? value.size() : N - 1;
+    std::wmemcpy(field, value.c_str(), count);
+    field[count] = L'\0';
 }
 
 std::wstring IpToString(uint32_t ipHost)
 {
     wchar_t buf[16]{};
-    swprintf_s(buf, L"%u.%u.%u.%u",
+    swprintf(buf, std::size(buf), L"%u.%u.%u.%u",
         (ipHost >> 24) & 0xFF, (ipHost >> 16) & 0xFF, (ipHost >> 8) & 0xFF, ipHost & 0xFF);
     return buf;
 }
@@ -240,7 +264,7 @@ bool ParseIpv4(const std::wstring& text, uint32_t& ipHost)
 
 bool Elapsed(DWORD since, DWORD interval)
 {
-    return GetTickCount() - since >= interval;
+    return Ticks() - since >= interval;
 }
 
 uint64_t PortalKey(uint8_t proto, uint32_t vip, uint16_t port)
@@ -311,8 +335,7 @@ uint32_t BindLocal(SOCKET s, uint32_t vipHost)
 
 void SetNonBlocking(SOCKET s)
 {
-    u_long on = 1;
-    ioctlsocket(s, FIONBIO, &on);
+    sock::SetNonBlocking(s);
 }
 
 void SetNoDelay(SOCKET s)
@@ -324,11 +347,18 @@ void SetNoDelay(SOCKET s)
 // Without this a datagram to a port nobody has bound comes back as an ICMP
 // port-unreachable, and the next recvfrom on the sending socket fails with
 // WSAECONNRESET -- which on a portal would look like the remote peer vanished.
+//
+// Linux reports ICMP errors only on a connected UDP socket, and no portal is
+// one, so there is nothing to switch off there.
 void DisableConnReset(SOCKET s)
 {
+#ifdef _WIN32
     BOOL  off = FALSE;
     DWORD returned = 0;
     WSAIoctl(s, SIO_UDP_CONNRESET, &off, sizeof(off), nullptr, 0, &returned, nullptr, nullptr);
+#else
+    (void)s;
+#endif
 }
 
 void AbortiveClose(SOCKET s)
@@ -337,13 +367,13 @@ void AbortiveClose(SOCKET s)
     l.l_onoff  = 1;
     l.l_linger = 0;
     setsockopt(s, SOL_SOCKET, SO_LINGER, reinterpret_cast<const char*>(&l), sizeof(l));
-    closesocket(s);
+    sock::Close(s);
 }
 
 uint16_t LocalPortOf(SOCKET s)
 {
     sockaddr_in a{};
-    int len = sizeof(a);
+    SockLen len = sizeof(a);
     if (getsockname(s, reinterpret_cast<sockaddr*>(&a), &len) != 0)
         return 0;
     return ntohs(a.sin_port);
@@ -397,7 +427,11 @@ void ApplyFeatureFlags(const RelaySettings& s)
 {
     g_udpOn             = s.udp;
     g_tcpOn             = s.tcp;
+#ifdef _WIN32
     g_ipxOn             = s.ipx;
+#else
+    g_ipxOn             = false; // no IPX emulation here (see the top of the file)
+#endif
     g_loopbackBroadcast = s.loopbackBroadcast;
     g_addressTimeout    = s.addressTimeout < 0 ? 0 : s.addressTimeout;
 }
@@ -434,7 +468,7 @@ Portal* CreatePortalLocked(uint8_t proto, uint32_t vip, uint16_t port)
     const uint32_t localAddr = BindLocal(s, proto == relay::ProtoUdp ? vip : 0);
     if (!localAddr)
     {
-        closesocket(s);
+        sock::Close(s);
         return nullptr;
     }
 
@@ -536,11 +570,11 @@ void FlushTcp()
 {
     while (s_conn.tcp != INVALID_SOCKET && s_conn.txOffset < s_conn.tx.size())
     {
-        const int n = send(s_conn.tcp, s_conn.tx.data() + s_conn.txOffset,
-            static_cast<int>(std::min<size_t>(s_conn.tx.size() - s_conn.txOffset, 64 * 1024)), 0);
+        const int n = static_cast<int>(send(s_conn.tcp, s_conn.tx.data() + s_conn.txOffset,
+            static_cast<int>(std::min<size_t>(s_conn.tx.size() - s_conn.txOffset, 64 * 1024)), sock::kSendFlags));
 
         if (n <= 0)
-            break; // WSAEWOULDBLOCK, or an error the read side will see
+            break; // would block, or an error the read side will see
 
         s_conn.txOffset += static_cast<size_t>(n);
         g_bytesSent += static_cast<uint64_t>(n);
@@ -706,9 +740,9 @@ void ReadPortal(Portal* p)
     for (int i = 0; i < 64; ++i)
     {
         sockaddr_in from{};
-        int fromLen = sizeof(from);
-        const int n = recvfrom(p->sock, s_buffer, sizeof(s_buffer), 0,
-            reinterpret_cast<sockaddr*>(&from), &fromLen);
+        SockLen fromLen = sizeof(from);
+        const int n = static_cast<int>(recvfrom(p->sock, s_buffer, sizeof(s_buffer), 0,
+            reinterpret_cast<sockaddr*>(&from), &fromLen));
 
         if (n < 0)
             return;
@@ -744,7 +778,7 @@ void DestroyStream(std::map<uint32_t, Stream>::iterator it, bool abortive)
     if (st.sock != INVALID_SOCKET)
     {
         if (abortive) AbortiveClose(st.sock);
-        else          closesocket(st.sock);
+        else          sock::Close(st.sock);
     }
 
     if (!st.outbound && st.connectorPort)
@@ -771,8 +805,8 @@ void FlushStream(Stream& st)
 {
     while (st.outOffset < st.out.size())
     {
-        const int n = send(st.sock, st.out.data() + st.outOffset,
-            static_cast<int>(std::min<size_t>(st.out.size() - st.outOffset, 64 * 1024)), 0);
+        const int n = static_cast<int>(send(st.sock, st.out.data() + st.outOffset,
+            static_cast<int>(std::min<size_t>(st.out.size() - st.outOffset, 64 * 1024)), sock::kSendFlags));
 
         if (n <= 0)
             break;
@@ -819,7 +853,7 @@ void AcceptGateway()
     for (;;)
     {
         sockaddr_in peer{};
-        int peerLen = sizeof(peer);
+        SockLen peerLen = sizeof(peer);
         SOCKET c = accept(s_gateway, reinterpret_cast<sockaddr*>(&peer), &peerLen);
 
         if (c == INVALID_SOCKET)
@@ -911,7 +945,7 @@ void HandleStreamOpen(relay::Reader& r)
     const uint32_t connectorAddr = BindLocal(c, peerVip);
     if (!connectorAddr)
     {
-        closesocket(c);
+        sock::Close(c);
         reject(relay::StreamRefused);
         return;
     }
@@ -995,7 +1029,7 @@ void ReadStream(std::map<uint32_t, Stream>::iterator it)
 {
     Stream& st = it->second;
 
-    const int n = recv(st.sock, s_buffer, static_cast<int>(relay::kMaxStreamChunk), 0);
+    const int n = static_cast<int>(recv(st.sock, s_buffer, static_cast<int>(relay::kMaxStreamChunk), 0));
 
     if (n > 0)
     {
@@ -1015,7 +1049,7 @@ void ReadStream(std::map<uint32_t, Stream>::iterator it)
         return;
     }
 
-    if (WSAGetLastError() == WSAEWOULDBLOCK)
+    if (sock::WouldBlock())
         return;
 
     SendStreamId(relay::StreamClose, st.id);
@@ -1026,8 +1060,8 @@ void CompleteInboundConnect(std::map<uint32_t, Stream>::iterator it, bool failed
 {
     Stream& st = it->second;
 
-    int error = 0;
-    int len   = sizeof(error);
+    int     error = 0;
+    SockLen len   = sizeof(error);
     getsockopt(st.sock, SOL_SOCKET, SO_ERROR, reinterpret_cast<char*>(&error), &len);
 
     if (failed || error != 0)
@@ -1080,10 +1114,10 @@ void HandleWelcome(relay::Reader& r)
     s_conn.token        = token;
     s_conn.udpPort      = udpPort;
     s_conn.welcomed     = true;
-    s_conn.lastPing     = GetTickCount() - 10000; // ping now: the ICMP hooks want a round trip early
+    s_conn.lastPing     = Ticks() - 10000; // ping now: the ICMP hooks want a round trip early
     s_conn.udpConfirmed = false;
     s_conn.udpHellos    = 0;
-    s_conn.lastUdpHello = GetTickCount() - 60000;
+    s_conn.lastUdpHello = Ticks() - 60000;
     s_conn.serverUdp    = s_conn.server;
     s_conn.serverUdp.sin_port = htons(udpPort);
 
@@ -1092,7 +1126,11 @@ void HandleWelcome(relay::Reader& r)
     g_clientId = clientId;
     g_udpActive = false;
 
-    SetEvent(g_addressReady);
+    {
+        std::lock_guard<std::mutex> lk(g_addressMutex);
+        g_addressAssigned = true;
+    }
+    g_addressCv.notify_all();
 
     if (previous && previous != vip)
         InterposerLog(L"RELAY", (L"virtual address changed from " + IpToString(previous) + L" to "
@@ -1201,7 +1239,7 @@ void HandleControlFrame(relay::FrameType type, const uint8_t* body, size_t lengt
     case relay::Pong:
     {
         // The nonce is the tick count the ping went out at.
-        const DWORD rtt = GetTickCount() - r.U32();
+        const DWORD rtt = Ticks() - r.U32();
         if (r.Ok() && rtt < 60000)
             g_serverRtt = rtt ? rtt : 1;
         break;
@@ -1238,11 +1276,11 @@ void CloseConnection(bool sendLeave)
             SendFrame(relay::Leave, {});
             FlushTcp();
         }
-        closesocket(s_conn.tcp);
+        sock::Close(s_conn.tcp);
     }
 
     if (s_conn.udp != INVALID_SOCKET)
-        closesocket(s_conn.udp);
+        sock::Close(s_conn.udp);
 
     s_conn = Connection{};
     g_udpActive = false;
@@ -1268,36 +1306,33 @@ void SplitServer(const std::wstring& server, int defaultPort, std::wstring& host
 // Wait for a non-blocking connect, waking early for a stop request.
 bool WaitForConnect(SOCKET s, DWORD timeoutMs)
 {
-    const DWORD start = GetTickCount();
+    const DWORD start = Ticks();
 
     while (!g_stop && !Elapsed(start, timeoutMs))
     {
-        fd_set wr, ex, rd;
-        FD_ZERO(&wr); FD_ZERO(&ex); FD_ZERO(&rd);
-        FD_SET(s, &wr);
-        FD_SET(s, &ex);
+        sock::PollSet set;
+        set.Add(s, false, true, true);
 
         const SOCKET wake = g_wakeSocket.load();
         if (wake != INVALID_SOCKET)
-            FD_SET(wake, &rd);
+            set.Add(wake, true, false);
 
-        timeval tv{ 0, 250 * 1000 };
-        if (select(0, &rd, &wr, &ex, &tv) <= 0)
+        if (set.Wait(250) <= 0)
             continue;
 
-        if (wake != INVALID_SOCKET && FD_ISSET(wake, &rd))
+        if (wake != INVALID_SOCKET && set.Readable(wake))
         {
             char drain[16];
             while (recv(wake, drain, sizeof(drain), 0) > 0) {}
         }
 
-        if (FD_ISSET(s, &ex))
+        if (set.Failed(s))
             return false;
 
-        if (FD_ISSET(s, &wr))
+        if (set.Writable(s))
         {
-            int error = 0;
-            int len = sizeof(error);
+            int     error = 0;
+            SockLen len = sizeof(error);
             getsockopt(s, SOL_SOCKET, SO_ERROR, reinterpret_cast<char*>(&error), &len);
             return error == 0;
         }
@@ -1344,7 +1379,7 @@ bool OpenConnection(const RelaySettings& cfg)
 
     if (!WaitForConnect(tcp, 5000))
     {
-        closesocket(tcp);
+        sock::Close(tcp);
         SetLastErrorText(L"could not connect to relay server " + cfg.server);
         LogRelay(L"RELAY", cfg.server.c_str(), L"connection failed");
         return false;
@@ -1364,7 +1399,7 @@ bool OpenConnection(const RelaySettings& cfg)
     s_conn.tcp         = tcp;
     s_conn.udp         = udp;
     s_conn.server      = server;
-    s_conn.connectedAt = GetTickCount();
+    s_conn.connectedAt = Ticks();
     s_conn.lastRx      = s_conn.connectedAt;
     s_conn.lastPing    = s_conn.connectedAt;
 
@@ -1379,7 +1414,7 @@ bool OpenConnection(const RelaySettings& cfg)
     std::wstring player;
     {
         wchar_t name[256]{};
-        if (InterposerGetUsername(name, ARRAYSIZE(name)))
+        if (InterposerGetUsername(name, static_cast<DWORD>(std::size(name))))
             player = name;
     }
 
@@ -1406,9 +1441,9 @@ void ReadControl()
 {
     for (;;)
     {
-        const int n = recv(s_conn.tcp, s_buffer, sizeof(s_buffer), 0);
+        const int n = static_cast<int>(recv(s_conn.tcp, s_buffer, sizeof(s_buffer), 0));
 
-        if (n == 0 || (n < 0 && WSAGetLastError() != WSAEWOULDBLOCK))
+        if (n == 0 || (n < 0 && !sock::WouldBlock()))
         {
             SetLastErrorText(L"the relay server closed the connection");
             s_conn.dead = true;
@@ -1419,7 +1454,7 @@ void ReadControl()
             return;
 
         s_conn.rx.append(s_buffer, static_cast<size_t>(n));
-        s_conn.lastRx = GetTickCount();
+        s_conn.lastRx = Ticks();
         g_bytesReceived += static_cast<uint64_t>(n);
 
         size_t offset = 0;
@@ -1453,9 +1488,9 @@ void ReadUdp()
     for (int i = 0; i < 256; ++i)
     {
         sockaddr_in from{};
-        int fromLen = sizeof(from);
-        const int n = recvfrom(s_conn.udp, s_buffer, sizeof(s_buffer), 0,
-            reinterpret_cast<sockaddr*>(&from), &fromLen);
+        SockLen fromLen = sizeof(from);
+        const int n = static_cast<int>(recvfrom(s_conn.udp, s_buffer, sizeof(s_buffer), 0,
+            reinterpret_cast<sockaddr*>(&from), &fromLen));
 
         if (n < 0)
             return;
@@ -1476,7 +1511,7 @@ void ReadUdp()
 
         if (type == relay::UdpHelloAck)
         {
-            s_conn.lastUdpAck = GetTickCount();
+            s_conn.lastUdpAck = Ticks();
             if (!s_conn.udpConfirmed)
             {
                 s_conn.udpConfirmed = true;
@@ -1513,7 +1548,7 @@ void RunTimers()
 
     if (Elapsed(s_conn.lastPing, 10000))
     {
-        s_conn.lastPing = GetTickCount();
+        s_conn.lastPing = Ticks();
         relay::Writer w;
         w.U32(s_conn.lastPing);
         SendFrame(relay::Ping, w.buf);
@@ -1527,7 +1562,7 @@ void RunTimers()
         const DWORD interval = s_conn.udpConfirmed ? 15000 : 500;
         if ((s_conn.udpConfirmed || s_conn.udpHellos < 20) && Elapsed(s_conn.lastUdpHello, interval))
         {
-            s_conn.lastUdpHello = GetTickCount();
+            s_conn.lastUdpHello = Ticks();
             ++s_conn.udpHellos;
             SendUdpPacket(relay::UdpHello, {});
         }
@@ -1542,26 +1577,21 @@ void RunTimers()
     }
 }
 
-// One select() round over every socket the thread owns. A lost control
-// connection is flagged in s_conn.dead for the thread loop to deal with.
+// One wait over every socket the thread owns. A lost control connection is
+// flagged in s_conn.dead for the thread loop to deal with.
 void Pump(DWORD timeoutMs)
 {
-    fd_set rd, wr, ex;
-    FD_ZERO(&rd); FD_ZERO(&wr); FD_ZERO(&ex);
+    sock::PollSet set;
 
     const SOCKET wake = g_wakeSocket.load();
-    if (wake != INVALID_SOCKET)  FD_SET(wake, &rd);
-    if (s_gateway != INVALID_SOCKET) FD_SET(s_gateway, &rd);
+    if (wake != INVALID_SOCKET)      set.Add(wake, true, false);
+    if (s_gateway != INVALID_SOCKET) set.Add(s_gateway, true, false);
 
     if (s_conn.tcp != INVALID_SOCKET)
-    {
-        FD_SET(s_conn.tcp, &rd);
-        if (TcpBacklog())
-            FD_SET(s_conn.tcp, &wr);
-    }
+        set.Add(s_conn.tcp, true, TcpBacklog() != 0);
 
     if (s_conn.udp != INVALID_SOCKET)
-        FD_SET(s_conn.udp, &rd);
+        set.Add(s_conn.udp, true, false);
 
     // Stop reading game streams while the control connection is backed up, so
     // a fast sender cannot grow the queue without bound.
@@ -1571,15 +1601,11 @@ void Pump(DWORD timeoutMs)
     {
         if (st.phase == Stream::Connecting)
         {
-            FD_SET(st.sock, &wr);
-            FD_SET(st.sock, &ex);
+            set.Add(st.sock, false, true, true);
             continue;
         }
 
-        if (readStreams && !st.localEof)
-            FD_SET(st.sock, &rd);
-        if (!st.out.empty())
-            FD_SET(st.sock, &wr);
+        set.Add(st.sock, readStreams && !st.localEof, !st.out.empty());
     }
 
     std::vector<Portal*> portals;
@@ -1589,15 +1615,12 @@ void Pump(DWORD timeoutMs)
     }
 
     for (Portal* p : portals)
-        FD_SET(p->sock, &rd);
+        set.Add(p->sock, true, false);
 
-    timeval tv{ 0, static_cast<long>(timeoutMs) * 1000 };
-    const int ready = select(0, &rd, &wr, &ex, &tv);
-
-    if (ready <= 0)
+    if (set.Wait(static_cast<int>(timeoutMs)) <= 0)
         return;
 
-    if (wake != INVALID_SOCKET && FD_ISSET(wake, &rd))
+    if (wake != INVALID_SOCKET && set.Readable(wake))
     {
         char drain[64];
         while (recv(wake, drain, sizeof(drain), 0) > 0) {}
@@ -1605,21 +1628,21 @@ void Pump(DWORD timeoutMs)
 
     if (s_conn.tcp != INVALID_SOCKET)
     {
-        if (FD_ISSET(s_conn.tcp, &rd))
+        if (set.Readable(s_conn.tcp))
             ReadControl();
 
-        if (!s_conn.dead && FD_ISSET(s_conn.tcp, &wr))
+        if (!s_conn.dead && set.Writable(s_conn.tcp))
             FlushTcp();
     }
 
-    if (s_conn.udp != INVALID_SOCKET && FD_ISSET(s_conn.udp, &rd))
+    if (s_conn.udp != INVALID_SOCKET && set.Readable(s_conn.udp))
         ReadUdp();
 
-    if (s_gateway != INVALID_SOCKET && FD_ISSET(s_gateway, &rd))
+    if (s_gateway != INVALID_SOCKET && set.Readable(s_gateway))
         AcceptGateway();
 
     for (Portal* p : portals)
-        if (FD_ISSET(p->sock, &rd))
+        if (set.Readable(p->sock))
             ReadPortal(p);
 
     for (auto it = s_streams.begin(); it != s_streams.end();)
@@ -1629,21 +1652,21 @@ void Pump(DWORD timeoutMs)
 
         if (st.phase == Stream::Connecting)
         {
-            if (FD_ISSET(st.sock, &ex))
+            if (set.Failed(st.sock))
                 CompleteInboundConnect(current, true);
-            else if (FD_ISSET(st.sock, &wr))
+            else if (set.Writable(st.sock))
                 CompleteInboundConnect(current, false);
             continue;
         }
 
-        if (FD_ISSET(st.sock, &wr))
+        if (set.Writable(st.sock))
         {
             FlushStream(st);
             if (MaybeFinishStream(current))
                 continue;
         }
 
-        if (FD_ISSET(st.sock, &rd))
+        if (set.Readable(st.sock))
             ReadStream(current);
     }
 }
@@ -1673,27 +1696,29 @@ void CreateLocalSockets()
         }
         else
         {
-            closesocket(s_gateway);
+            sock::Close(s_gateway);
             s_gateway = INVALID_SOCKET;
         }
     }
 }
 
-DWORD WINAPI RelayThread(LPVOID)
+void RelayThread(void*)
 {
     // Every socket call this thread makes is its own business, not the game's:
     // the hooks pass it straight through for the life of the thread.
     ++t_netHookDepth;
 
+#ifdef _WIN32
     WSADATA wsa{};
     WSAStartup(MAKEWORD(2, 2), &wsa);
+#endif
 
     CreateLocalSockets();
 
     RelaySettings cfg     = SnapshotSettings();
     bool  wantConnected   = cfg.enabled;
     bool  failed          = false;
-    DWORD nextAttempt     = GetTickCount();
+    DWORD nextAttempt     = Ticks();
     DWORD backoff         = 1000;
 
     while (!g_stop)
@@ -1709,7 +1734,7 @@ DWORD WINAPI RelayThread(LPVOID)
                 wantConnected = cfg.enabled;
                 failed        = false;
                 backoff       = 1000;
-                nextAttempt   = GetTickCount();
+                nextAttempt   = Ticks();
             }
 
             if (g_commandDisconnect)
@@ -1722,13 +1747,13 @@ DWORD WINAPI RelayThread(LPVOID)
         }
 
         if (wantConnected && !failed && s_conn.tcp == INVALID_SOCKET &&
-            static_cast<int>(GetTickCount() - nextAttempt) >= 0)
+            static_cast<int>(Ticks() - nextAttempt) >= 0)
         {
             SetState(g_vip.load() ? RelayState::Reconnecting : RelayState::Connecting);
 
             if (!OpenConnection(cfg))
             {
-                nextAttempt = GetTickCount() + backoff;
+                nextAttempt = Ticks() + backoff;
                 backoff     = std::min<DWORD>(backoff * 2, 30000);
             }
             else
@@ -1751,7 +1776,7 @@ DWORD WINAPI RelayThread(LPVOID)
             else if (wantConnected)
             {
                 LogRelay(L"RELAY", L"connection lost; retrying", nullptr);
-                nextAttempt = GetTickCount() + backoff;
+                nextAttempt = Ticks() + backoff;
                 backoff     = std::min<DWORD>(backoff * 2, 30000);
                 SetState(g_vip.load() ? RelayState::Reconnecting : RelayState::Connecting);
             }
@@ -1760,22 +1785,33 @@ DWORD WINAPI RelayThread(LPVOID)
 
     CloseConnection(true);
 
-    // Park rather than return. ShutdownRelay may be about to unmap this module
-    // (FreeLibrary), and a thread on its way out still has return addresses in
-    // it; a thread blocked in the kernel never runs another instruction of ours
-    // and is terminated from there.
-    SetEvent(g_parked);
-    Sleep(INFINITE);
-    return 0;
+    // Returning is safe on every platform: on Windows platform::StartThread
+    // parks the thread rather than letting it exit (see platform.h).
 }
+
+#ifndef _WIN32
+void ShutdownAtExit();
+#endif
 
 void StartThread()
 {
     if (g_thread)
         return;
 
-    g_parked = CreateEventW(nullptr, TRUE, FALSE, nullptr);
-    g_thread = CreateThread(nullptr, 0, RelayThread, nullptr, 0, nullptr);
+    g_thread = platform::StartThread(RelayThread, nullptr);
+
+#ifndef _WIN32
+    // The thread uses this module's globals, and at exit their destructors run
+    // before the destructor function that calls ShutdownRelay. A handler
+    // registered now, after they were constructed, runs before them -- at exit,
+    // and at dlclose too, since glibc ties atexit to the registering object.
+    static bool registered = false;
+    if (g_thread && !registered)
+    {
+        registered = true;
+        atexit(ShutdownAtExit);
+    }
+#endif
 }
 
 std::wstring JsonEscape(const std::wstring& s)
@@ -1795,7 +1831,7 @@ std::wstring JsonEscape(const std::wstring& s)
             if (c < 0x20)
             {
                 wchar_t buf[8];
-                swprintf_s(buf, L"\\u%04x", static_cast<unsigned>(c));
+                swprintf(buf, std::size(buf), L"\\u%04x", static_cast<unsigned>(c));
                 out += buf;
             }
             else
@@ -1805,6 +1841,11 @@ std::wstring JsonEscape(const std::wstring& s)
     return out;
 }
 
+// The launcher's relay options, as YAML. Their mere presence matters, even
+// empty: it asks for the socket hooks, so the launcher can connect later. That
+// is why this is not platform::ReadLauncherValue, which cannot tell an empty
+// value from none.
+#ifdef _WIN32
 std::wstring ReadOverrideMapping()
 {
     wchar_t name[64]{};
@@ -1829,6 +1870,24 @@ std::wstring ReadOverrideMapping()
     g_overridePresent = true;
     return text.empty() ? std::wstring(L"{}") : text;
 }
+#else
+// INTERPOSER_RELAY: a launcher cannot know the PID before exec, so the
+// environment stands in for the named mapping.
+std::wstring ReadOverrideMapping()
+{
+    const char* value = getenv("INTERPOSER_RELAY");
+    if (!value)
+        return {};
+
+    g_overridePresent = true;
+    return *value ? Utf8ToWide(value) : std::wstring(L"{}");
+}
+
+void ShutdownAtExit()
+{
+    ShutdownRelay(false);
+}
+#endif
 
 } // namespace
 
@@ -1838,8 +1897,6 @@ std::wstring ReadOverrideMapping()
 
 void InitRelay()
 {
-    g_addressReady = CreateEventW(nullptr, TRUE, FALSE, nullptr);
-
     RelaySettings settings = g_relayConfig;
 
     const std::wstring overrides = ReadOverrideMapping();
@@ -1874,41 +1931,38 @@ void ShutdownRelay(bool processTerminating)
     if (!g_thread || processTerminating)
         return;
 
+    // From here on the hooks pass through. On Linux this runs at exit before
+    // this module's globals are destroyed, and the game may go on closing
+    // sockets after that.
+    g_hooksWanted = false;
     g_stop = true;
     Wake();
 
-    // The thread parks itself once its sockets are closed. Waiting on the
-    // thread handle instead would deadlock: its exit needs the loader lock,
-    // which DLL_PROCESS_DETACH is holding.
-    const bool parked = WaitForSingleObject(g_parked, 3000) == WAIT_OBJECT_0;
-
-    // Terminated either way -- left running, it would fault the moment this
-    // module is unmapped. One that never parked may hold a lock, though, so its
-    // resources are leaked rather than touched.
-    TerminateThread(g_thread, 0);
-
-    CloseHandle(g_thread);
-    CloseHandle(g_parked);
+    // The thread returns once its sockets are closed. On Windows it then parks
+    // and is terminated, because waiting for it to exit would deadlock on the
+    // loader lock DLL_PROCESS_DETACH holds; one that has not returned in time
+    // is stopped anyway, since it would fault once the module is unmapped. It
+    // may hold a lock then, so its resources are leaked rather than touched.
+    const bool returned = platform::StopThread(g_thread, 3000);
     g_thread = nullptr;
-    g_parked = nullptr;
 
-    if (!parked)
+    if (!returned)
         return;
 
     const SOCKET wake = g_wakeSocket.exchange(INVALID_SOCKET);
     if (wake != INVALID_SOCKET)
-        closesocket(wake);
+        sock::Close(wake);
 
     if (s_gateway != INVALID_SOCKET)
     {
-        closesocket(s_gateway);
+        sock::Close(s_gateway);
         s_gateway = INVALID_SOCKET;
     }
 
     std::lock_guard<std::mutex> lk(g_portalMutex);
     for (Portal* p : g_portals)
     {
-        closesocket(p->sock);
+        sock::Close(p->sock);
         delete p;
     }
     g_portals.clear();
@@ -1938,14 +1992,18 @@ bool RelayWaitForAddress()
     if (RelayActive())
         return true;
 
-    if (!g_hooksWanted || !g_addressReady)
+    if (!g_hooksWanted)
         return false;
 
     const auto state = static_cast<RelayState>(g_state.load());
     if (state != RelayState::Connecting && state != RelayState::Reconnecting)
         return false;
 
-    WaitForSingleObject(g_addressReady, static_cast<DWORD>(g_addressTimeout.load()));
+    std::unique_lock<std::mutex> lk(g_addressMutex);
+    g_addressCv.wait_for(lk, std::chrono::milliseconds(g_addressTimeout.load()),
+        [] { return g_addressAssigned; });
+    lk.unlock();
+
     return RelayActive();
 }
 
@@ -2359,14 +2417,14 @@ std::wstring RelayStatusJson()
 // Exports
 // ---------------------------------------------------------------------------
 
-extern "C" __declspec(dllexport) BOOL InterposerRelayGetStatus(InterposerRelayStatus* status)
+extern "C" INTERPOSER_API BOOL InterposerRelayGetStatus(InterposerRelayStatus* status)
 {
     FORWARD_TO_PRIMARY(InterposerRelayGetStatus, status);
 
     if (!status || status->size < sizeof(InterposerRelayStatus))
         return FALSE;
 
-    ZeroMemory(status, sizeof(*status));
+    *status = InterposerRelayStatus{};
     status->size = sizeof(InterposerRelayStatus);
 
     const uint32_t vip  = g_vip.load();
@@ -2381,18 +2439,18 @@ extern "C" __declspec(dllexport) BOOL InterposerRelayGetStatus(InterposerRelaySt
     status->datagramsReceived = g_datagramsReceived.load();
     status->streamsOpen       = g_streamsOpen.load();
 
-    if (vip)  wcsncpy_s(status->virtualAddress, IpToString(vip).c_str(), _TRUNCATE);
-    if (mask) wcsncpy_s(status->netmask, IpToString(mask).c_str(), _TRUNCATE);
+    if (vip)  CopyText(status->virtualAddress, IpToString(vip));
+    if (mask) CopyText(status->netmask, IpToString(mask));
 
     std::lock_guard<std::mutex> lk(g_statusMutex);
-    wcsncpy_s(status->network, g_networkName.c_str(), _TRUNCATE);
-    wcsncpy_s(status->server, g_serverName.c_str(), _TRUNCATE);
-    wcsncpy_s(status->lastError, g_lastError.c_str(), _TRUNCATE);
+    CopyText(status->network, g_networkName);
+    CopyText(status->server, g_serverName);
+    CopyText(status->lastError, g_lastError);
     status->peerCount = static_cast<DWORD>(g_peers.size());
     return TRUE;
 }
 
-extern "C" __declspec(dllexport) DWORD InterposerRelayEnumPeers(
+extern "C" INTERPOSER_API DWORD InterposerRelayEnumPeers(
     InterposerRelayPeer* buffer, DWORD capacity, DWORD* outCount)
 {
     FORWARD_TO_PRIMARY(InterposerRelayEnumPeers, buffer, capacity, outCount);
@@ -2405,10 +2463,10 @@ extern "C" __declspec(dllexport) DWORD InterposerRelayEnumPeers(
     for (; buffer && written < capacity && written < total; ++written)
     {
         InterposerRelayPeer& out = buffer[written];
-        ZeroMemory(&out, sizeof(out));
+        out = InterposerRelayPeer{};
         out.clientId = g_peers[written].clientId;
-        wcsncpy_s(out.virtualAddress, IpToString(g_peers[written].vip).c_str(), _TRUNCATE);
-        wcsncpy_s(out.name, g_peers[written].name.c_str(), _TRUNCATE);
+        CopyText(out.virtualAddress, IpToString(g_peers[written].vip));
+        CopyText(out.name, g_peers[written].name);
     }
 
     if (outCount)
@@ -2417,14 +2475,14 @@ extern "C" __declspec(dllexport) DWORD InterposerRelayEnumPeers(
     return total;
 }
 
-extern "C" __declspec(dllexport) BOOL InterposerRelayConnect(const wchar_t* yamlOverrides)
+extern "C" INTERPOSER_API BOOL InterposerRelayConnect(const wchar_t* yamlOverrides)
 {
     FORWARD_TO_PRIMARY(InterposerRelayConnect, yamlOverrides);
 
     return RelayConnect(yamlOverrides ? std::wstring(yamlOverrides) : std::wstring()) ? TRUE : FALSE;
 }
 
-extern "C" __declspec(dllexport) void InterposerRelayDisconnect()
+extern "C" INTERPOSER_API void InterposerRelayDisconnect(void)
 {
     FORWARD_TO_PRIMARY(InterposerRelayDisconnect);
 

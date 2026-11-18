@@ -27,6 +27,12 @@
     getaddrinfo; gethostbyname;
     getifaddrs; freeifaddrs;
 
+    /* The relay's socket hooks (linux/sockets.cpp). */
+    socket; close; bind; connect; accept; accept4;
+    getsockname; getpeername;
+    sendto; sendmsg; sendmmsg;
+    recvfrom; recvmsg; recvmmsg;
+
   local:
     *;
 };

@@ -1,10 +1,9 @@
 #pragma once
-#define WIN32_LEAN_AND_MEAN
-#define NOMINMAX
-#include <winsock2.h>
-#include <windows.h>
 #include <cstdint>
 #include <string>
+
+#include "sockets.h"
+#include "win32_types.h"
 
 #include "interposer_features.h"
 #include "relay_settings.h"
@@ -12,9 +11,9 @@
 // ---------------------------------------------------------------------------
 // Network relay -- carries a game's LAN traffic through a LANCommander relay
 // server instead of a VPN. See relay.cpp for the mechanism and
-// LANCommander.Interposer.Documentation\NetworkRelay.md for the user's view.
+// LANCommander.Interposer.Documentation/NetworkRelay.md for the user's view.
 //
-// The hooks in network.cpp never touch the relay connection. They only
+// The hooks (win/network.cpp, linux/sockets.cpp) never touch the relay connection. They only
 // translate addresses: a datagram for a virtual address is sent to a loopback
 // "portal" socket the relay thread owns, which forwards it, and a datagram the
 // relay delivers arrives from that portal, whose address the receive hooks

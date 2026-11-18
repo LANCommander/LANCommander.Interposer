@@ -31,7 +31,7 @@ option(INTERPOSER_FEATURE_AUDIO         "Embedded library: the audio device filt
 option(INTERPOSER_FEATURE_OSVERSION     "Embedded library: OS version reporting (Windows)" OFF)
 option(INTERPOSER_FEATURE_IDENTITY      "Embedded library: the user and computer name hooks" OFF)
 option(INTERPOSER_FEATURE_NETWORK       "Embedded library: DNS redirects, the adapter filter and enumeration" OFF)
-option(INTERPOSER_FEATURE_RELAY         "Embedded library: the network relay and IPX emulation (Windows; needs NETWORK)" OFF)
+option(INTERPOSER_FEATURE_RELAY         "Embedded library: the network relay, and IPX emulation on Windows (needs NETWORK)" OFF)
 option(INTERPOSER_FEATURE_RICH_PRESENCE "Embedded library: rich presence and Discord (Windows)" OFF)
 option(INTERPOSER_FEATURE_MATCHES       "Embedded library: match statistics" OFF)
 option(INTERPOSER_FEATURE_VOICE         "Embedded library: voice chat, with ENet, Opus and miniaudio" OFF)
@@ -86,8 +86,7 @@ set(INTERPOSER_ALWAYS_LINUX_SOURCES
     ${_src}/core/stubs/audio_off.cpp
     ${_src}/core/stubs/mouse_off.cpp
     ${_src}/core/stubs/presence_off.cpp
-    ${_src}/core/stubs/registry_off.cpp
-    ${_src}/core/stubs/relay_off.cpp)
+    ${_src}/core/stubs/registry_off.cpp)
 
 # ── Per feature: the real sources, and the stubs that stand in for them ──────
 #
@@ -117,12 +116,14 @@ set(INTERPOSER_FEATURE_IDENTITY_LINUX      ${_src}/linux/identity.cpp)
 
 set(INTERPOSER_FEATURE_NETWORK_CORE        ${_src}/core/network_filter.cpp)
 set(INTERPOSER_FEATURE_NETWORK_WIN         ${_src}/win/network.cpp)
-set(INTERPOSER_FEATURE_NETWORK_LINUX       ${_src}/linux/network.cpp)
+set(INTERPOSER_FEATURE_NETWORK_LINUX       ${_src}/linux/network.cpp ${_src}/linux/sockets.cpp)
 set(INTERPOSER_FEATURE_NETWORK_STUBS_WIN   ${_src}/core/stubs/network_off.cpp)
 set(INTERPOSER_FEATURE_NETWORK_STUBS_LINUX ${_src}/core/stubs/network_off.cpp)
 
-set(INTERPOSER_FEATURE_RELAY_WIN           ${_src}/win/relay.cpp ${_src}/win/ipx.cpp)
+set(INTERPOSER_FEATURE_RELAY_CORE          ${_src}/core/relay.cpp)
+set(INTERPOSER_FEATURE_RELAY_WIN           ${_src}/win/ipx.cpp)
 set(INTERPOSER_FEATURE_RELAY_STUBS_WIN     ${_src}/core/stubs/relay_off.cpp)
+set(INTERPOSER_FEATURE_RELAY_STUBS_LINUX   ${_src}/core/stubs/relay_off.cpp)
 
 set(INTERPOSER_FEATURE_RICH_PRESENCE_WIN       ${_src}/win/richpresence.cpp ${_src}/win/discord_ipc.cpp)
 set(INTERPOSER_FEATURE_RICH_PRESENCE_STUBS_WIN ${_src}/core/stubs/presence_off.cpp)

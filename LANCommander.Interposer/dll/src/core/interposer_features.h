@@ -60,14 +60,15 @@
 #endif
 
 // Features this platform implements at all. On Linux the registry, DirectInput,
-// audio, OS version, relay and rich presence exports are always stubs
-// (core/stubs/), whatever the switches say.
+// audio, OS version and rich presence exports are always stubs (core/stubs/),
+// whatever the switches say.
 #ifdef _WIN32
 constexpr DWORD kPlatformFeatures = 0xFFFFFFFFu;
 #else
 constexpr DWORD kPlatformFeatures =
     INTERPOSER_FEATURE_FLAG_FILES | INTERPOSER_FEATURE_FLAG_FASTDL | INTERPOSER_FEATURE_FLAG_IDENTITY |
-    INTERPOSER_FEATURE_FLAG_NETWORK | INTERPOSER_FEATURE_FLAG_MATCHES | INTERPOSER_FEATURE_FLAG_VOICE |
+    INTERPOSER_FEATURE_FLAG_NETWORK | INTERPOSER_FEATURE_FLAG_RELAY | INTERPOSER_FEATURE_FLAG_MATCHES |
+    INTERPOSER_FEATURE_FLAG_VOICE |
     INTERPOSER_FEATURE_FLAG_PLUGINS;
 #endif
 

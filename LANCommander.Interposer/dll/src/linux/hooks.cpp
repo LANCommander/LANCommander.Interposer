@@ -9,6 +9,7 @@
 #include "network.h"
 #include "pipe_events.h"
 #include "plugins.h"
+#include "relay.h"
 
 void InstallHooks()
 {
@@ -25,6 +26,9 @@ void InstallHooks()
 #if INTERPOSER_FEATURE_FILES
     InstallFileHooks();
 #endif
+    // Decides RelayHooksWanted, which the network hooks read, and starts the
+    // relay thread. relay.h no-ops it in a build without the relay.
+    InitRelay();
 #if INTERPOSER_FEATURE_NETWORK
     InstallNetworkHooks();
 #endif
@@ -47,6 +51,9 @@ void InstallHooks()
 
 void RemoveHooks()
 {
+    // Normally already done: relay.cpp stops its thread from an atexit
+    // handler, which runs before this module's globals are destroyed.
+    ShutdownRelay(false);
     DisconnectEventPipe();
 #if INTERPOSER_FEATURE_PLUGINS
     UnloadPlugins();

@@ -4,8 +4,10 @@
 #include "file_access.h"
 #include "hooking.h"
 #include "instance.h"
+#include "net_hook.h"
 #include "network_filter.h"
 #include "platform.h"
+#include "relay.h"
 
 #include <cstring>
 #include <map>
@@ -16,15 +18,18 @@
 #include <arpa/inet.h>
 #include <dlfcn.h>
 #include <ifaddrs.h>
+#include <net/if.h>
 #include <netdb.h>
 #include <netinet/in.h>
 #include <netpacket/packet.h>
+#include <strings.h>
 #include <sys/socket.h>
+#include <unistd.h>
 
-// The portable network pieces on Linux: DNS redirects (getaddrinfo,
-// gethostbyname) and the adapter enumeration the launcher's picker reads. The
-// relay, the IPX emulation and the active adapter-hiding filter are the socket
-// hooks, which arrive with the relay.
+// The resolver and adapter side of the network hooks on Linux: DNS redirects
+// (getaddrinfo, gethostbyname), the adapter filter and enumeration, and the
+// relay's local address -- our own host name and a virtual adapter answer with
+// it. The relay's socket interposers are in sockets.cpp.
 
 namespace
 {
@@ -50,6 +55,74 @@ namespace
     bool PassThrough()
     {
         return !hooking::Enabled() || InternalFileAccess::Active() || g_dnsRedirects.empty();
+    }
+
+    // The relay's address translation is on for this call: see sockets.cpp.
+    bool RelayTranslating()
+    {
+        return hooking::Enabled() && t_netHookDepth == 0 && RelayHooksWanted() && !InternalFileAccess::Active();
+    }
+
+    // Null or empty, or our own host name -- as gethostname reports it, which
+    // is the computer-name override when one is set.
+    bool IsLocalHostName(const char* name)
+    {
+        if (!name || !name[0])
+            return true;
+
+        char host[256]{};
+        return gethostname(host, sizeof(host) - 1) == 0 && strcasecmp(name, host) == 0;
+    }
+
+    // A game asking for its own address is answered with the virtual one, so it
+    // advertises an address its peers can reach through the relay. Waits, up to
+    // NetworkRelay.AddressTimeout, for the first one to be assigned.
+    bool WantsVirtualLocalAddress(const char* name)
+    {
+        return RelayTranslating() && IsLocalHostName(name) && RelayWaitForAddress();
+    }
+
+    std::string VirtualAddressText()
+    {
+        in_addr address{};
+        address.s_addr = htonl(RelayVirtualIp());
+
+        char text[INET_ADDRSTRLEN]{};
+        inet_ntop(AF_INET, &address, text, sizeof(text));
+        return text;
+    }
+
+    // Our own host name, resolved to the virtual address alone. Thread-local,
+    // as glibc's own hostent is static: valid until this thread's next call.
+    struct VirtualHostent
+    {
+        hostent he;
+        char    name[256];
+        char*   aliases[1];
+        char*   addresses[2];
+        in_addr address;
+    };
+
+    thread_local VirtualHostent t_virtualHost;
+
+    hostent* VirtualLocalHostent()
+    {
+        VirtualHostent& v = t_virtualHost;
+
+        if (gethostname(v.name, sizeof(v.name) - 1) != 0)
+            std::strcpy(v.name, "localhost");
+
+        v.address.s_addr = htonl(RelayVirtualIp());
+        v.aliases[0]     = nullptr;
+        v.addresses[0]   = reinterpret_cast<char*>(&v.address);
+        v.addresses[1]   = nullptr;
+
+        v.he.h_name      = v.name;
+        v.he.h_aliases   = v.aliases;
+        v.he.h_addrtype  = AF_INET;
+        v.he.h_length    = 4;
+        v.he.h_addr_list = v.addresses;
+        return &v.he;
     }
 
     // The redirected form of `name`, or empty when no rule changed it. Logs the
@@ -78,6 +151,10 @@ extern "C" INTERPOSER_API int getaddrinfo(const char* node, const char* service,
     static int (*real)(const char*, const char*, const struct addrinfo*, struct addrinfo**) = nullptr;
     Real(real, "getaddrinfo");
 
+    // Our own host name resolves to the virtual address while the relay is up.
+    if (node && node[0] && (!hints || hints->ai_family != AF_INET6) && WantsVirtualLocalAddress(node))
+        return real(VirtualAddressText().c_str(), service, hints, res);
+
     if (PassThrough())
         return real(node, service, hints, res);
 
@@ -91,6 +168,9 @@ extern "C" INTERPOSER_API struct hostent* gethostbyname(const char* name)
 {
     static struct hostent* (*real)(const char*) = nullptr;
     Real(real, "gethostbyname");
+
+    if (WantsVirtualLocalAddress(name))
+        return VirtualLocalHostent();
 
     if (PassThrough())
         return real(name);
@@ -109,10 +189,25 @@ void InstallNetworkHooks()
         hooking::LogHookStatus(L"libc", "gethostbyname", hooking::Status::Ok);
     }
 
-    if (netfilter::Active())
+    if (netfilter::Active() || RelayHooksWanted())
     {
         hooking::LogHookStatus(L"libc", "getifaddrs", hooking::Status::Ok);
         hooking::LogHookStatus(L"libc", "freeifaddrs", hooking::Status::Ok);
+    }
+
+    if (RelayHooksWanted())
+    {
+        if (g_dnsRedirects.empty())
+        {
+            hooking::LogHookStatus(L"libc", "getaddrinfo", hooking::Status::Ok);
+            hooking::LogHookStatus(L"libc", "gethostbyname", hooking::Status::Ok);
+        }
+
+        // sockets.cpp
+        for (const char* name : { "socket", "close", "bind", "connect", "accept", "accept4",
+                                  "getsockname", "getpeername", "sendto", "sendmsg", "sendmmsg",
+                                  "recvfrom", "recvmsg", "recvmmsg" })
+            hooking::LogHookStatus(L"libc", name, hooking::Status::Ok);
     }
 }
 
@@ -266,18 +361,76 @@ extern "C" INTERPOSER_API DWORD InterposerEnumNetworkAdapters(
     return total;
 }
 
-// ── Adapter hiding (the active filter) ────────────────────────────────────────
+// ── Adapter hiding (the active filter) and the relay's adapter ─────────────────
 //
 // getifaddrs returns one allocation that freeifaddrs frees through its head
 // pointer, so we cannot free individual nodes. Instead we unlink every node of
 // a hidden interface from the ifa_next chain -- hiding it from the caller's
 // walk -- and remember, keyed by the head we return, the original head to free.
 // Our freeifaddrs looks that up so the whole original block is still freed.
+//
+// While the relay is up, a virtual interface carrying the virtual address is
+// put in front, as the "LANCommander Relay" adapter is on Windows: a game
+// looking for its own LAN address finds the one its peers can reach. It is our
+// own allocation, recorded beside the original head and freed with it.
 
 namespace
 {
-    std::mutex                      g_ifListMutex;
-    std::map<ifaddrs*, ifaddrs*>    g_ifLists; // returned head -> original head
+    const char kRelayInterfaceName[] = "lcrelay0";
+
+    struct VirtualInterface
+    {
+        ifaddrs     ifa{};
+        sockaddr_in address{};
+        sockaddr_in netmask{};
+        sockaddr_in broadcast{};
+        char        name[sizeof(kRelayInterfaceName)]{};
+    };
+
+    struct ReturnedList
+    {
+        ifaddrs*          original = nullptr; // what the real getifaddrs returned; freed with it
+        VirtualInterface* relay    = nullptr; // ours, or null
+    };
+
+    std::mutex                          g_ifListMutex;
+    std::map<ifaddrs*, ReturnedList>    g_ifLists; // returned head -> what to free
+
+    sockaddr_in Ipv4(uint32_t ipHost)
+    {
+        sockaddr_in a{};
+        a.sin_family      = AF_INET;
+        a.sin_addr.s_addr = htonl(ipHost);
+        return a;
+    }
+
+    // The relay's interface, or null when it should not be listed: the relay
+    // is not up, or the NetworkAdapters filter would hide it.
+    VirtualInterface* MakeRelayInterface()
+    {
+        const uint32_t vip  = RelayVirtualIp();
+        const uint32_t mask = RelayNetmask();
+
+        if (!vip)
+            return nullptr;
+
+        if (netfilter::Active() && !netfilter::SubnetMatch(vip) &&
+            !netfilter::NameMatch(platform::Utf8ToWide(kRelayInterfaceName)))
+            return nullptr;
+
+        auto* v = new VirtualInterface;
+        std::memcpy(v->name, kRelayInterfaceName, sizeof(kRelayInterfaceName));
+        v->address   = Ipv4(vip);
+        v->netmask   = Ipv4(mask);
+        v->broadcast = Ipv4((vip & mask) | ~mask);
+
+        v->ifa.ifa_name      = v->name;
+        v->ifa.ifa_flags     = IFF_UP | IFF_RUNNING | IFF_BROADCAST;
+        v->ifa.ifa_addr      = reinterpret_cast<sockaddr*>(&v->address);
+        v->ifa.ifa_netmask   = reinterpret_cast<sockaddr*>(&v->netmask);
+        v->ifa.ifa_broadaddr = reinterpret_cast<sockaddr*>(&v->broadcast);
+        return v;
+    }
 
     // The interfaces to keep: those matching the filter, by name.
     std::map<std::string, bool> KeepByName(ifaddrs* list)
@@ -319,10 +472,15 @@ namespace
 
 extern "C" INTERPOSER_API int getifaddrs(ifaddrs** ifap)
 {
+    // Before the real call, like the Windows adapter hooks: a game that asks
+    // before the first address arrives would otherwise advertise its real one.
+    const bool relay  = ifap && RelayTranslating() && RelayWaitForAddress();
+    const bool filter = ifap && hooking::Enabled() && netfilter::Active();
+
     ifaddrs* list = nullptr;
     const int result = RealGetIfAddrs(&list);
 
-    if (result != 0 || !ifap || !hooking::Enabled() || !netfilter::Active())
+    if (result != 0 || (!relay && !filter))
     {
         if (ifap)
             *ifap = list;
@@ -331,39 +489,51 @@ extern "C" INTERPOSER_API int getifaddrs(ifaddrs** ifap)
         return result;
     }
 
-    const std::map<std::string, bool> keep = KeepByName(list);
+    ifaddrs* head = list;
 
-    // Unlink every node whose interface is not kept; the survivors keep their
-    // relative order. The head may change, so track the original for freeing.
-    ifaddrs* head = nullptr;
-    ifaddrs* tail = nullptr;
-
-    for (ifaddrs* ifa = list; ifa; ifa = ifa->ifa_next)
+    if (filter)
     {
-        const auto it = ifa->ifa_name ? keep.find(ifa->ifa_name) : keep.end();
-        const bool kept = it != keep.end() && it->second;
+        const std::map<std::string, bool> keep = KeepByName(list);
 
-        if (!kept)
+        // Unlink every node whose interface is not kept; the survivors keep
+        // their relative order. The head may change, so track the original.
+        ifaddrs* tail = nullptr;
+        head = nullptr;
+
+        for (ifaddrs* ifa = list; ifa; ifa = ifa->ifa_next)
         {
-            LogNetworkAccess(L"ADAPTER HIDE", platform::Utf8ToWide(ifa->ifa_name ? ifa->ifa_name : "").c_str());
-            continue;
+            const auto it = ifa->ifa_name ? keep.find(ifa->ifa_name) : keep.end();
+            const bool kept = it != keep.end() && it->second;
+
+            if (!kept)
+            {
+                LogNetworkAccess(L"ADAPTER HIDE", platform::Utf8ToWide(ifa->ifa_name ? ifa->ifa_name : "").c_str());
+                continue;
+            }
+
+            if (!head)
+                head = ifa;
+            else
+                tail->ifa_next = ifa;
+
+            tail = ifa;
         }
 
-        if (!head)
-            head = ifa;
-        else
-            tail->ifa_next = ifa;
-
-        tail = ifa;
+        if (tail)
+            tail->ifa_next = nullptr;
     }
 
-    if (tail)
-        tail->ifa_next = nullptr;
+    VirtualInterface* virt = relay ? MakeRelayInterface() : nullptr;
+    if (virt)
+    {
+        virt->ifa.ifa_next = head;
+        head = &virt->ifa;
+    }
 
     if (head)
     {
         std::lock_guard<std::mutex> lk(g_ifListMutex);
-        g_ifLists[head] = list;
+        g_ifLists[head] = ReturnedList{ list, virt };
     }
     else
     {
@@ -379,12 +549,23 @@ extern "C" INTERPOSER_API void freeifaddrs(ifaddrs* ifa)
 {
     if (ifa)
     {
-        std::lock_guard<std::mutex> lk(g_ifListMutex);
-        if (auto it = g_ifLists.find(ifa); it != g_ifLists.end())
+        ReturnedList returned{};
+        bool         ours = false;
         {
-            ifaddrs* original = it->second;
-            g_ifLists.erase(it);
-            RealFreeIfAddrs(original);
+            std::lock_guard<std::mutex> lk(g_ifListMutex);
+            if (auto it = g_ifLists.find(ifa); it != g_ifLists.end())
+            {
+                returned = it->second;
+                ours     = true;
+                g_ifLists.erase(it);
+            }
+        }
+
+        if (ours)
+        {
+            delete returned.relay;
+            if (returned.original)
+                RealFreeIfAddrs(returned.original);
             return;
         }
     }
