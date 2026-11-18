@@ -184,6 +184,8 @@ await relay.StartAsync();
 
 `GetNetworks()`, `GetClients()` and `Disconnect(clientId)` give a host an admin view.
 
+Datagrams arriving over UDP, which is most of a game's traffic, are received and forwarded on a thread of the server's own, with blocking socket calls, not on the .NET thread pool. A host that starves or floods the pool slows logins and TCP-carried traffic but not UDP game traffic. Keep `IRelayAuthenticator` and the `ClientJoined`/`ClientLeft` handlers quick all the same: they run on the connection's task.
+
 ### The test server
 
 `LANCommander.Interposer.Relay.Server` is a standalone host for testing without a LANCommander server:

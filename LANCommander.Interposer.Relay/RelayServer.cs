@@ -32,6 +32,8 @@ namespace LANCommander.Interposer.Relay
         // went away fails the next ReceiveFrom on the shared socket.
         private const int SioUdpConnReset = unchecked((int)0x9800000C);
 
+        private static readonly TimeSpan UdpStopPoll = TimeSpan.FromSeconds(1);
+
         private readonly RelayServerOptions _options;
         private readonly IRelayAuthenticator _authenticator;
         private readonly ILogger _logger;
@@ -103,7 +105,12 @@ namespace LANCommander.Interposer.Relay
                 // port from Welcome, so the two need not match.
                 _udp.Bind(new IPEndPoint(_options.BindAddress, _options.UdpPort ?? _options.Port));
                 UdpEndPoint = (IPEndPoint)_udp.LocalEndPoint!;
-                _udpLoop = Task.Run(() => RunUdpAsync(_cts.Token));
+
+                // The bound on how long a blocked receive goes without looking at the
+                // cancellation token, should disposing the socket not wake it.
+                _udp.ReceiveTimeout = (int)UdpStopPoll.TotalMilliseconds;
+
+                _udpLoop = StartDedicatedThread("Interposer relay UDP", () => RunUdp(_cts.Token));
             }
 
             _acceptLoop = Task.Run(() => RunAcceptAsync(_cts.Token));
@@ -458,32 +465,74 @@ namespace LANCommander.Interposer.Relay
 
         // ---- UDP ---------------------------------------------------------------------
 
-        private async Task RunUdpAsync(CancellationToken ct)
+        /// <summary>
+        /// Receives and forwards datagrams -- most of a game's traffic once UDP is up --
+        /// on a thread of its own, with blocking socket calls. Nothing on this path
+        /// touches the thread pool: forwarding over UDP is a synchronous SendTo, and a
+        /// datagram for a member still on TCP is only queued for its writer. So a host
+        /// process that starves or floods the pool cannot delay game traffic.
+        /// </summary>
+        private void RunUdp(CancellationToken ct)
         {
+            var socket = _udp!;
             var buffer = new byte[65536];
-            EndPoint any = new IPEndPoint(IPAddress.Any, 0);
 
             while (!ct.IsCancellationRequested)
             {
-                SocketReceiveFromResult result;
+                EndPoint remote = new IPEndPoint(IPAddress.Any, 0);
+                int received;
 
                 try
                 {
-                    result = await _udp!.ReceiveFromAsync(buffer, SocketFlags.None, any, ct).ConfigureAwait(false);
+                    received = socket.ReceiveFrom(buffer, SocketFlags.None, ref remote);
                 }
-                catch (OperationCanceledException) { break; }
                 catch (ObjectDisposedException) { break; }
-                catch (SocketException) { continue; }
+                catch (SocketException) { continue; } // timed out, interrupted by Stop, or ICMP noise
 
                 try
                 {
-                    HandleUdp(buffer.AsSpan(0, result.ReceivedBytes), (IPEndPoint)result.RemoteEndPoint);
+                    HandleUdp(buffer.AsSpan(0, received), (IPEndPoint)remote);
                 }
                 catch (Exception ex)
                 {
-                    _logger.LogDebug(ex, "Dropped a malformed UDP packet from {Remote}", result.RemoteEndPoint);
+                    _logger.LogDebug(ex, "Dropped a malformed UDP packet from {Remote}", remote);
                 }
             }
+        }
+
+        /// <summary>
+        /// Runs <paramref name="loop"/> on a new background thread, rather than the
+        /// shared thread pool, and returns a task that completes when it exits.
+        /// </summary>
+        private Task StartDedicatedThread(string name, Action loop)
+        {
+            var exited = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+
+            var thread = new Thread(() =>
+            {
+                try
+                {
+                    loop();
+                }
+                catch (Exception ex)
+                {
+                    _logger.LogError(ex, "{Thread} thread failed", name);
+                }
+                finally
+                {
+                    exited.TrySetResult();
+                }
+            })
+            {
+                Name         = name,
+                IsBackground = true,
+                // Game traffic is latency-sensitive; keep it ahead of the host's own
+                // work when the machine is busy.
+                Priority     = ThreadPriority.AboveNormal,
+            };
+
+            thread.Start();
+            return exited.Task;
         }
 
         private void HandleUdp(ReadOnlySpan<byte> packet, IPEndPoint remote)
