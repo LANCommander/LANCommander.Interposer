@@ -54,6 +54,19 @@ Each game socket stays a real Windows socket, so blocking, non-blocking, `select
 
 Datagrams travel over UDP to the server once the server has answered the DLL over UDP — over the TCP connection until then, and again if UDP stops getting through. TCP tunnels share the TCP connection.
 
+### Direct paths
+
+Going through the server costs a detour: a datagram from A to B travels A→server→B instead of A→B. With `Direct` on (the default) the server also introduces each pair of players, and they try to reach each other directly:
+
+1. Once a player's UDP is working, the server sends each other player who allows direct paths two things: where that player might be reached, and a key for the pair. The addresses are the public address and port the server sees the player's UDP coming from, plus the player's own LAN address when both players are behind the same public address, as at a LAN party.
+2. Both players send probes to those addresses from the same UDP socket they use for the server. Most home routers keep that socket's public port whichever host it sends to, so once both sides have sent a probe, each one's router lets the other's through (UDP hole punching).
+3. The first address to answer becomes the path, and a LAN address that answers later replaces a public one. From then on, datagrams to that player go straight to it. Broadcasts still go through the server, and so do tunnelled TCP connections.
+4. A probe every second keeps the path open. If nothing answers for 5 s, datagrams go back through the server and the probing starts over.
+
+Each pair is decided on its own, so a group can be mixed: some players direct, some through the server. A pair whose routers give each destination its own public port (carrier-grade NAT, mobile networks, some corporate firewalls) never opens a path and stays on the server. Nothing breaks either way.
+
+A direct path shows each player's public IP address to the others. Turn it off with `Direct: false` on the client, or for a whole server with `AllowDirect = false` (`--no-direct` on the test server). It needs both players to allow it, the server to allow it, and UDP.
+
 ## Options
 
 | Option | Default | Meaning |
@@ -68,6 +81,7 @@ Datagrams travel over UDP to the server once the server has answered the DLL ove
 | `TCP` | `true` | Tunnel TCP connections. |
 | `IPX` | `true` | Emulate IPX. |
 | `LoopbackBroadcasts` | `true` | Deliver the game's own broadcasts back to it, as a real LAN does. |
+| `Direct` | `true` | Send datagrams straight to other players when a direct path to them opens, and through the server otherwise. See [Direct paths](#direct-paths). |
 | `AddressTimeout` | `5000` | Milliseconds a game asking for its own address waits for the relay to assign one. After that it is told its real address. |
 
 Other players see this player under their username: `Player.Username`, or the Windows account name when that is empty (a launcher sets it per launch with `InterposerService.Username`). There is deliberately no separate relay name, so the name in the player list always matches the one the game itself uses.
@@ -115,7 +129,7 @@ await interposer.DisconnectRelayAsync();
 | `Relay` | Options for the next `Start` / `Inject`. Setting it at all — even with `Enabled = false` — installs the socket hooks, which the DLL can only do at startup. Set it whenever the launcher may want to connect later. |
 | `ConnectRelayAsync(options)` | Connect or reconnect, applying new options on top of the current ones. |
 | `DisconnectRelayAsync()` | Leave the network and stop retrying. The address stays assigned for the next connect. |
-| `GetRelayStatusAsync()` | State, virtual address, netmask, network, server, peers, UDP/TCP path, traffic counters and the last error. |
+| `GetRelayStatusAsync()` | State, virtual address, netmask, network, server, peers (with `Direct` and `DirectRtt` for each), UDP/TCP path, `DirectPeers`, traffic counters and the last error. The byte counters count traffic to and from the server only. |
 | `RelayStateChanged` | `Connecting`, `Connected`, `Reconnecting`, `Failed` (refused by the server) or `Disabled`. |
 | `RelayPeerJoined` / `RelayPeerLeft` | Other players arriving and leaving. On connecting, `RelayPeerJoined` fires once for each player already present. |
 | `PingAsync()` / `QueryConfigStringAsync(path)` | Check the control pipe, and read the game's `Config.yml` from outside the process. |
@@ -161,6 +175,7 @@ await relay.StartAsync();
 | `Port` | `41300` | TCP port, and UDP port unless `UdpPort` says otherwise. |
 | `UdpPort` | `Port` | UDP port for datagrams. Clients learn it from the server. |
 | `DisableUdp` | `false` | Carry datagrams over TCP only, for hosts that cannot open a UDP port. |
+| `AllowDirect` | `true` | Introduce players to each other so their datagrams can skip the server. See [Direct paths](#direct-paths). |
 | `VirtualSubnet` | `10.13.37.0/24` | The range addresses are handed out of. Every network shares it; networks are isolated from each other. |
 | `IpxNetwork` | `1` | The IPX network number emulated IPX sockets report. |
 | `MaxClientsPerNetwork` | `64` | Members per network. |
@@ -182,6 +197,7 @@ LANCommander.Interposer.Relay.Server.exe --port 41300 --secret letmein
 | `--port <n>` | TCP port, and UDP unless `--udp-port` is given. `0` picks a free one. |
 | `--udp-port <n>` | A separate UDP port. |
 | `--no-udp` | Datagrams over TCP only. |
+| `--no-direct` | Never introduce players to each other; every datagram goes through the server. |
 | `--bind <address>` | Address to listen on. |
 | `--subnet <cidr>` | Virtual subnet. |
 | `--secret <text>` | Require `NetworkRelay.Ticket` to equal this. Without it everyone is let in. |
@@ -199,11 +215,12 @@ Set `Logging.Relay: true`:
 2026-10-19 20:11:47  [RELAY STATE]     Connected
 2026-10-19 20:11:47  [RELAY PEER]      10.13.37.7  ->  joined: Alice
 2026-10-19 20:11:48  [RELAY]           UDP path confirmed
+2026-10-19 20:11:48  [RELAY DIRECT]    10.13.37.7  ->  via 203.0.113.24:51734, 18 ms
 2026-10-19 20:12:02  [RELAY STREAM]    10.13.37.7:27970  ->  connecting
 2026-10-19 20:12:02  [RELAY STREAM]    10.13.37.7:27970  ->  connected
 ```
 
-`Level: Debug` adds `[RELAY PORTAL]` and `[IPX BIND]`; `Level: Trace` adds a line per datagram. See [Logging](/Interposer/Logging#network-relay-operations).
+`[RELAY DIRECT]` also reports a path that stops answering. `Level: Debug` adds `[RELAY PORTAL]`, `[IPX BIND]` and `[RELAY CANDIDATES]` (the addresses the server gave for a player); `Level: Trace` adds a line per datagram. See [Logging](/Interposer/Logging#network-relay-operations).
 
 ## Limitations
 
@@ -217,22 +234,25 @@ Set `Logging.Relay: true`:
 - **`WSALookupServiceBegin` name queries** are not mapped. Of the games surveyed only embedded Chromium (`libcef.dll`) used them, for web content.
 - **A refused tunnelled connection looks like a reset,** not `WSAECONNREFUSED`: the game's `connect` completes against the local gateway before the other end has answered.
 - **Two copies of a game on one machine** cannot both use the same port, and a broadcast one of them loops back to itself can reach the other from an address it does not recognise. Set `LoopbackBroadcasts: false` for that kind of testing.
+- **Direct paths carry datagrams only.** Tunnelled TCP connections always go through the server, so a game that plays over TCP rather than UDP gets no benefit from them.
+- **A server on the players' LAN** sees LAN players by their LAN address, which is no use to a player outside. Those pairs stay on the server, which on the LAN is close to direct anyway.
 - **Traffic is not encrypted.** The ticket authenticates a client to the server; the game traffic itself travels as the game sent it.
 
 ## Protocol
 
 For anyone implementing a client or server of their own. Version 1; every integer is big-endian, a string is a `u16` byte count followed by UTF-8. The reference implementations are `dll\src\core\relay_protocol.h` and `LANCommander.Interposer.Relay\Protocol\`.
 
-**TCP** carries frames: `u16 length` (counting the type byte), `u8 type`, body. **UDP** carries packets: `u32 clientId`, `u32 udpToken`, `u8 type`, body.
+**TCP** carries frames: `u16 length` (counting the type byte), `u8 type`, body. **UDP** carries packets: `u32 clientId`, `u32 udpToken`, `u8 type`, body. Between two clients on a direct path, UDP packets carry the **sender's** `clientId` and the pair key in place of the token.
 
 | Type | Name | Direction | Body |
 |---|---|---|---|
-| `0x01` | Hello | C→S | `u8 version`, `str network`, `str ticket`, `str player`, `u32 requestedAddress` |
+| `0x01` | Hello | C→S | `u8 version`, `str network`, `str ticket`, `str player`, `u32 requestedAddress`, then optionally `u8 flags` (`0x01` = direct paths), `u32 localAddress`, `u16 localUdpPort` |
 | `0x02` | Welcome | S→C | `u32 clientId`, `u32 udpToken`, `u32 address`, `u32 netmask`, `u16 udpPort` (0 = no UDP), `u32 ipxNetwork` |
 | `0x03` | Reject | S→C | `u8 code` (1 protocol, 2 unauthorized, 3 network full, 4 bad request), `str message` |
 | `0x04` | PeerJoined | S→C | `u32 clientId`, `u32 address`, `str name` |
 | `0x05` | PeerLeft | S→C | `u32 clientId` |
 | `0x06` / `0x07` | Ping / Pong | both | `u32 nonce` |
+| `0x08` | PeerPath | S→C | `u32 clientId`, `u32 pairKey`, `u8 count`, then `count` × (`u32 address`, `u16 port`), best first |
 | `0x10` | Datagram | both, TCP or UDP | `u8 proto` (0 UDP, 1 IPX), `u32 peerAddress`, `u16 peerPort`, `u16 localPort`, `u8 ipxType`, payload |
 | `0x20` | StreamOpen | both | `u32 streamId`, `u32 peerAddress`, `u16 peerPort`, `u16 localPort` |
 | `0x21` | StreamAccept | both | `u32 streamId` |
@@ -242,9 +262,13 @@ For anyone implementing a client or server of their own. Version 1; every intege
 | `0x30` | Leave | C→S | |
 | `0x41` | UdpHello | C→S, UDP | |
 | `0x42` | UdpHelloAck | S→C, UDP | |
+| `0x43` | PeerProbe | C→C, UDP | `u32 nonce` |
+| `0x44` | PeerProbeAck | C→C, UDP | `u32 nonce`, echoed |
 
 "Peer" and "local" are from the reader's point of view. A client sending a datagram names the destination as the peer (`0xFFFFFFFF` to broadcast) and its own port as local; the server rewrites the body so the receiver sees the sender as the peer and its own port as local. Stream ids work the same way: a client numbers the streams it opens below `0x80000000`, the server numbers the ones it delivers from `0x80000000` up, and translates between the two.
 
 A client sends `UdpHello` until it is acknowledged — every 500 ms for the first 20, then every 5 s for as long as it is connected — switching its datagrams to UDP when it is, and every second after that to keep a NAT mapping open. If no acknowledgement arrives for 5 s it sends its datagrams over TCP again and goes back to probing. The server delivers datagrams to a client over UDP once that client has sent one over UDP — proof the client heard the acknowledgement — and goes back to TCP if the client does.
 
 Both ends queue the TCP connection in two lanes: control frames and datagrams ahead of stream frames (`0x20`–`0x24`), which keep their order among themselves. A datagram that falls back to TCP therefore waits behind at most one slice of stream data, not behind a whole transfer.
+
+Direct paths extend version 1 without breaking it. A server that predates them ignores Hello's trailing fields, and the server only sends `PeerPath` to a client whose Hello set the flag. On a direct path, a client sends `PeerProbe` to every candidate address, every 500 ms for the first 20 and then every 5 s, and answers each probe with `PeerProbeAck` to the address it came from. A probe from an address it was not given is added as a candidate and probed back at once. The first address to be acknowledged becomes the path, and a better-ranked one replaces it when it answers. While the path is up, the client probes it every second, tries the better-ranked candidates every fifth probe, and drops it after 5 s without an acknowledgement. A direct `Datagram` body is written in the receiver's view, with the sender as the peer, because no server rewrites it. The receiver drops one whose peer address is not the sender's.

@@ -280,6 +280,8 @@ namespace LANCommander.Interposer.Relay
             byte version;
             string network, ticket, player;
             uint requested;
+            var direct = false;
+            IPEndPoint? localCandidate = null;
 
             {
                 var reader = new PacketReader(hello.Value.Body.Span);
@@ -293,6 +295,18 @@ namespace LANCommander.Interposer.Relay
                 {
                     await RejectAsync(stream, RejectCode.BadRequest, "malformed Hello", ct).ConfigureAwait(false);
                     return null;
+                }
+
+                // Optional, so a client that predates direct paths still gets in.
+                if (reader.Remaining.Length >= 7)
+                {
+                    var flags     = reader.U8();
+                    var localIp   = reader.U32();
+                    var localPort = reader.U16();
+
+                    direct = (flags & RelayProtocol.HelloFlagDirect) != 0;
+                    if (localIp != 0 && localPort != 0)
+                        localCandidate = new IPEndPoint(Addressing.ToIPAddress(localIp), localPort);
                 }
             }
 
@@ -331,11 +345,16 @@ namespace LANCommander.Interposer.Relay
             for (;;)
             {
                 var net = _networks.GetOrAdd(networkName, name => new RelayNetwork(name, _subnet, _mask,
-                    _options.MaxClientsPerNetwork, _options.MaxStreamsPerClient, _udp != null ? SendUdpDatagram : null));
+                    _options.MaxClientsPerNetwork, _options.MaxStreamsPerClient, _udp != null ? SendUdpDatagram : null,
+                    allowDirect: _options.AllowDirect && _udp != null));
 
                 var status = net.Join(requested,
                     address => new RelayClient(id, token, address, playerName, net, remote, auth.State,
-                        _options.SendQueueLimit, _cts!.Token),
+                        _options.SendQueueLimit, _cts!.Token)
+                    {
+                        DirectCapable  = direct,
+                        LocalCandidate = localCandidate,
+                    },
                     Welcome,
                     out client);
 
@@ -482,9 +501,13 @@ namespace LANCommander.Interposer.Relay
             client.Touch();
             client.CountReceived(packet.Length);
 
-            // Follow the client across NAT rebinding: the newest source wins.
+            // Follow the client across NAT rebinding: the newest source wins. It is
+            // also where the other members can try to reach it directly.
             if (!remote.Equals(client.UdpEndPoint))
+            {
                 client.UdpEndPoint = remote;
+                client.Network.AnnounceDirectPaths(client);
+            }
 
             switch (type)
             {

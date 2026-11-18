@@ -4992,6 +4992,7 @@ struct TestRelayStatus
     unsigned __int64 datagramsReceived;
     DWORD            streamsOpen;
     wchar_t          lastError[256];
+    DWORD            directPeers;
 };
 
 static HANDLE RelayTestEvent(const std::wstring& tag, const wchar_t* name)
@@ -5035,12 +5036,16 @@ static bool NodeIs(const char node[6], const char* ip)
 }
 
 // Runs in a child process. Returns the number of failed assertions.
-static int RunRelayChild(const wchar_t* dirArg, const wchar_t* roleArg, const wchar_t* tagArg)
+// modeArg is "direct" (both peers may take a direct path, so they do) or
+// "relayed" (B has NetworkRelay.Direct off, so everything goes via the server).
+static int RunRelayChild(const wchar_t* dirArg, const wchar_t* roleArg, const wchar_t* tagArg,
+                         const wchar_t* modeArg)
 {
     std::wstring dir(dirArg);
     if (!dir.empty() && dir.back() != L'\\')
         dir += L'\\';
 
+    const bool        direct = wcscmp(modeArg, L"relayed") != 0;
     const bool        isA   = roleArg[0] == L'A';
     const std::wstring tag  = tagArg;
     const char*       own   = isA ? kRelayAddressA : kRelayAddressB;
@@ -5062,7 +5067,7 @@ static int RunRelayChild(const wchar_t* dirArg, const wchar_t* roleArg, const wc
     WSADATA wsa{};
     WSAStartup(MAKEWORD(2, 2), &wsa);
 
-    wprintf(L"\n--- Network Relay Tests (peer %ls) ---\n", roleArg);
+    wprintf(L"\n--- Network Relay Tests (peer %ls, %ls) ---\n", roleArg, direct ? L"direct" : L"relayed");
 
     HMODULE hDll = LoadLibraryW((dir + L"LANCommander.Interposer.dll").c_str());
     if (!hDll)
@@ -5125,6 +5130,38 @@ static int RunRelayChild(const wchar_t* dirArg, const wchar_t* roleArg, const wc
         }
 
         ASSERT(udp, L"N-21: datagrams move from the TCP fallback to UDP");
+
+        // N-40: with both peers allowing it, the server introduces them and a
+        // direct path opens -- over loopback, always. Every test after this one
+        // then sends its unicast datagrams straight to the other peer.
+        if (direct)
+        {
+            bool opened = false;
+            const DWORD directStart = GetTickCount();
+
+            while (getStatus && GetTickCount() - directStart < 10000)
+            {
+                TestRelayStatus st{};
+                st.size = sizeof(st);
+                if (getStatus(&st) && st.directPeers >= 1)
+                {
+                    opened = true;
+                    break;
+                }
+                Sleep(100);
+            }
+
+            ASSERT(opened, L"N-40: a direct path to the other peer opens");
+        }
+
+        // N-41: a caller built against the header before directPeers passes the
+        // shorter size and still gets its status.
+        {
+            TestRelayStatus st{};
+            st.size = static_cast<DWORD>(offsetof(TestRelayStatus, directPeers));
+            ASSERT(getStatus && getStatus(&st) && st.state == 2 && st.peerCount >= 1,
+                L"N-41: InterposerRelayGetStatus accepts the size from before directPeers");
+        }
     }
 
     const char* other     = isA ? kRelayAddressB : kRelayAddressA;
@@ -5620,6 +5657,22 @@ static int RunRelayChild(const wchar_t* dirArg, const wchar_t* roleArg, const wc
         }
     }
 
+    // N-42: the path is still up after all of the above went over it -- or,
+    // with B opted out, never opened at all, and everything went via the server.
+    {
+        using FnStatus = BOOL (*)(TestRelayStatus*);
+        auto getStatus = reinterpret_cast<FnStatus>(GetProcAddress(hDll, "InterposerRelayGetStatus"));
+
+        TestRelayStatus st{};
+        st.size = sizeof(st);
+        const bool ok = getStatus && getStatus(&st) && st.state == 2;
+
+        if (direct)
+            ASSERT(ok && st.directPeers == 1, L"N-42: the direct path stays up while traffic uses it");
+        else
+            ASSERT(ok && st.directPeers == 0, L"N-42: with one peer opted out, no direct path opens");
+    }
+
     // Neither peer leaves until both are finished: leaving early would take
     // the other's peer and streams down with it.
     SetEvent(myDone);
@@ -5726,7 +5779,8 @@ static std::wstring EnvironmentValue(const wchar_t* name)
 }
 
 static void WriteRelayFixtures(const std::wstring& interposerDir, const std::wstring& server,
-                               const std::wstring& network, const char* playerName, const char* address)
+                               const std::wstring& network, const char* playerName, const char* address,
+                               bool direct)
 {
     auto utf8 = [](const std::wstring& w)
     {
@@ -5756,7 +5810,102 @@ static void WriteRelayFixtures(const std::wstring& interposerDir, const std::wst
         "  Network: '" + networkUtf8 + "'\n"
         "  Address: '" + address + "'\n"
         "  LoopbackBroadcasts: false\n"
+        "  Direct: " + (direct ? "true" : "false") + "\n"
         "  AddressTimeout: 15000\n");
+}
+
+// One run of the two peers against a server. In "direct" mode both allow
+// direct paths, so every N- test after N-40 sends its unicast datagrams
+// straight between them; in "relayed" mode B turns Direct off and the same
+// tests go through the server.
+static void RunRelayPair(const std::wstring& server, const std::wstring& exeDir,
+                         const std::wstring& testTmpDir, const std::wstring& mode)
+{
+    const bool direct = mode == L"direct";
+
+    const std::wstring tag     = std::to_wstring(GetCurrentProcessId()) + L"_" + std::to_wstring(GetTickCount()) + L"_" + mode;
+    const std::wstring network = L"relay-test-" + tag;
+
+    struct Peer { const wchar_t* role; const char* name; const char* address; std::wstring dir; HANDLE process; };
+    Peer peers[2] =
+    {
+        { L"A", "Peer A", kRelayAddressA, testTmpDir + mode + L"RelayA\\", nullptr },
+        { L"B", "Peer B", kRelayAddressB, testTmpDir + mode + L"RelayB\\", nullptr },
+    };
+
+    const std::wstring exePath = exeDir + L"LANCommander.Interposer.Tests.exe";
+
+    for (Peer& p : peers)
+    {
+        CreateDirs(p.dir + L".interposer\\");
+        CopyFileW((exeDir + L"LANCommander.Interposer.dll").c_str(),
+                  (p.dir + L"LANCommander.Interposer.dll").c_str(), FALSE);
+        WriteRelayFixtures(p.dir + L".interposer\\", server, network, p.name, p.address,
+            direct || p.role[0] != L'B');
+
+        std::wstring command = L"\"" + exePath + L"\" --relay-peer \"" +
+            p.dir.substr(0, p.dir.size() - 1) + L"\" " + p.role + L" " + tag + L" " + mode;
+
+        STARTUPINFOW si{};
+        si.cb = sizeof(si);
+        PROCESS_INFORMATION pi{};
+
+        if (CreateProcessW(exePath.c_str(), command.data(), nullptr, nullptr, TRUE, 0,
+                nullptr, nullptr, &si, &pi))
+        {
+            CloseHandle(pi.hThread);
+            p.process = pi.hProcess;
+        }
+    }
+
+    DWORD exitA = 1, exitB = 1;
+
+    for (Peer& p : peers)
+    {
+        if (!p.process)
+            continue;
+
+        if (WaitForSingleObject(p.process, 120 * 1000) != WAIT_OBJECT_0)
+            TerminateProcess(p.process, 1);
+
+        GetExitCodeProcess(p.process, p.role[0] == L'A' ? &exitA : &exitB);
+        CloseHandle(p.process);
+    }
+
+    if (direct)
+    {
+        ASSERT(exitA == 0, L"N-00a: relay peer A reported no failures (direct)");
+        ASSERT(exitB == 0, L"N-00b: relay peer B reported no failures (direct)");
+    }
+    else
+    {
+        ASSERT(exitA == 0, L"N-00c: relay peer A reported no failures (relayed)");
+        ASSERT(exitB == 0, L"N-00d: relay peer B reported no failures (relayed)");
+    }
+
+    if (exitA != 0 || exitB != 0)
+    {
+        std::lock_guard<std::mutex> lk(g_relayServerOutputMutex);
+        wprintf(L"\n  Relay server output:\n%hs\n", g_relayServerOutput.c_str());
+    }
+
+    // Kept on failure: the peers' session logs are what explains it.
+    if (exitA != 0 || exitB != 0)
+    {
+        for (Peer& p : peers)
+            wprintf(L"  Peer %ls (%ls) log: %ls.interposer\\Logs\\\n", p.role, mode.c_str(), p.dir.c_str());
+        return;
+    }
+
+    for (Peer& p : peers)
+    {
+        DeleteFileW((p.dir + L".interposer\\Config.yml").c_str());
+        DeleteFileW((p.dir + L"LANCommander.Interposer.dll").c_str());
+        ClearLogFiles(p.dir + L".interposer\\Logs\\");
+        RemoveDirectoryW((p.dir + L".interposer\\Logs").c_str());
+        RemoveDirectoryW((p.dir + L".interposer").c_str());
+        RemoveDirectoryW(p.dir.c_str());
+    }
 }
 
 // Runs in the parent: starts (or finds) the relay server, runs both peers, and
@@ -5788,85 +5937,13 @@ static void RunRelayTests(const std::wstring& exeDir, const std::wstring& testTm
         }
     }
 
-    const std::wstring tag     = std::to_wstring(GetCurrentProcessId()) + L"_" + std::to_wstring(GetTickCount());
-    const std::wstring network = L"relay-test-" + tag;
-
-    struct Peer { const wchar_t* role; const char* name; const char* address; std::wstring dir; HANDLE process; };
-    Peer peers[2] =
-    {
-        { L"A", "Peer A", kRelayAddressA, testTmpDir + L"RelayA\\", nullptr },
-        { L"B", "Peer B", kRelayAddressB, testTmpDir + L"RelayB\\", nullptr },
-    };
-
-    const std::wstring exePath = exeDir + L"LANCommander.Interposer.Tests.exe";
-
-    for (Peer& p : peers)
-    {
-        CreateDirs(p.dir + L".interposer\\");
-        CopyFileW((exeDir + L"LANCommander.Interposer.dll").c_str(),
-                  (p.dir + L"LANCommander.Interposer.dll").c_str(), FALSE);
-        WriteRelayFixtures(p.dir + L".interposer\\", server, network, p.name, p.address);
-
-        std::wstring command = L"\"" + exePath + L"\" --relay-peer \"" +
-            p.dir.substr(0, p.dir.size() - 1) + L"\" " + p.role + L" " + tag;
-
-        STARTUPINFOW si{};
-        si.cb = sizeof(si);
-        PROCESS_INFORMATION pi{};
-
-        if (CreateProcessW(exePath.c_str(), command.data(), nullptr, nullptr, TRUE, 0,
-                nullptr, nullptr, &si, &pi))
-        {
-            CloseHandle(pi.hThread);
-            p.process = pi.hProcess;
-        }
-    }
-
-    DWORD exitA = 1, exitB = 1;
-
-    for (Peer& p : peers)
-    {
-        if (!p.process)
-            continue;
-
-        if (WaitForSingleObject(p.process, 120 * 1000) != WAIT_OBJECT_0)
-            TerminateProcess(p.process, 1);
-
-        GetExitCodeProcess(p.process, p.role[0] == L'A' ? &exitA : &exitB);
-        CloseHandle(p.process);
-    }
-
-    ASSERT(exitA == 0, L"N-00a: relay peer A reported no failures");
-    ASSERT(exitB == 0, L"N-00b: relay peer B reported no failures");
-
-    if (exitA != 0 || exitB != 0)
-    {
-        std::lock_guard<std::mutex> lk(g_relayServerOutputMutex);
-        wprintf(L"\n  Relay server output:\n%hs\n", g_relayServerOutput.c_str());
-    }
+    RunRelayPair(server, exeDir, testTmpDir, L"direct");
+    RunRelayPair(server, exeDir, testTmpDir, L"relayed");
 
     if (serverProcess)
     {
         TerminateProcess(serverProcess, 0);
         CloseHandle(serverProcess);
-    }
-
-    // Kept on failure: the peers' session logs are what explains it.
-    if (exitA != 0 || exitB != 0)
-    {
-        for (Peer& p : peers)
-            wprintf(L"  Peer %ls log: %ls.interposer\\Logs\\\n", p.role, p.dir.c_str());
-        return;
-    }
-
-    for (Peer& p : peers)
-    {
-        DeleteFileW((p.dir + L".interposer\\Config.yml").c_str());
-        DeleteFileW((p.dir + L"LANCommander.Interposer.dll").c_str());
-        ClearLogFiles(p.dir + L".interposer\\Logs\\");
-        RemoveDirectoryW((p.dir + L".interposer\\Logs").c_str());
-        RemoveDirectoryW((p.dir + L".interposer").c_str());
-        RemoveDirectoryW(p.dir.c_str());
     }
 }
 
@@ -6858,7 +6935,7 @@ int wmain(int argc, wchar_t** argv)
 
     // Re-entry from RunRelayTests: one of the two relay peers.
     if (argc >= 5 && wcscmp(argv[1], L"--relay-peer") == 0)
-        return RunRelayChild(argv[2], argv[3], argv[4]);
+        return RunRelayChild(argv[2], argv[3], argv[4], argc >= 6 ? argv[5] : L"direct");
 
     // Re-entry from RunSecondInstanceTests: two copies of the DLL in one process.
     if (argc >= 4 && wcscmp(argv[1], L"--second-instance") == 0)

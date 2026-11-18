@@ -20,6 +20,7 @@ struct RelaySettings
     bool         tcp               = true; // tunnel game TCP connections
     bool         ipx               = true; // emulate IPX on top of the relay
     bool         loopbackBroadcast = true; // deliver our own broadcasts back to us, as a LAN does
+    bool         direct            = true; // send datagrams straight to peers that can be reached
     int          addressTimeout    = 5000; // ms a local-address query waits for the first Welcome
 };
 

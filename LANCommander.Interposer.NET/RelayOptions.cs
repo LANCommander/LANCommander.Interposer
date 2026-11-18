@@ -51,6 +51,13 @@ namespace LANCommander.Interposer
         public bool? LoopbackBroadcasts { get; set; }
 
         /// <summary>
+        /// Send datagrams straight to other players whenever a direct path can be
+        /// opened, and through the server only when it cannot. Each player's public
+        /// IP address is then visible to the others. Default true.
+        /// </summary>
+        public bool? Direct { get; set; }
+
+        /// <summary>
         /// Milliseconds a game asking for its own address waits for the relay to assign
         /// one before it is answered with the real address instead. Default 5000.
         /// </summary>
@@ -88,6 +95,7 @@ namespace LANCommander.Interposer
             Add("TCP",                Bool(Tcp));
             Add("IPX",                Bool(Ipx));
             Add("LoopbackBroadcasts", Bool(LoopbackBroadcasts));
+            Add("Direct",             Bool(Direct));
             Add("AddressTimeout",     Int(AddressTimeout));
 
             return yaml.ToString();

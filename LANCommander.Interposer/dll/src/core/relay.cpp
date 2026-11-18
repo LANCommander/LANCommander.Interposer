@@ -24,7 +24,9 @@
 #include <atomic>
 #include <chrono>
 #include <condition_variable>
+#include <cstddef>
 #include <cstdio>
+#include <cstring>
 #include <cstdlib>
 #include <cwchar>
 #include <deque>
@@ -141,6 +143,8 @@ struct PeerInfo
     uint32_t     clientId;
     uint32_t     vip;
     std::wstring name;
+    bool         direct    = false; // datagrams to it skip the server
+    DWORD        directRtt = 0;     // ms over the direct path
 };
 
 std::mutex            g_statusMutex;    // guards the four below
@@ -543,6 +547,7 @@ struct Connection
     bool        rejected = false;
     bool        dead     = false;   // lost or refused; the thread loop closes it
     bool        udpConfirmed = false;
+    bool        directAllowed = false; // we asked the server for direct paths in Hello
     DWORD       connectedAt  = 0;
     DWORD       lastRx       = 0;
     DWORD       lastPing     = 0;
@@ -705,6 +710,314 @@ std::string DatagramBody(uint8_t proto, uint32_t peerVip, uint16_t peerPort, uin
     return w.buf;
 }
 
+// ---- direct paths (relay thread only) ---------------------------------------------
+//
+// The server introduces two members that both asked for it with PeerPath: the
+// addresses the other might be reached at, best first, and a key for the pair.
+// From then on each side probes those addresses from its relay UDP socket --
+// the socket whose public mapping the server observed, which is what lets the
+// probes through most NATs once both sides have sent one (hole punching). The
+// first address to answer becomes the path, and a better-ranked one that
+// answers later replaces it. Unicast datagrams to that peer go straight there;
+// everything else, and everything while there is no path, goes through the
+// server as before, so losing a path costs nothing but the detour.
+
+struct DirectPeer
+{
+    uint32_t                 clientId = 0;
+    uint32_t                 vip      = 0;
+    uint32_t                 key      = 0;
+    std::vector<sockaddr_in> candidates;  // from the server, best first; addresses a probe came from follow
+    bool                     active   = false;
+    sockaddr_in              path{};
+    size_t                   pathRank = 0;
+    DWORD                    lastProbe = 0;
+    DWORD                    lastAck   = 0;
+    int                      probes    = 0;
+    DWORD                    rtt       = 0;
+};
+
+void DeliverInbound(uint8_t proto, uint32_t peerVip, uint16_t peerPort, uint16_t localPort,
+                    uint8_t ipxType, const char* payload, size_t length);
+
+std::unordered_map<uint32_t, DirectPeer> s_direct;      // by client id
+std::unordered_map<uint32_t, uint32_t>   s_directByVip; // virtual address -> client id
+
+constexpr DWORD kDirectProbeFast  = 500;
+constexpr int   kDirectFastProbes = 20;
+constexpr DWORD kDirectProbeSlow  = 5000;
+constexpr DWORD kDirectKeepAlive  = 1000;
+constexpr DWORD kDirectLostAfter  = 5000;
+constexpr int   kDirectUpgradeEvery = 5; // keep-alives between tries of better-ranked candidates
+
+bool SameEndpoint(const sockaddr_in& a, const sockaddr_in& b)
+{
+    return a.sin_addr.s_addr == b.sin_addr.s_addr && a.sin_port == b.sin_port;
+}
+
+std::wstring EndpointText(const sockaddr_in& a)
+{
+    return EndpointToString(ntohl(a.sin_addr.s_addr), ntohs(a.sin_port));
+}
+
+size_t FindCandidate(const DirectPeer& peer, const sockaddr_in& a)
+{
+    for (size_t i = 0; i < peer.candidates.size(); ++i)
+        if (SameEndpoint(peer.candidates[i], a))
+            return i;
+    return static_cast<size_t>(-1);
+}
+
+void SendPeerPacket(const DirectPeer& peer, const sockaddr_in& to, relay::FrameType type,
+                    const char* body, size_t length)
+{
+    relay::Writer w;
+    w.buf.reserve(relay::kUdpHeader + length);
+    w.U32(s_conn.clientId);
+    w.U32(peer.key);
+    w.U8(type);
+    w.Bytes(body, length);
+
+    sendto(s_conn.udp, w.buf.data(), static_cast<int>(w.buf.size()), 0,
+        reinterpret_cast<const sockaddr*>(&to), sizeof(to));
+}
+
+void SendProbe(const DirectPeer& peer, const sockaddr_in& to)
+{
+    relay::Writer w;
+    w.U32(Ticks());
+    SendPeerPacket(peer, to, relay::PeerProbe, w.buf.data(), w.buf.size());
+}
+
+// Mirror a peer's path into the status the exports and the control pipe read.
+void PublishDirect(const DirectPeer& peer)
+{
+    std::lock_guard<std::mutex> lk(g_statusMutex);
+    for (PeerInfo& p : g_peers)
+    {
+        if (p.clientId == peer.clientId)
+        {
+            p.direct    = peer.active;
+            p.directRtt = peer.active ? peer.rtt : 0;
+        }
+    }
+}
+
+void ForgetDirect(uint32_t clientId)
+{
+    auto it = s_direct.find(clientId);
+    if (it == s_direct.end())
+        return;
+
+    s_directByVip.erase(it->second.vip);
+    s_direct.erase(it);
+}
+
+void HandlePeerPath(relay::Reader& r)
+{
+    const uint32_t clientId = r.U32();
+    const uint32_t key      = r.U32();
+    const uint8_t  count    = r.U8();
+
+    std::vector<sockaddr_in> candidates;
+    for (uint8_t i = 0; i < count; ++i)
+    {
+        const uint32_t ip   = r.U32();
+        const uint16_t port = r.U16();
+        const sockaddr_in a = Endpoint(ip, port);
+
+        if (ip && port && std::none_of(candidates.begin(), candidates.end(),
+                [&](const sockaddr_in& c) { return SameEndpoint(c, a); }))
+            candidates.push_back(a);
+    }
+
+    if (!r.Ok() || !key || candidates.empty() || !s_conn.directAllowed || s_conn.udp == INVALID_SOCKET)
+        return;
+
+    uint32_t vip = 0;
+    {
+        std::lock_guard<std::mutex> lk(g_statusMutex);
+        for (const PeerInfo& p : g_peers)
+            if (p.clientId == clientId)
+                vip = p.vip;
+    }
+
+    if (!vip)
+        return; // PeerJoined always comes first; a stale introduction
+
+    DirectPeer& peer = s_direct[clientId];
+    peer.clientId   = clientId;
+    peer.vip        = vip;
+    peer.key        = key;
+    peer.candidates = std::move(candidates);
+
+    // A path that is up stays up, even if it is not among the new candidates
+    // (an address a probe arrived from); it is then ranked after them.
+    if (peer.active)
+    {
+        peer.pathRank = FindCandidate(peer, peer.path);
+        if (peer.pathRank == static_cast<size_t>(-1))
+        {
+            peer.candidates.push_back(peer.path);
+            peer.pathRank = peer.candidates.size() - 1;
+        }
+    }
+    else
+    {
+        peer.probes    = 0;
+        peer.lastProbe = Ticks() - 60000; // probe on the next timer pass
+    }
+
+    s_directByVip[vip] = clientId;
+
+    std::wstring list;
+    for (const sockaddr_in& c : peer.candidates)
+        list += (list.empty() ? L"" : L", ") + EndpointText(c);
+
+    LogRelayDiag(L"RELAY CANDIDATES", IpToString(vip).c_str(), list.c_str());
+}
+
+void HandlePeerPacket(const sockaddr_in& from, const uint8_t* data, size_t length)
+{
+    relay::Reader r(data, length);
+    const uint32_t sender = r.U32();
+    const uint32_t key    = r.U32();
+    const uint8_t  type   = r.U8();
+
+    if (!r.Ok())
+        return;
+
+    auto it = s_direct.find(sender);
+    if (it == s_direct.end() || it->second.key != key)
+        return; // not a member we were introduced to, or not signed by the pair
+
+    DirectPeer& peer = it->second;
+
+    switch (type)
+    {
+    case relay::PeerProbe:
+    {
+        const uint32_t nonce = r.U32();
+        if (!r.Ok())
+            return;
+
+        relay::Writer w;
+        w.U32(nonce);
+        SendPeerPacket(peer, from, relay::PeerProbeAck, w.buf.data(), w.buf.size());
+
+        // A probe from an address the server did not give us is the peer's NAT
+        // showing the mapping it really uses towards us: probe it straight back
+        // rather than wait for the timer.
+        if (FindCandidate(peer, from) == static_cast<size_t>(-1))
+        {
+            peer.candidates.push_back(from);
+            if (!peer.active)
+                SendProbe(peer, from);
+        }
+        break;
+    }
+
+    case relay::PeerProbeAck:
+    {
+        const DWORD sent = r.U32();
+        if (!r.Ok())
+            return;
+
+        size_t rank = FindCandidate(peer, from);
+        if (rank == static_cast<size_t>(-1))
+        {
+            peer.candidates.push_back(from);
+            rank = peer.candidates.size() - 1;
+        }
+
+        const bool better = !peer.active || rank < peer.pathRank;
+        if (!better && !SameEndpoint(from, peer.path))
+            return; // a worse address still answering; only the path's answers keep it alive
+
+        const DWORD now = Ticks();
+        const DWORD rtt = now - sent;
+        peer.lastAck = now;
+        if (rtt < 60000)
+            peer.rtt = rtt ? rtt : 1;
+
+        if (better)
+        {
+            peer.active   = true;
+            peer.path     = from;
+            peer.pathRank = rank;
+            peer.probes   = 0;
+
+            LogRelay(L"RELAY DIRECT", IpToString(peer.vip).c_str(),
+                (L"via " + EndpointText(from) + L", " + std::to_wstring(peer.rtt) + L" ms").c_str());
+        }
+
+        PublishDirect(peer);
+        break;
+    }
+
+    case relay::Datagram:
+    {
+        const uint8_t  proto     = r.U8();
+        const uint32_t peerVip   = r.U32();
+        const uint16_t peerPort  = r.U16();
+        const uint16_t localPort = r.U16();
+        const uint8_t  ipxType   = r.U8();
+
+        // The body is in our view already; the sender must name itself.
+        if (!r.Ok() || peerVip != peer.vip)
+            return;
+
+        DeliverInbound(proto, peerVip, peerPort, localPort, ipxType,
+            reinterpret_cast<const char*>(r.Cursor()), r.Remaining());
+        break;
+    }
+
+    default:
+        break;
+    }
+}
+
+// Probe, keep alive, and notice a path that has stopped answering.
+void RunDirectTimers()
+{
+    if (s_conn.udp == INVALID_SOCKET || !s_conn.welcomed)
+        return;
+
+    for (auto& [id, peer] : s_direct)
+    {
+        if (peer.active && Elapsed(peer.lastAck, kDirectLostAfter))
+        {
+            peer.active = false;
+            peer.probes = 0;
+            peer.rtt    = 0;
+            LogRelay(L"RELAY DIRECT", IpToString(peer.vip).c_str(), L"path lost; datagrams go through the server");
+            PublishDirect(peer);
+        }
+
+        const DWORD interval = peer.active                       ? kDirectKeepAlive
+                             : peer.probes < kDirectFastProbes ? kDirectProbeFast
+                             : kDirectProbeSlow;
+
+        if (!Elapsed(peer.lastProbe, interval))
+            continue;
+
+        peer.lastProbe = Ticks();
+        ++peer.probes;
+
+        if (peer.active)
+            SendProbe(peer, peer.path);
+
+        // Without a path, every candidate. With one, now and then the ones ranked
+        // above it: a LAN address can start answering after a public one did.
+        if (!peer.active || peer.probes % kDirectUpgradeEvery == 0)
+        {
+            const size_t limit = peer.active ? peer.pathRank : peer.candidates.size();
+            for (size_t i = 0; i < limit; ++i)
+                SendProbe(peer, peer.candidates[i]);
+        }
+    }
+}
+
 // ---- datagram delivery ----------------------------------------------------------
 
 // Hand a datagram that arrived for us to the game: send it from the portal of
@@ -772,6 +1085,28 @@ void ForwardOutbound(uint8_t proto, uint32_t dstVip, uint16_t dstPort, uint16_t 
 
     if (dstVip == own || !s_conn.welcomed)
         return;
+
+    // Straight to the peer when a direct path to it is up. The body is written
+    // in the receiver's view -- we are its peer -- since no server rewrites it.
+    if (!broadcast)
+    {
+        auto byVip = s_directByVip.find(dstVip);
+        if (byVip != s_directByVip.end())
+        {
+            auto it = s_direct.find(byVip->second);
+            if (it != s_direct.end() && it->second.active)
+            {
+                const std::string body = DatagramBody(proto, own, srcPort, dstPort, ipxType, payload, length);
+                SendPeerPacket(it->second, it->second.path, relay::Datagram, body.data(), body.size());
+                ++g_datagramsSent;
+
+                if (g_logLevel >= LogLevel::Trace)
+                    LogRelayDiag(L"RELAY SEND", EndpointToString(dstVip, dstPort).c_str(),
+                        (std::to_wstring(length) + L" bytes from port " + std::to_wstring(srcPort) + L", direct").c_str());
+                return;
+            }
+        }
+    }
 
     SendDatagramBody(DatagramBody(proto, dstVip, dstPort, srcPort, ipxType, payload, length));
 
@@ -1146,6 +1481,11 @@ void CompleteInboundConnect(std::map<uint32_t, Stream>::iterator it, bool failed
 
 void ClearPeers()
 {
+    // The pair keys and the addresses died with the connection; a reconnect is
+    // introduced afresh.
+    s_direct.clear();
+    s_directByVip.clear();
+
     std::vector<PeerInfo> gone;
     {
         std::lock_guard<std::mutex> lk(g_statusMutex);
@@ -1279,6 +1619,8 @@ void HandleControlFrame(relay::FrameType type, const uint8_t* body, size_t lengt
             }
         }
 
+        ForgetDirect(clientId);
+
         if (found)
         {
             LogRelay(L"RELAY PEER", IpToString(gone.vip).c_str(), (L"left: " + gone.name).c_str());
@@ -1307,6 +1649,10 @@ void HandleControlFrame(relay::FrameType type, const uint8_t* body, size_t lengt
 
     case relay::Datagram:
         HandleDatagram(r);
+        break;
+
+    case relay::PeerPath:
+        HandlePeerPath(r);
         break;
 
     case relay::StreamOpen:
@@ -1484,6 +1830,22 @@ bool OpenConnection(const RelaySettings& cfg)
     w.Str(WideToUtf8(cfg.ticket));
     w.Str(WideToUtf8(player));
     w.U32(requested);
+
+    // Direct paths: ask to be introduced, and say where a member behind the
+    // same NAT can reach us -- our address on the route to the server, and the
+    // relay socket's port. A server that predates direct paths ignores these.
+    s_conn.directAllowed = cfg.direct && udp != INVALID_SOCKET;
+    {
+        sockaddr_in local{};
+        SockLen     localLen = sizeof(local);
+        const uint32_t localIp = getsockname(tcp, reinterpret_cast<sockaddr*>(&local), &localLen) == 0
+            ? ntohl(local.sin_addr.s_addr) : 0;
+
+        w.U8(s_conn.directAllowed ? relay::kHelloDirect : 0);
+        w.U32(s_conn.directAllowed ? localIp : 0);
+        w.U16(s_conn.directAllowed && udp != INVALID_SOCKET ? LocalPortOf(udp) : 0);
+    }
+
     SendFrame(relay::Hello, w.buf);
 
     {
@@ -1557,7 +1919,11 @@ void ReadUdp()
 
         if (from.sin_addr.s_addr != s_conn.serverUdp.sin_addr.s_addr ||
             from.sin_port != s_conn.serverUdp.sin_port)
+        {
+            if (!s_direct.empty())
+                HandlePeerPacket(from, reinterpret_cast<const uint8_t*>(s_buffer), static_cast<size_t>(n));
             continue;
+        }
 
         g_bytesReceived += static_cast<uint64_t>(n);
 
@@ -1647,6 +2013,8 @@ void RunTimers()
             LogRelay(L"RELAY", L"UDP path lost; datagrams fall back to TCP", nullptr);
         }
     }
+
+    RunDirectTimers();
 }
 
 // One wait over every socket the thread owns. A lost control connection is
@@ -2471,6 +2839,8 @@ std::wstring RelayStatusJson()
     json += L",\"network\":\"" + JsonEscape(g_networkName) + L"\"";
     json += L",\"server\":\"" + JsonEscape(g_serverName) + L"\"";
     json += L",\"lastError\":\"" + JsonEscape(g_lastError) + L"\"";
+    json += L",\"directPeers\":" + std::to_wstring(std::count_if(g_peers.begin(), g_peers.end(),
+        [](const PeerInfo& p) { return p.direct; }));
     json += L",\"peers\":[";
 
     for (size_t i = 0; i < g_peers.size(); ++i)
@@ -2478,7 +2848,9 @@ std::wstring RelayStatusJson()
         if (i) json += L",";
         json += L"{\"clientId\":" + std::to_wstring(g_peers[i].clientId);
         json += L",\"virtualAddress\":\"" + IpToString(g_peers[i].vip) + L"\"";
-        json += L",\"name\":\"" + JsonEscape(g_peers[i].name) + L"\"}";
+        json += L",\"name\":\"" + JsonEscape(g_peers[i].name) + L"\"";
+        json += L",\"direct\":" + std::wstring(g_peers[i].direct ? L"true" : L"false");
+        json += L",\"directRtt\":" + std::to_wstring(g_peers[i].directRtt) + L"}";
     }
 
     json += L"]}";
@@ -2489,16 +2861,14 @@ std::wstring RelayStatusJson()
 // Exports
 // ---------------------------------------------------------------------------
 
-extern "C" INTERPOSER_API BOOL InterposerRelayGetStatus(InterposerRelayStatus* status)
+namespace
 {
-    FORWARD_TO_PRIMARY(InterposerRelayGetStatus, status);
+// The struct as it was before directPeers was added: what a caller built
+// against an older header passes as its size.
+constexpr DWORD kRelayStatusSizeV1 = static_cast<DWORD>(offsetof(InterposerRelayStatus, directPeers));
 
-    if (!status || status->size < sizeof(InterposerRelayStatus))
-        return FALSE;
-
-    *status = InterposerRelayStatus{};
-    status->size = sizeof(InterposerRelayStatus);
-
+void FillRelayStatus(InterposerRelayStatus* status)
+{
     const uint32_t vip  = g_vip.load();
     const uint32_t mask = g_mask.load();
 
@@ -2518,7 +2888,28 @@ extern "C" INTERPOSER_API BOOL InterposerRelayGetStatus(InterposerRelayStatus* s
     CopyText(status->network, g_networkName);
     CopyText(status->server, g_serverName);
     CopyText(status->lastError, g_lastError);
-    status->peerCount = static_cast<DWORD>(g_peers.size());
+    status->peerCount   = static_cast<DWORD>(g_peers.size());
+    status->directPeers = static_cast<DWORD>(std::count_if(g_peers.begin(), g_peers.end(),
+        [](const PeerInfo& p) { return p.direct; }));
+}
+}
+
+extern "C" INTERPOSER_API BOOL InterposerRelayGetStatus(InterposerRelayStatus* status)
+{
+    FORWARD_TO_PRIMARY(InterposerRelayGetStatus, status);
+
+    // A caller built against an older header passes the shorter size and gets
+    // every field it knows about.
+    if (!status || status->size < kRelayStatusSizeV1)
+        return FALSE;
+
+    const DWORD size = status->size < sizeof(InterposerRelayStatus)
+        ? status->size : static_cast<DWORD>(sizeof(InterposerRelayStatus));
+
+    InterposerRelayStatus filled{};
+    FillRelayStatus(&filled);
+    filled.size = size;
+    std::memcpy(status, &filled, size);
     return TRUE;
 }
 

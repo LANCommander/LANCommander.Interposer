@@ -30,6 +30,14 @@ namespace LANCommander.Interposer.Relay
         public bool DisableUdp { get; set; }
 
         /// <summary>
+        /// Introduce members to each other so their datagrams can go straight between
+        /// them, through the server only when no direct path opens. Each member then
+        /// learns the others' public addresses. Applies to members whose client asks
+        /// for it (<c>NetworkRelay.Direct</c>, on by default); needs UDP. Default true.
+        /// </summary>
+        public bool AllowDirect { get; set; } = true;
+
+        /// <summary>
         /// The virtual subnet every network hands addresses out of, in CIDR form.
         /// Networks are isolated from each other, so they all share it. Defaults to a
         /// private range, because many games only list LAN servers whose address is

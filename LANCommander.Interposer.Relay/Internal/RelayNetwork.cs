@@ -1,4 +1,7 @@
 using System.Buffers.Binary;
+using System.Net;
+using System.Net.Sockets;
+using System.Security.Cryptography;
 using LANCommander.Interposer.Relay.Protocol;
 
 namespace LANCommander.Interposer.Relay.Internal
@@ -18,12 +21,14 @@ namespace LANCommander.Interposer.Relay.Internal
         private readonly int _maxMembers;
         private readonly int _maxStreams;
         private readonly Action<RelayClient, byte[]>? _sendUdpDatagram;
+        private readonly bool _allowDirect;
+        private readonly Dictionary<(uint, uint), uint> _pairKeys = new();
         private uint _nextHost = 1;
         private uint _nextStreamId;
         private bool _retired;
 
         public RelayNetwork(string name, uint subnet, uint mask, int maxMembers, int maxStreams,
-            Action<RelayClient, byte[]>? sendUdpDatagram)
+            Action<RelayClient, byte[]>? sendUdpDatagram, bool allowDirect = false)
         {
             Name             = name;
             _subnet          = subnet;
@@ -31,6 +36,7 @@ namespace LANCommander.Interposer.Relay.Internal
             _maxMembers      = maxMembers;
             _maxStreams      = maxStreams;
             _sendUdpDatagram = sendUdpDatagram;
+            _allowDirect     = allowDirect;
         }
 
         public string Name { get; }
@@ -97,6 +103,9 @@ namespace LANCommander.Interposer.Relay.Internal
                     return false;
 
                 _byAddress.Remove(client.Address);
+
+                foreach (var pair in _pairKeys.Keys.Where(k => k.Item1 == client.Id || k.Item2 == client.Id).ToArray())
+                    _pairKeys.Remove(pair);
 
                 var left = new PacketWriter(4).U32(client.Id).ToFrame(FrameType.PeerLeft);
                 foreach (var other in _members)
@@ -174,6 +183,87 @@ namespace LANCommander.Interposer.Relay.Internal
                 _sendUdpDatagram(target, body);
             else
                 target.TrySend(PacketWriter.Frame(FrameType.Datagram, body));
+        }
+
+        // ---- direct paths ----------------------------------------------------------
+
+        /// <summary>
+        /// Introduce <paramref name="client"/>, whose UDP endpoint is newly known or has
+        /// moved, to every member that can take a direct path, and them to it. Each
+        /// side is told where the other might be reached and the key the pair signs its
+        /// direct packets with; the clients take it from there, and keep sending through
+        /// the server until a path answers.
+        /// </summary>
+        public void AnnounceDirectPaths(RelayClient client)
+        {
+            if (!_allowDirect || !client.DirectCapable)
+                return;
+
+            var notices = new List<(RelayClient To, byte[] Frame)>();
+
+            lock (_lock)
+            {
+                if (!_members.Contains(client))
+                    return;
+
+                foreach (var other in _members)
+                {
+                    if (other == client || !other.DirectCapable || other.UdpEndPoint == null)
+                        continue;
+
+                    var key = PairKey(client.Id, other.Id);
+                    notices.Add((other, PeerPath(client, key, Candidates(client, other))));
+                    notices.Add((client, PeerPath(other, key, Candidates(other, client))));
+                }
+            }
+
+            foreach (var (to, frame) in notices)
+                to.TrySend(frame);
+        }
+
+        private uint PairKey(uint a, uint b)
+        {
+            var pair = a < b ? (a, b) : (b, a);
+
+            if (!_pairKeys.TryGetValue(pair, out var key))
+            {
+                do
+                    key = BinaryPrimitives.ReadUInt32BigEndian(RandomNumberGenerator.GetBytes(4));
+                while (key == 0);
+
+                _pairKeys[pair] = key;
+            }
+
+            return key;
+        }
+
+        // Where `of` might be reached by `by`, best first. Its own LAN address only
+        // means something to a member behind the same NAT, which the server sees as
+        // the same public address; to anyone else it would be a probe into a
+        // stranger's network.
+        private static List<IPEndPoint> Candidates(RelayClient of, RelayClient by)
+        {
+            var list = new List<IPEndPoint>(2);
+
+            if (of.LocalCandidate is { } local && by.RemoteEndPoint.Address.Equals(of.RemoteEndPoint.Address))
+                list.Add(local);
+
+            if (of.UdpEndPoint is { } observed && observed.AddressFamily == AddressFamily.InterNetwork &&
+                !list.Contains(observed))
+                list.Add(observed);
+
+            return list;
+        }
+
+        private static byte[] PeerPath(RelayClient peer, uint key, List<IPEndPoint> candidates)
+        {
+            var writer = new PacketWriter(16 + 6 * candidates.Count)
+                .U32(peer.Id).U32(key).U8((byte)candidates.Count);
+
+            foreach (var candidate in candidates)
+                writer.U32(Addressing.ToUInt32(candidate.Address)).U16((ushort)candidate.Port);
+
+            return writer.ToFrame(FrameType.PeerPath);
         }
 
         // ---- streams -------------------------------------------------------------

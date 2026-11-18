@@ -407,6 +407,11 @@ OptionSchema: |
           DisplayName: Loop Back Broadcasts
           Description: Deliver the game's own broadcasts back to it, as a real LAN does.
           Default: "true"
+        Direct:
+          Type: bool
+          DisplayName: Direct Connections
+          Description: Send datagrams straight to other players whenever a direct path can be opened, and through the server only when it cannot. Lower latency, but each player's public IP address is visible to the others. Both players and the server must allow it.
+          Default: "true"
         AddressTimeout:
           Type: int
           DisplayName: Address Timeout

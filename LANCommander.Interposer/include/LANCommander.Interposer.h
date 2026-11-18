@@ -325,6 +325,9 @@ typedef struct InterposerRelayStatus {
     unsigned long long datagramsReceived;
     DWORD              streamsOpen;
     wchar_t            lastError[256];
+    /* Added after the first release. A caller that sets size to the struct
+     * without this field still succeeds and gets everything before it. */
+    DWORD              directPeers;        /* peers datagrams go to directly, not through the server */
 } InterposerRelayStatus;
 
 typedef struct InterposerRelayPeer {

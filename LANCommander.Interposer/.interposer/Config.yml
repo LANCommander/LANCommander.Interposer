@@ -543,7 +543,15 @@ AudioDevices:
 #   LoopbackBroadcasts - true (default) to deliver the game's own broadcasts
 #                        back to it, as a real LAN does.
 #
-#   AddressTimeout     - Milliseconds a game asking for its own address (its
+#   Direct             - true (default) to send datagrams straight to other
+#                        players whenever a direct path to them can be opened,
+#                        and through the server only when it cannot. Cuts the
+#                        detour through the server out of the latency. Direct
+#                        paths reveal each player's public IP address to the
+#                        others; false keeps every datagram on the server.
+#                        Both players must allow it, and so must the server.
+#
+#   AddressTimeout    - Milliseconds a game asking for its own address (its
 #                        host name, its adapters) waits for the relay to assign
 #                        one before it is told the real address instead
 #                        (default 5000).
@@ -565,6 +573,7 @@ NetworkRelay:
   TCP: true
   IPX: true
   LoopbackBroadcasts: true
+  Direct: true
   AddressTimeout: 5000
 
 # ---------------------------------------------------------------------------

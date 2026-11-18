@@ -176,7 +176,7 @@ inline std::wstring RelayStatusJson()
     return L"{\"state\":0,\"stateName\":\"Disabled\",\"clientId\":0,\"virtualAddress\":\"\","
            L"\"netmask\":\"\",\"udpActive\":false,\"bytesSent\":0,\"bytesReceived\":0,"
            L"\"datagramsSent\":0,\"datagramsReceived\":0,\"streamsOpen\":0,\"network\":\"\","
-           L"\"server\":\"\",\"lastError\":\"the relay is not built into this Interposer\",\"peers\":[]}";
+           L"\"server\":\"\",\"lastError\":\"the relay is not built into this Interposer\",\"directPeers\":0,\"peers\":[]}";
 }
 
 #endif // INTERPOSER_FEATURE_RELAY

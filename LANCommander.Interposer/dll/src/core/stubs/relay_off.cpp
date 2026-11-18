@@ -4,6 +4,9 @@
 
 #include "instance.h"
 
+#include <cstddef>
+#include <cstring>
+
 extern "C" {
 
 // A zeroed status, state Disabled.
@@ -11,11 +14,16 @@ INTERPOSER_API BOOL InterposerRelayGetStatus(InterposerRelayStatus* status)
 {
     FORWARD_TO_PRIMARY(InterposerRelayGetStatus, status);
 
-    if (!status || status->size < sizeof(InterposerRelayStatus))
+    // Accepts the size of the struct before directPeers, as the relay does.
+    const DWORD oldest = static_cast<DWORD>(offsetof(InterposerRelayStatus, directPeers));
+    if (!status || status->size < oldest)
         return FALSE;
 
-    *status = InterposerRelayStatus{};
-    status->size = sizeof(InterposerRelayStatus);
+    const DWORD size = status->size < sizeof(InterposerRelayStatus)
+        ? status->size : static_cast<DWORD>(sizeof(InterposerRelayStatus));
+
+    std::memset(status, 0, size);
+    status->size = size;
     return TRUE;
 }
 

@@ -26,6 +26,20 @@
 // and its own port as local; the server rewrites them so the receiving client
 // sees the sender as the peer and its own port as local. That symmetry is what
 // lets both sides share one encoder.
+//
+// Direct paths. A client that sets kHelloDirect in Hello may be sent PeerPath
+// for another member that set it too: the addresses that member might be
+// reached at, and a key the server made for the pair. The two then exchange
+// UDP packets straight from their relay sockets, in the same layout as the
+// server's, but with the SENDER's client id and the pair key:
+//   u32 senderClientId
+//   u32 pairKey
+//   u8  type      -- PeerProbe, PeerProbeAck or Datagram
+//   ... body
+// A direct Datagram body is already in the receiver's view (the sender is the
+// peer), since no server is there to rewrite it. Broadcasts always go through
+// the server. Everything here is an extension of version 1: Hello's trailing
+// fields are optional, and PeerPath only goes to a client that asked for it.
 // ---------------------------------------------------------------------------
 
 namespace relay
@@ -54,13 +68,15 @@ namespace relay
 
     enum FrameType : uint8_t
     {
-        Hello        = 0x01, // C->S  u8 version, str network, str ticket, str player, u32 requestedVip
+        Hello        = 0x01, // C->S  u8 version, str network, str ticket, str player, u32 requestedVip,
+                             //       then optionally u8 flags (kHello*), u32 localIp, u16 localUdpPort
         Welcome      = 0x02, // S->C  u32 clientId, u32 udpToken, u32 vip, u32 netmask, u16 udpPort, u32 ipxNetwork
         Reject       = 0x03, // S->C  u8 code, str message
         PeerJoined   = 0x04, // S->C  u32 clientId, u32 vip, str name
         PeerLeft     = 0x05, // S->C  u32 clientId
         Ping         = 0x06, // both  u32 nonce
         Pong         = 0x07, // both  u32 nonce
+        PeerPath     = 0x08, // S->C  u32 clientId, u32 pairKey, u8 count, count x (u32 ip, u16 port), best first
         Datagram     = 0x10, // both  datagram body
         StreamOpen   = 0x20, // both  u32 streamId, u32 peerVip, u16 peerPort, u16 localPort
         StreamAccept = 0x21, // both  u32 streamId
@@ -71,7 +87,15 @@ namespace relay
 
         UdpHello     = 0x41, // C->S over UDP, empty -- registers/refreshes the client's UDP endpoint
         UdpHelloAck  = 0x42, // S->C over UDP, empty
+        PeerProbe    = 0x43, // C->C over UDP, u32 nonce -- opens and keeps a direct path
+        PeerProbeAck = 0x44, // C->C over UDP, u32 nonce echoed -- the path works both ways
     };
+
+    // Hello flags.
+    constexpr uint8_t kHelloDirect = 0x01; // the client can use direct paths
+
+    // u32 clientId, u32 token or pair key, u8 type.
+    constexpr size_t kUdpHeader = 4 + 4 + 1;
 
     // Datagram body:
     //   u8  proto (Proto)

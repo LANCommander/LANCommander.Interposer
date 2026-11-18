@@ -176,6 +176,7 @@ namespace LANCommander.Interposer
             public ulong DatagramsReceived;
             public uint StreamsOpen;
             [MarshalAs(UnmanagedType.ByValTStr, SizeConst = 256)] public string LastError;
+            public uint DirectPeers;
         }
 
         [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
@@ -952,7 +953,8 @@ namespace LANCommander.Interposer
                 Network           = native.Network ?? string.Empty,
                 Server            = native.Server ?? string.Empty,
                 UdpActive         = native.UdpActive != 0,
-                BytesSent         = native.BytesSent,
+                DirectPeers       = native.DirectPeers,
+                BytesSent        = native.BytesSent,
                 BytesReceived     = native.BytesReceived,
                 DatagramsSent     = native.DatagramsSent,
                 DatagramsReceived = native.DatagramsReceived,

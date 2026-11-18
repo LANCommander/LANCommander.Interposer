@@ -56,6 +56,15 @@ namespace LANCommander.Interposer.Relay.Internal
         public object? State { get; }
         public DateTimeOffset ConnectedAt { get; }
 
+        /// <summary>The client asked to be introduced to other members for direct paths.</summary>
+        public bool DirectCapable { get; init; }
+
+        /// <summary>
+        /// The client's own address and UDP port as it sees them, from Hello: where a
+        /// member behind the same NAT can reach it. Null when it did not say.
+        /// </summary>
+        public IPEndPoint? LocalCandidate { get; init; }
+
         /// <summary>Cancelled when the client is being dropped.</summary>
         public CancellationToken Closing => _cts.Token;
 

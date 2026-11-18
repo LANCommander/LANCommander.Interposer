@@ -1051,6 +1051,21 @@ static int RunRelayPeerChild(const std::string& role, const fs::path& sync)
         }
 
         ASSERT(peered, "RL-03: InterposerRelayGetStatus reports Connected with the other peer present");
+
+        // RL-18: both peers allow direct paths (the default), so the server
+        // introduces them and one opens; the tests after this one send their
+        // unicast datagrams over it.
+        bool direct = false;
+        for (int i = 0; getStatus && i < 200 && !direct; ++i)
+        {
+            InterposerRelayStatus status{};
+            status.size = sizeof(status);
+            direct = getStatus(&status) && status.directPeers >= 1;
+            if (!direct)
+                usleep(50 * 1000);
+        }
+
+        ASSERT(direct, "RL-18: a direct path to the other peer opens");
     }
 
     // RL-04: getifaddrs leads with the relay's interface.

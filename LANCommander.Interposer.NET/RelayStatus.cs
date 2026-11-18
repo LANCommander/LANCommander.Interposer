@@ -53,6 +53,10 @@ namespace LANCommander.Interposer
         [JsonPropertyName("udpActive")]
         public bool UdpActive { get; set; }
 
+        /// <summary>How many peers datagrams currently go to directly, bypassing the server.</summary>
+        [JsonPropertyName("directPeers")]
+        public uint DirectPeers { get; set; }
+
         /// <summary>Bytes sent to the relay server.</summary>
         [JsonPropertyName("bytesSent")]
         public ulong BytesSent { get; set; }
@@ -96,5 +100,19 @@ namespace LANCommander.Interposer
         /// <summary>The peer's player name.</summary>
         [JsonPropertyName("name")]
         public string Name { get; set; } = string.Empty;
+
+        /// <summary>
+        /// True while datagrams to this peer go straight to it rather than through the
+        /// relay server.
+        /// </summary>
+        [JsonPropertyName("direct")]
+        public bool Direct { get; set; }
+
+        /// <summary>
+        /// Round trip to the peer over the direct path in milliseconds; 0 when there is
+        /// no direct path.
+        /// </summary>
+        [JsonPropertyName("directRtt")]
+        public uint DirectRtt { get; set; }
     }
 }

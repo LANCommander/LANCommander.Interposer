@@ -458,6 +458,7 @@ $lines.Add("  UDP: $(Format-YamlBool (Get-BoolOption $Options 'NetworkRelay.UDP'
 $lines.Add("  TCP: $(Format-YamlBool (Get-BoolOption $Options 'NetworkRelay.TCP' $true))")
 $lines.Add("  IPX: $(Format-YamlBool (Get-BoolOption $Options 'NetworkRelay.IPX' $true))")
 $lines.Add("  LoopbackBroadcasts: $(Format-YamlBool (Get-BoolOption $Options 'NetworkRelay.LoopbackBroadcasts' $true))")
+$lines.Add("  Direct: $(Format-YamlBool (Get-BoolOption $Options 'NetworkRelay.Direct' $true))")
 $lines.Add("  AddressTimeout: $(Get-IntOption $Options 'NetworkRelay.AddressTimeout' 5000)")
 $lines.Add('')
 

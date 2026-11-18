@@ -1875,6 +1875,7 @@ static void ApplyRelayNode(const YAML::Node& node, RelaySettings& s, std::vector
     readBool("TCP", s.tcp);
     readBool("IPX", s.ipx);
     readBool("LoopbackBroadcasts", s.loopbackBroadcast);
+    readBool("Direct", s.direct);
     readInt("AddressTimeout", s.addressTimeout);
 
     if (s.port <= 0 || s.port > 65535)

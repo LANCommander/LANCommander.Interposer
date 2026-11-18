@@ -21,6 +21,7 @@ for (var i = 0; i < args.Length; i++)
     case "--port":       options.Port = int.Parse(Next(), CultureInfo.InvariantCulture); break;
     case "--udp-port":   options.UdpPort = int.Parse(Next(), CultureInfo.InvariantCulture); break;
     case "--no-udp":     options.DisableUdp = true; break;
+    case "--no-direct":  options.AllowDirect = false; break;
     case "--bind":       options.BindAddress = IPAddress.Parse(Next()); break;
     case "--subnet":     options.VirtualSubnet = Next(); break;
     case "--max-clients":options.MaxClientsPerNetwork = int.Parse(Next(), CultureInfo.InvariantCulture); break;
@@ -36,6 +37,7 @@ for (var i = 0; i < args.Length; i++)
               --port <n>         TCP port, and UDP port unless --udp-port is given (default 41300; 0 = any)
               --udp-port <n>     UDP port for datagrams
               --no-udp           carry datagrams over TCP only
+              --no-direct        never introduce clients to each other; every datagram goes through the server
               --bind <address>   address to listen on (default 0.0.0.0)
               --subnet <cidr>    virtual subnet handed out (default 10.13.37.0/24)
               --max-clients <n>  members per network (default 64)

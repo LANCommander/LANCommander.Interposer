@@ -41,12 +41,22 @@ namespace LANCommander.Interposer.Relay.Protocol
 
         /// <summary>Size of a UDP packet's header: client id, token, type.</summary>
         public const int UdpHeaderSize = 4 + 4 + 1;
+
+        /// <summary>
+        /// Set in the optional flags byte of <see cref="FrameType.Hello"/> by a client
+        /// that can use direct paths, and so may be sent <see cref="FrameType.PeerPath"/>.
+        /// </summary>
+        public const byte HelloFlagDirect = 0x01;
     }
 
     /// <summary>Relay message types. Values are part of the wire protocol.</summary>
     public enum FrameType : byte
     {
-        /// <summary>C→S: u8 version, str network, str ticket, str player, u32 requested address.</summary>
+        /// <summary>
+        /// C→S: u8 version, str network, str ticket, str player, u32 requested address,
+        /// then optionally u8 flags (<see cref="RelayProtocol.HelloFlagDirect"/>), u32 local
+        /// IPv4 address, u16 local UDP port.
+        /// </summary>
         Hello = 0x01,
         /// <summary>S→C: u32 clientId, u32 udpToken, u32 address, u32 netmask, u16 udpPort, u32 ipxNetwork.</summary>
         Welcome = 0x02,
@@ -60,6 +70,12 @@ namespace LANCommander.Interposer.Relay.Protocol
         Ping = 0x06,
         /// <summary>Either way: u32 nonce, echoed.</summary>
         Pong = 0x07,
+        /// <summary>
+        /// S→C: u32 clientId, u32 pairKey, u8 count, then count × (u32 address, u16 port),
+        /// best first: where another member might be reached directly, and the key the
+        /// two of them sign their direct packets with.
+        /// </summary>
+        PeerPath = 0x08,
         /// <summary>Either way, TCP or UDP: a datagram body.</summary>
         Datagram = 0x10,
         /// <summary>Either way: u32 streamId, u32 peerAddress, u16 peerPort, u16 localPort.</summary>
@@ -78,6 +94,10 @@ namespace LANCommander.Interposer.Relay.Protocol
         UdpHello = 0x41,
         /// <summary>S→C over UDP: the endpoint is registered.</summary>
         UdpHelloAck = 0x42,
+        /// <summary>C→C over UDP, never seen by the server: u32 nonce. Opens and keeps a direct path.</summary>
+        PeerProbe = 0x43,
+        /// <summary>C→C over UDP, never seen by the server: u32 nonce, echoed.</summary>
+        PeerProbeAck = 0x44,
     }
 
     /// <summary>The transport a relayed datagram stands for.</summary>
