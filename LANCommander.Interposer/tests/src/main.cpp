@@ -4967,6 +4967,7 @@ static void RunTrimmedEmbeddedTests(const std::wstring& exeDir, const std::wstri
 
 static const char*    kRelayAddressA = "10.13.37.10";
 static const char*    kRelayAddressB = "10.13.37.20";
+static const char*    kRelayAliasA   = "127.13.37.10"; // A's loopback alias, as a process without the hooks sees it
 static const u_short  kRelayUdpPortA = 27960;
 static const u_short  kRelayUdpPortB = 27961;
 static const u_short  kRelayTcpPortA = 27970;
@@ -5421,6 +5422,48 @@ static int RunRelayChild(const wchar_t* dirArg, const wchar_t* roleArg, const wc
             }
         }
 
+        // N-32/N-33: B connects and sends to A's loopback alias -- the address
+        // DirectPlay's dplaysvr.exe, which has no hooks, reports for a relayed
+        // sender, and which the game then connects back to. Both must arrive
+        // through the relay, from B's virtual address. On this one machine a
+        // direct loopback connection would reach A's listener too, but it
+        // would come from an untranslated 127.x address.
+        {
+            sockaddr_in peer{};
+            int peerLen = sizeof(peer);
+            SOCKET c = WaitReadable(listener, 15000)
+                ? accept(listener, reinterpret_cast<sockaddr*>(&peer), &peerLen)
+                : INVALID_SOCKET;
+
+            char buf[64]{};
+            int n = (c != INVALID_SOCKET && WaitReadable(c, 15000)) ? recv(c, buf, sizeof(buf) - 1, 0) : -1;
+
+            ASSERT(c != INVALID_SOCKET && AddressText(peer.sin_addr) == kRelayAddressB &&
+                   n == 5 && strcmp(buf, "ALIAS") == 0,
+                L"N-32: connect() to the other peer's loopback alias is relayed to it");
+
+            if (c != INVALID_SOCKET)
+                closesocket(c);
+        }
+        {
+            // B's broadcast retries in N-16 may still be queued ahead of it.
+            char buf[64]{};
+            sockaddr_in from{};
+            int n = -1;
+            for (int i = 0; i < 20 && WaitReadable(udp, 15000); ++i)
+            {
+                int fromLen = sizeof(from);
+                memset(buf, 0, sizeof(buf));
+                n = recvfrom(udp, buf, sizeof(buf) - 1, 0, reinterpret_cast<sockaddr*>(&from), &fromLen);
+                if (n == 8 && strcmp(buf, "ALIASUDP") == 0)
+                    break;
+                n = -1;
+            }
+
+            ASSERT(n == 8 && AddressText(from.sin_addr) == kRelayAddressB && ntohs(from.sin_port) == kRelayUdpPortB,
+                L"N-33: sendto() the other peer's loopback alias is relayed to it");
+        }
+
         // N-15: B's IPX broadcast arrives from B's node and socket.
         {
             char buf[64]{};
@@ -5526,6 +5569,27 @@ static int RunRelayChild(const wchar_t* dirArg, const wchar_t* roleArg, const wc
             ASSERT(n == 4 && strcmp(buf, "PONG") == 0, L"N-19: the other peer's TCP answer arrives");
 
             closesocket(c);
+        }
+
+        // N-32/N-33, B's half: A asserts what arrives.
+        {
+            SOCKET c = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
+            sockaddr_in to = RelayEndpoint(kRelayAliasA, kRelayTcpPortA);
+            if (connect(c, reinterpret_cast<sockaddr*>(&to), sizeof(to)) == 0)
+            {
+                send(c, "ALIAS", 5, 0);
+                char buf[8];
+                if (WaitReadable(c, 15000))
+                    recv(c, buf, sizeof(buf), 0); // A's close
+            }
+            closesocket(c);
+
+            sockaddr_in alias = RelayEndpoint(kRelayAliasA, kRelayUdpPortA);
+            for (int i = 0; i < 3; ++i)
+            {
+                sendto(udp, "ALIASUDP", 8, 0, reinterpret_cast<sockaddr*>(&alias), sizeof(alias));
+                Sleep(200);
+            }
         }
 
         // N-20: an IPX broadcast reaches A, and A's answer comes back from A's node.

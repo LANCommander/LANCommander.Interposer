@@ -60,6 +60,13 @@
 // side the relay thread connects to the game's listening port on loopback from
 // a socket whose local port it records, so accept() and getpeername() can
 // report the remote virtual address instead of 127.0.0.1.
+//
+// Portals and connectors standing in for another player bind to that player's
+// loopback alias (10.13.37.5 -> 127.13.37.5) rather than to 127.0.0.1, and the
+// hooks treat an alias like the virtual address it stands for. A process the
+// hooks are not in -- DirectPlay's dplaysvr.exe, which owns the enumeration
+// port -- can only ever see the loopback address, and the game connects back to
+// whatever it was told; the alias is what lets that connect find the relay.
 // ---------------------------------------------------------------------------
 
 namespace
@@ -129,14 +136,22 @@ struct Portal
     uint8_t  proto;
     uint32_t vip;        // relay::kBroadcast for a broadcast portal
     uint16_t port;
-    uint16_t localPort;  // the portal's own port on 127.0.0.1
+    uint32_t localAddr;  // the portal's own address: the endpoint's loopback alias, or 127.0.0.1
+    uint16_t localPort;  // ... and port
 };
 
 constexpr size_t kMaxPortals = 900; // leaves FD_SETSIZE room for streams
 
+// A loopback address and port as one key. Portals and connectors bind to
+// different 127.x addresses, so a port number alone may repeat.
+uint64_t LocalKey(uint32_t addrHost, uint16_t port)
+{
+    return (static_cast<uint64_t>(addrHost) << 16) | port;
+}
+
 std::mutex                              g_portalMutex;
 std::unordered_map<uint64_t, Portal*>   g_portalsByKey;
-std::unordered_map<uint16_t, Portal*>   g_portalsByLocalPort;
+std::unordered_map<uint64_t, Portal*>   g_portalsByLocal;      // LocalKey(localAddr, localPort)
 std::vector<Portal*>                    g_portals;     // never shrinks; freed at shutdown
 bool                                    g_portalLimitLogged = false;
 
@@ -152,7 +167,7 @@ struct PendingConnect
 std::mutex                                   g_streamMapMutex;
 std::unordered_map<uint16_t, PendingConnect> g_pendingConnects; // by the game socket's local port
 std::unordered_map<SOCKET, sockaddr_in>      g_socketPeers;     // game socket -> virtual peer
-std::unordered_map<uint16_t, sockaddr_in>    g_inboundPeers;    // relay connector's local port -> virtual peer
+std::unordered_map<uint64_t, sockaddr_in>    g_inboundPeers;    // relay connector's LocalKey -> virtual peer
 std::unordered_set<SOCKET>                   g_virtualLocal;    // report the virtual address from getsockname
 
 // ---- helpers --------------------------------------------------------------------
@@ -249,6 +264,49 @@ sockaddr_in Endpoint(uint32_t ipHost, uint16_t port)
     a.sin_port        = htons(port);
     a.sin_addr.s_addr = htonl(ipHost);
     return a;
+}
+
+bool IsLoopback(uint32_t ipHost)
+{
+    return (ipHost >> 24) == 127;
+}
+
+// The loopback alias of a virtual address: 10.13.37.5 is 127.13.37.5. Traffic
+// the relay delivers on behalf of another player comes from that player's
+// alias rather than from 127.0.0.1, and the hooks treat a connect or sendto to
+// an alias as one to the virtual address behind it.
+//
+// That matters for a process the hooks are not in. DirectPlay's enumeration
+// port belongs to dplaysvr.exe, which records the sender of each request as it
+// sees it -- the portal -- and the game then connects back to that address. With
+// a bare 127.0.0.1 the game cannot be told which player it means, and the reply
+// goes to its own machine; with the alias the connect hook routes it through
+// the relay. 0 when there is no alias: the broadcast address, a subnet wider
+// than /8 (the low 24 bits would not identify the address), or an address whose
+// alias would be 127.0.0.1 itself.
+uint32_t AliasFor(uint32_t vipHost)
+{
+    if (!vipHost || vipHost == relay::kBroadcast || g_mask.load() < 0xFF000000u)
+        return 0;
+
+    const uint32_t alias = 0x7F000000u | (vipHost & 0x00FFFFFFu);
+    return alias == INADDR_LOOPBACK ? 0 : alias;
+}
+
+// Bind a relay-owned socket to the alias of the virtual address it stands for,
+// or to 127.0.0.1 when there is none or the alias cannot be bound. Returns the
+// address it bound, in host order, or 0.
+uint32_t BindLocal(SOCKET s, uint32_t vipHost)
+{
+    if (const uint32_t alias = AliasFor(vipHost))
+    {
+        const sockaddr_in a = Endpoint(alias, 0);
+        if (bind(s, reinterpret_cast<const sockaddr*>(&a), sizeof(a)) == 0)
+            return alias;
+    }
+
+    const sockaddr_in a = Loopback(0);
+    return bind(s, reinterpret_cast<const sockaddr*>(&a), sizeof(a)) == 0 ? INADDR_LOOPBACK : 0;
 }
 
 void SetNonBlocking(SOCKET s)
@@ -370,8 +428,11 @@ Portal* CreatePortalLocked(uint8_t proto, uint32_t vip, uint16_t port)
     if (s == INVALID_SOCKET)
         return nullptr;
 
-    sockaddr_in local = Loopback(0);
-    if (bind(s, reinterpret_cast<const sockaddr*>(&local), sizeof(local)) != 0)
+    // A UDP portal sends from the alias of the endpoint it stands for (see
+    // AliasFor). IPX addresses are not IP addresses, so no process ever turns
+    // an IPX portal's address into a connect; those stay on 127.0.0.1.
+    const uint32_t localAddr = BindLocal(s, proto == relay::ProtoUdp ? vip : 0);
+    if (!localAddr)
     {
         closesocket(s);
         return nullptr;
@@ -384,15 +445,15 @@ Portal* CreatePortalLocked(uint8_t proto, uint32_t vip, uint16_t port)
     setsockopt(s, SOL_SOCKET, SO_RCVBUF, reinterpret_cast<const char*>(&buffer), sizeof(buffer));
     setsockopt(s, SOL_SOCKET, SO_SNDBUF, reinterpret_cast<const char*>(&buffer), sizeof(buffer));
 
-    auto* p = new Portal{ s, proto, vip, port, LocalPortOf(s) };
+    auto* p = new Portal{ s, proto, vip, port, localAddr, LocalPortOf(s) };
 
-    g_portalsByKey[PortalKey(proto, vip, port)] = p;
-    g_portalsByLocalPort[p->localPort]          = p;
+    g_portalsByKey[PortalKey(proto, vip, port)]        = p;
+    g_portalsByLocal[LocalKey(localAddr, p->localPort)] = p;
     g_portals.push_back(p);
 
     LogRelayDiag(L"RELAY PORTAL", EndpointToString(vip, port).c_str(),
-        (std::wstring(proto == relay::ProtoIpx ? L"IPX via 127.0.0.1:" : L"UDP via 127.0.0.1:")
-            + std::to_wstring(p->localPort)).c_str());
+        ((proto == relay::ProtoIpx ? L"IPX via " : L"UDP via ")
+            + EndpointToString(localAddr, p->localPort)).c_str());
 
     return p;
 }
@@ -457,7 +518,8 @@ struct Stream
     Phase       phase;
     uint32_t    peerVip;
     uint16_t    peerPort;
-    uint16_t    connectorPort;   // inbound: the local port the game's accept() sees
+    uint32_t    connectorAddr;   // inbound: the local address the game's accept() sees
+    uint16_t    connectorPort;   // ... and port
     std::string out;
     size_t      outOffset = 0;
     bool        localEof  = false; // we sent StreamClose
@@ -651,8 +713,9 @@ void ReadPortal(Portal* p)
         if (n < 0)
             return;
 
-        // Only the game, over loopback, has any business sending here.
-        if (from.sin_addr.s_addr != htonl(INADDR_LOOPBACK))
+        // Only the game, over loopback, has any business sending here. A send
+        // to an aliased portal may arrive from the alias rather than 127.0.0.1.
+        if (!IsLoopback(ntohl(from.sin_addr.s_addr)))
             continue;
 
         const uint16_t srcPort = ntohs(from.sin_port);
@@ -687,7 +750,7 @@ void DestroyStream(std::map<uint32_t, Stream>::iterator it, bool abortive)
     if (!st.outbound && st.connectorPort)
     {
         std::lock_guard<std::mutex> lk(g_streamMapMutex);
-        g_inboundPeers.erase(st.connectorPort);
+        g_inboundPeers.erase(LocalKey(st.connectorAddr, st.connectorPort));
     }
 
     LogRelayDiag(L"RELAY STREAM", EndpointToString(st.peerVip, st.peerPort).c_str(),
@@ -843,8 +906,10 @@ void HandleStreamOpen(relay::Reader& r)
         return;
     }
 
-    sockaddr_in local = Loopback(0);
-    if (bind(c, reinterpret_cast<const sockaddr*>(&local), sizeof(local)) != 0)
+    // From the caller's alias, so a listener in a process without the hooks
+    // still sees an address that leads back to the caller.
+    const uint32_t connectorAddr = BindLocal(c, peerVip);
+    if (!connectorAddr)
     {
         closesocket(c);
         reject(relay::StreamRefused);
@@ -854,7 +919,7 @@ void HandleStreamOpen(relay::Reader& r)
     const uint16_t connectorPort = LocalPortOf(c);
     {
         std::lock_guard<std::mutex> lk(g_streamMapMutex);
-        g_inboundPeers[connectorPort] = Endpoint(peerVip, peerPort);
+        g_inboundPeers[LocalKey(connectorAddr, connectorPort)] = Endpoint(peerVip, peerPort);
     }
 
     SetNonBlocking(c);
@@ -870,6 +935,7 @@ void HandleStreamOpen(relay::Reader& r)
     st.phase         = Stream::Connecting;
     st.peerVip       = peerVip;
     st.peerPort      = peerPort;
+    st.connectorAddr = connectorAddr;
     st.connectorPort = connectorPort;
     s_streams.emplace(id, std::move(st));
     g_streamsOpen = static_cast<uint32_t>(s_streams.size());
@@ -1847,7 +1913,7 @@ void ShutdownRelay(bool processTerminating)
     }
     g_portals.clear();
     g_portalsByKey.clear();
-    g_portalsByLocalPort.clear();
+    g_portalsByLocal.clear();
 }
 
 bool RelayHooksWanted()
@@ -1903,6 +1969,26 @@ static bool IsBroadcast(uint32_t ipHost)
     return mask && (ipHost & ~mask) == ~mask;
 }
 
+// The virtual address a loopback alias stands for (see AliasFor), or 0 when
+// the address is not one: 127.0.0.1, any non-loopback address, or an alias
+// outside the virtual subnet.
+static uint32_t VipForAlias(uint32_t ipHost)
+{
+    if (!IsLoopback(ipHost) || ipHost == INADDR_LOOPBACK)
+        return 0;
+
+    const uint32_t vip  = g_vip.load();
+    const uint32_t mask = g_mask.load();
+    if (!vip || mask < 0xFF000000u)
+        return 0;
+
+    const uint32_t candidate = (vip & 0xFF000000u) | (ipHost & 0x00FFFFFFu);
+    if (!RelayIsVirtualAddress(candidate) || IsBroadcast(candidate) || (candidate & ~mask) == 0)
+        return 0;
+
+    return candidate;
+}
+
 bool RelayPortalAddress(uint8_t proto, uint32_t vipHost, uint16_t port, sockaddr_in& out)
 {
     if (!RelayActive())
@@ -1912,18 +1998,19 @@ bool RelayPortalAddress(uint8_t proto, uint32_t vipHost, uint16_t port, sockaddr
     if (!p)
         return false;
 
-    out = Loopback(p->localPort);
+    out = Endpoint(p->localAddr, p->localPort);
     return true;
 }
 
 bool RelayPortalPeer(const sockaddr_in& addr, uint8_t& proto, uint32_t& vipHost, uint16_t& port)
 {
-    if (addr.sin_family != AF_INET || addr.sin_addr.s_addr != htonl(INADDR_LOOPBACK))
+    const uint32_t ip = ntohl(addr.sin_addr.s_addr);
+    if (addr.sin_family != AF_INET || !IsLoopback(ip))
         return false;
 
     std::lock_guard<std::mutex> lk(g_portalMutex);
-    auto it = g_portalsByLocalPort.find(ntohs(addr.sin_port));
-    if (it == g_portalsByLocalPort.end())
+    auto it = g_portalsByLocal.find(LocalKey(ip, ntohs(addr.sin_port)));
+    if (it == g_portalsByLocal.end())
         return false;
 
     proto   = it->second->proto;
@@ -1940,8 +2027,24 @@ bool RelayMapDatagramDestination(const sockaddr* to, int tolen, sockaddr_in& out
     if (!g_udpOn || !RelayActive())
         return false;
 
-    const auto*    in = reinterpret_cast<const sockaddr_in*>(to);
-    const uint32_t ip = ntohl(in->sin_addr.s_addr);
+    const auto* in = reinterpret_cast<const sockaddr_in*>(to);
+    uint32_t    ip = ntohl(in->sin_addr.s_addr);
+
+    // An alias the game learned from outside the hooks. A portal's own
+    // address already leads where it should; any other port on an alias is
+    // that port on the virtual address.
+    if (IsLoopback(ip))
+    {
+        uint8_t  proto = 0;
+        uint32_t vip   = 0;
+        uint16_t port  = 0;
+        if (RelayPortalPeer(*in, proto, vip, port))
+            return false;
+
+        ip = VipForAlias(ip);
+        if (!ip)
+            return false;
+    }
 
     if (!RelayIsVirtualAddress(ip))
         return false;
@@ -1977,12 +2080,22 @@ bool RelayPrepareStreamConnect(SOCKET s, const sockaddr* dst, int dstlen, sockad
     if (!g_tcpOn || !RelayActive())
         return false;
 
-    const auto*    in   = reinterpret_cast<const sockaddr_in*>(dst);
-    const uint32_t ip   = ntohl(in->sin_addr.s_addr);
-    const uint16_t port = ntohs(in->sin_port);
+    sockaddr_in    peer = *reinterpret_cast<const sockaddr_in*>(dst);
+    uint32_t       ip   = ntohl(peer.sin_addr.s_addr);
+    const uint16_t port = ntohs(peer.sin_port);
+
+    // A connect to a loopback alias -- an address the game was handed by a
+    // process without the hooks -- goes to the virtual address behind it.
+    if (const uint32_t vip = VipForAlias(ip))
+    {
+        ip = vip;
+        peer.sin_addr.s_addr = htonl(vip);
+    }
 
     if (!RelayIsVirtualAddress(ip) || IsBroadcast(ip))
         return false;
+
+    const sockaddr_in* in = &peer;
 
     if (ip == g_vip.load())
     {
@@ -2038,10 +2151,11 @@ bool RelayMapStreamPeer(SOCKET s, sockaddr* addr, int addrlen)
         return true;
     }
 
-    if (in->sin_addr.s_addr != htonl(INADDR_LOOPBACK))
+    const uint32_t ip = ntohl(in->sin_addr.s_addr);
+    if (!IsLoopback(ip))
         return false;
 
-    auto inbound = g_inboundPeers.find(ntohs(in->sin_port));
+    auto inbound = g_inboundPeers.find(LocalKey(ip, ntohs(in->sin_port)));
     if (inbound == g_inboundPeers.end())
         return false;
 
