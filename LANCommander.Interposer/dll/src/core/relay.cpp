@@ -27,6 +27,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cwchar>
+#include <deque>
 #include <iterator>
 #include <map>
 #include <mutex>
@@ -523,8 +524,18 @@ struct Connection
     sockaddr_in server{};      // TCP endpoint
     sockaddr_in serverUdp{};   // UDP endpoint, from Welcome
     std::string rx;
+    // The server connection carries two kinds of traffic: control frames and
+    // datagrams falling back from UDP, which are small and latency-sensitive,
+    // and tunnelled stream data, which can be bulk. They queue apart so a game
+    // datagram never waits behind a map download: `tx` is what is on its way to
+    // the socket (sent from txOffset), refilled from `urgent` first and only
+    // then from `bulk`, a slice at a time. Stream frames all go through `bulk`,
+    // so they keep their order relative to each other.
     std::string tx;
     size_t      txOffset = 0;
+    std::string urgent;
+    std::deque<std::string> bulk;
+    size_t      bulkBytes = 0;
     uint32_t    clientId = 0;
     uint32_t    token    = 0;
     uint16_t    udpPort  = 0;
@@ -566,29 +577,69 @@ uint32_t                   s_nextStreamId = 1;
 SOCKET                     s_gateway = INVALID_SOCKET;
 char                       s_buffer[65536];
 
+// How much stream data goes to the socket at once: the most an urgent frame
+// queued now can find ahead of it in our own buffers.
+constexpr size_t kBulkSlice = 16 * 1024;
+
+// Stop reading the game's streams while this much stream data is waiting for
+// the server connection. Anything buffered past it is only added latency.
+constexpr size_t kMaxStreamBacklog = 256 * 1024;
+
+// Datagrams falling back to TCP are dropped rather than queued past this, as a
+// congested network would drop them: a stale datagram is worse than none.
+constexpr size_t kMaxUrgentBacklog = 256 * 1024;
+
+bool RefillTx()
+{
+    s_conn.tx.clear();
+    s_conn.txOffset = 0;
+
+    if (!s_conn.urgent.empty())
+    {
+        s_conn.tx.swap(s_conn.urgent);
+        return true;
+    }
+
+    while (!s_conn.bulk.empty() && s_conn.tx.size() < kBulkSlice)
+    {
+        s_conn.bulkBytes -= s_conn.bulk.front().size();
+        s_conn.tx += s_conn.bulk.front();
+        s_conn.bulk.pop_front();
+    }
+
+    return !s_conn.tx.empty();
+}
+
 void FlushTcp()
 {
-    while (s_conn.tcp != INVALID_SOCKET && s_conn.txOffset < s_conn.tx.size())
+    while (s_conn.tcp != INVALID_SOCKET)
     {
+        if (s_conn.txOffset == s_conn.tx.size() && !RefillTx())
+            return;
+
         const int n = static_cast<int>(send(s_conn.tcp, s_conn.tx.data() + s_conn.txOffset,
-            static_cast<int>(std::min<size_t>(s_conn.tx.size() - s_conn.txOffset, 64 * 1024)), sock::kSendFlags));
+            static_cast<int>(s_conn.tx.size() - s_conn.txOffset), sock::kSendFlags));
 
         if (n <= 0)
-            break; // would block, or an error the read side will see
+            return; // would block, or an error the read side will see
 
         s_conn.txOffset += static_cast<size_t>(n);
         g_bytesSent += static_cast<uint64_t>(n);
     }
+}
 
-    if (s_conn.txOffset == s_conn.tx.size())
+bool IsStreamFrame(relay::FrameType type)
+{
+    switch (type)
     {
-        s_conn.tx.clear();
-        s_conn.txOffset = 0;
-    }
-    else if (s_conn.txOffset > 1024 * 1024)
-    {
-        s_conn.tx.erase(0, s_conn.txOffset);
-        s_conn.txOffset = 0;
+    case relay::StreamOpen:
+    case relay::StreamAccept:
+    case relay::StreamReject:
+    case relay::StreamData:
+    case relay::StreamClose:
+        return true;
+    default:
+        return false;
     }
 }
 
@@ -597,13 +648,20 @@ void SendFrame(relay::FrameType type, const std::string& body)
     if (s_conn.tcp == INVALID_SOCKET)
         return;
 
-    s_conn.tx += relay::Frame(type, body);
+    if (IsStreamFrame(type))
+    {
+        s_conn.bulk.push_back(relay::Frame(type, body));
+        s_conn.bulkBytes += s_conn.bulk.back().size();
+    }
+    else
+        s_conn.urgent += relay::Frame(type, body);
+
     FlushTcp();
 }
 
 size_t TcpBacklog()
 {
-    return s_conn.tx.size() - s_conn.txOffset;
+    return (s_conn.tx.size() - s_conn.txOffset) + s_conn.urgent.size() + s_conn.bulkBytes;
 }
 
 void SendUdpPacket(relay::FrameType type, const std::string& body)
@@ -625,8 +683,10 @@ void SendDatagramBody(const std::string& body)
 {
     if (s_conn.udpConfirmed && s_conn.udp != INVALID_SOCKET)
         SendUdpPacket(relay::Datagram, body);
-    else
+    else if (s_conn.urgent.size() < kMaxUrgentBacklog)
         SendFrame(relay::Datagram, body);
+    else
+        return;
 
     ++g_datagramsSent;
 }
@@ -1556,18 +1616,30 @@ void RunTimers()
 
     if (s_conn.udpPort && s_conn.udp != INVALID_SOCKET)
     {
-        // Probe quickly until the server answers, then refresh the NAT mapping
-        // every 15 s. If the answers stop, fall back to TCP rather than send
-        // datagrams into a hole.
-        const DWORD interval = s_conn.udpConfirmed ? 15000 : 500;
-        if ((s_conn.udpConfirmed || s_conn.udpHellos < 20) && Elapsed(s_conn.lastUdpHello, interval))
+        // Probe quickly until the server answers, then once a second: that
+        // keeps the NAT mapping open and notices a dead path within
+        // kUdpLostAfter, after which datagrams fall back to TCP rather than go
+        // into a hole. A path that does not answer the quick probes is retried
+        // slowly for as long as the connection lasts, so a blackout longer
+        // than the quick probes does not leave datagrams on TCP for good.
+        constexpr DWORD kUdpProbeFast  = 500;
+        constexpr int   kUdpFastProbes = 20;
+        constexpr DWORD kUdpProbeSlow  = 5000;
+        constexpr DWORD kUdpKeepAlive  = 1000;
+        constexpr DWORD kUdpLostAfter  = 5000;
+
+        const DWORD interval = s_conn.udpConfirmed ? kUdpKeepAlive
+                             : s_conn.udpHellos < kUdpFastProbes ? kUdpProbeFast
+                             : kUdpProbeSlow;
+
+        if (Elapsed(s_conn.lastUdpHello, interval))
         {
             s_conn.lastUdpHello = Ticks();
             ++s_conn.udpHellos;
             SendUdpPacket(relay::UdpHello, {});
         }
 
-        if (s_conn.udpConfirmed && Elapsed(s_conn.lastUdpAck, 50000))
+        if (s_conn.udpConfirmed && Elapsed(s_conn.lastUdpAck, kUdpLostAfter))
         {
             s_conn.udpConfirmed = false;
             s_conn.udpHellos    = 0;
@@ -1593,9 +1665,9 @@ void Pump(DWORD timeoutMs)
     if (s_conn.udp != INVALID_SOCKET)
         set.Add(s_conn.udp, true, false);
 
-    // Stop reading game streams while the control connection is backed up, so
-    // a fast sender cannot grow the queue without bound.
-    const bool readStreams = TcpBacklog() < 2 * 1024 * 1024;
+    // Stop reading game streams while their queue to the server is backed up,
+    // so a fast sender cannot grow it without bound, or into seconds of delay.
+    const bool readStreams = s_conn.bulkBytes < kMaxStreamBacklog;
 
     for (auto& [id, st] : s_streams)
     {
